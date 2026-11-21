@@ -1,4 +1,4 @@
-# Agent Job Pipeline (working title)
+# quota-fleet
 
 A design and specification for running a **fleet of coding agents on flat-rate
 subscription quotas**, with a verification pipeline that makes their output
@@ -74,4 +74,4 @@ the missing control plane around them.
 
 ## License
 
-To be decided.
+MIT — see [LICENSE](LICENSE).
