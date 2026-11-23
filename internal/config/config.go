@@ -23,6 +23,11 @@ const (
 	DefaultReconcileInterval = 30 * time.Second
 	DefaultStaleClaimedAfter = 15 * time.Minute
 	DefaultSignalMaxBytes    = int64(1 << 20) // 1 MiB
+
+	// PromptStyleStdin passes prompt.txt to the agent via stdin redirection (`< prompt.txt`).
+	PromptStyleStdin = "stdin"
+	// PromptStyleArgument passes prompt.txt contents as a command-line argument (`"$(cat prompt.txt)"`).
+	PromptStyleArgument = "argument"
 )
 
 // Config represents the quota-fleet configuration loaded from fleet.yaml.
@@ -165,6 +170,7 @@ type AgentConfig struct {
 	Resume         string `yaml:"resume"`
 	SessionLogGlob string `yaml:"session_log_glob"`
 	SandboxFlag    string `yaml:"sandbox_flag"`
+	PromptStyle    string `yaml:"prompt_style"`
 }
 
 // PoolConfig defines a quota pool.
@@ -232,6 +238,12 @@ func (c *Config) Validate() error {
 		}
 		if sk := strings.TrimSpace(h.StrictHostKeyChecking); sk != "" && sk != "yes" && sk != "accept-new" && sk != "no" {
 			errs = append(errs, fmt.Errorf("hosts.%s.strict_host_key_checking must be \"yes\", \"accept-new\", or \"no\" (got %q)", name, h.StrictHostKeyChecking))
+		}
+	}
+
+	for name, a := range c.Agents {
+		if ps := strings.TrimSpace(a.PromptStyle); ps != "" && ps != PromptStyleStdin && ps != PromptStyleArgument {
+			errs = append(errs, fmt.Errorf("agents.%s.prompt_style must be %q or %q (got %q)", name, PromptStyleStdin, PromptStyleArgument, a.PromptStyle))
 		}
 	}
 

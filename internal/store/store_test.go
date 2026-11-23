@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1125,5 +1126,56 @@ func TestWorktreeSpecPersistence(t *testing.T) {
 	}
 	if plain.WorktreeSpec != nil {
 		t.Fatalf("plain WorktreeSpec = %+v, want nil", plain.WorktreeSpec)
+	}
+}
+
+func TestOpenRelativePath(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	cases := []string{
+		"state/fleet.db",
+		"fleet.db",
+		"./nested/sub/fleet.db",
+	}
+
+	for _, relPath := range cases {
+		t.Run(relPath, func(t *testing.T) {
+			st, err := Open(ctx, relPath, Options{InstanceID: "rel-inst"})
+			if err != nil {
+				t.Fatalf("Open(%q): %v", relPath, err)
+			}
+			defer func() {
+				if cerr := st.Close(); cerr != nil {
+					t.Errorf("Close(%q): %v", relPath, cerr)
+				}
+			}()
+
+			mode, err := st.JournalMode(ctx)
+			if err != nil {
+				t.Fatalf("JournalMode(%q): %v", relPath, err)
+			}
+			if strings.ToLower(mode) != "wal" {
+				t.Errorf("JournalMode(%q) = %q, want wal", relPath, mode)
+			}
+
+			j, created, err := st.CreateJob(ctx, CreateJobParams{
+				RequestID: "rel-" + relPath,
+				Title:     "Relative DB path test",
+			})
+			if err != nil || !created {
+				t.Fatalf("CreateJob(%q): created=%v err=%v", relPath, created, err)
+			}
+			got, err := st.GetJob(ctx, j.ID)
+			if err != nil || got.Title != "Relative DB path test" {
+				t.Fatalf("GetJob(%q): job=%+v err=%v", relPath, got, err)
+			}
+
+			expectedFile := filepath.Join(tmpDir, filepath.FromSlash(relPath))
+			if _, err := os.Stat(expectedFile); err != nil {
+				t.Errorf("expected DB file at %q: %v", expectedFile, err)
+			}
+		})
 	}
 }

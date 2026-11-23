@@ -60,6 +60,7 @@ agents:
     sandbox_flag: "--dangerously-bypass-approvals-and-sandbox"
   agy:
     launch: "agy --print --model {model}"
+    prompt_style: argument
 
 pools:
   claude:
@@ -117,6 +118,9 @@ future_unknown_key:
 	}
 	if cfg.Agents["claude"].Resume != "claude -p --resume {session_id}" {
 		t.Errorf("claude resume = %q", cfg.Agents["claude"].Resume)
+	}
+	if cfg.Agents["agy"].PromptStyle != PromptStyleArgument {
+		t.Errorf("agy prompt_style = %q, want %q", cfg.Agents["agy"].PromptStyle, PromptStyleArgument)
 	}
 	if !cfg.Pools["agy-argon"].Unmeasured {
 		t.Errorf("agy-argon unmeasured = false, want true")
@@ -200,6 +204,20 @@ hosts:
     os: plan9
 `,
 			wantErr: "os",
+		},
+		{
+			name: "invalid agent prompt_style",
+			yaml: `
+instance_id: "inst-1"
+limits:
+  max_claimed: 1
+  attempts_cap: 1
+agents:
+  agy:
+    launch: "agy --print"
+    prompt_style: env
+`,
+			wantErr: "prompt_style",
 		},
 	}
 

@@ -778,3 +778,239 @@ func TestLauncherPrepareAndLaunchFailureRecorded(t *testing.T) {
 		t.Errorf("j2 = status:%s last_error:%q", g2.Status, g2.LastError)
 	}
 }
+
+type spyEvaluator struct {
+	mu       sync.Mutex
+	calls    int
+	lastEv   adapter.Evidence
+	delegate evaluator.Evaluator
+}
+
+func (s *spyEvaluator) Evaluate(ctx context.Context, job *store.Job, ev adapter.Evidence) (evaluator.Result, error) {
+	s.mu.Lock()
+	s.calls++
+	s.lastEv = ev
+	s.mu.Unlock()
+	if s.delegate != nil {
+		return s.delegate.Evaluate(ctx, job, ev)
+	}
+	return evaluator.Result{Passed: true}, nil
+}
+
+func (s *spyEvaluator) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func (s *spyEvaluator) LastEvidence() adapter.Evidence {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastEv
+}
+
+func TestShepherdNonZeroExitFailsWithoutEvaluator(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openTestStore(t, "shepherd-exit-code")
+	recNotifier := &recordingNotifier{}
+	spyEval := &spyEvaluator{delegate: evaluator.NewAlwaysPass()}
+	mockAdapter := adapter.NewMock(adapter.MockOptions{})
+
+	shepherd := NewShepherd(ShepherdOptions{
+		Store:     st,
+		Adapter:   mockAdapter,
+		Evaluator: spyEval,
+		Notifier:  recNotifier,
+		Logger:    discardLogger(),
+	})
+
+	// 1. Non-zero exit code (2): must fail directly WITHOUT calling Evaluator,
+	// recording exit code and agent.log tail in both last_error and result_text.
+	jFail, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "nonzero-1",
+		Title:              "Agy bad flag failure",
+		AcceptanceCriteria: "always pass criterion",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob jFail: %v", err)
+	}
+	claimedFail, ok, err := st.Claim(ctx, 2)
+	if err != nil || !ok || claimedFail.ID != jFail.ID {
+		t.Fatalf("Claim jFail: ok=%v err=%v", ok, err)
+	}
+
+	logTail := "flag needs an argument: -print\nUsage of agy:\n  --print  Run a single prompt"
+	mockAdapter.SetJobBehavior(jFail.ID, adapter.MockBehavior{
+		ExitAfterPolls: 1,
+		ExitCode:       2,
+		Evidence: &adapter.Evidence{
+			FinalReport: logTail,
+			ExitCode:    2,
+		},
+	})
+	if _, err := mockAdapter.Launch(ctx, claimedFail); err != nil {
+		t.Fatalf("Launch jFail: %v", err)
+	}
+
+	if err := shepherd.SweepOnce(ctx); err != nil {
+		t.Fatalf("SweepOnce (non-zero): %v", err)
+	}
+
+	if spyEval.Calls() != 0 {
+		t.Fatalf("Evaluator.Evaluate calls = %d, want 0 for non-zero exit code", spyEval.Calls())
+	}
+
+	gotFail, err := st.GetJob(ctx, jFail.ID)
+	if err != nil {
+		t.Fatalf("GetJob jFail: %v", err)
+	}
+	if gotFail.Status != store.StatusFailed {
+		t.Fatalf("jFail status = %s, want failed", gotFail.Status)
+	}
+	if gotFail.DeliveredAt == nil {
+		t.Errorf("jFail DeliveredAt = nil, want non-nil")
+	}
+	if !strings.Contains(gotFail.LastError, "2") || !strings.Contains(gotFail.LastError, "flag needs an argument: -print") {
+		t.Errorf("jFail LastError missing exit code or log tail: %q", gotFail.LastError)
+	}
+	if !strings.Contains(gotFail.ResultText, "exit_code: 2") || !strings.Contains(gotFail.ResultText, logTail) {
+		t.Errorf("jFail ResultText missing exit code or log tail:\n%s", gotFail.ResultText)
+	}
+
+	// 2. Zero exit code (0): must call Evaluator with Evidence.ExitCode == 0 and transition to done.
+	jOK, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "zero-1",
+		Title:              "Normal exit 0 job",
+		AcceptanceCriteria: "passes cleanly",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob jOK: %v", err)
+	}
+	claimedOK, ok, err := st.Claim(ctx, 2)
+	if err != nil || !ok || claimedOK.ID != jOK.ID {
+		t.Fatalf("Claim jOK: ok=%v err=%v", ok, err)
+	}
+	mockAdapter.SetJobBehavior(jOK.ID, adapter.MockBehavior{
+		ExitAfterPolls: 1,
+		ExitCode:       0,
+	})
+	if _, err := mockAdapter.Launch(ctx, claimedOK); err != nil {
+		t.Fatalf("Launch jOK: %v", err)
+	}
+
+	if err := shepherd.SweepOnce(ctx); err != nil {
+		t.Fatalf("SweepOnce (zero): %v", err)
+	}
+
+	if spyEval.Calls() != 1 {
+		t.Fatalf("Evaluator.Evaluate calls = %d, want 1 for exit code 0", spyEval.Calls())
+	}
+	if spyEval.LastEvidence().ExitCode != 0 {
+		t.Errorf("Evaluator received ExitCode = %d, want 0", spyEval.LastEvidence().ExitCode)
+	}
+	gotOK, err := st.GetJob(ctx, jOK.ID)
+	if err != nil {
+		t.Fatalf("GetJob jOK: %v", err)
+	}
+	if gotOK.Status != store.StatusDone {
+		t.Fatalf("jOK status = %s, want done", gotOK.Status)
+	}
+}
+
+func TestE2ENonZeroExitFailsJobAndCancelsChild(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, stateDir := openTestStore(t, "e2e-nonzero-exit")
+	logTail := "flag needs an argument: -print\nfatal error on stderr"
+	mockAdapter := adapter.NewMock(adapter.MockOptions{
+		Default: adapter.MockBehavior{
+			ExitAfterPolls: 1,
+			ExitCode:       2,
+			Evidence: &adapter.Evidence{
+				FinalReport: logTail,
+				ExitCode:    2,
+			},
+		},
+	})
+
+	// Even with AlwaysPassEvaluator, a non-zero exit code must mark the job failed.
+	rt, err := New(Options{
+		Store:             st,
+		Adapter:           mockAdapter,
+		Evaluator:         evaluator.NewAlwaysPass(),
+		InstanceID:        "e2e-nonzero-exit",
+		StateDir:          stateDir,
+		MaxClaimed:        2,
+		AttemptsCap:       3,
+		DispatchInterval:  10 * time.Millisecond,
+		ShepherdInterval:  10 * time.Millisecond,
+		ReconcileInterval: 25 * time.Millisecond,
+		StaleClaimedAfter: 5 * time.Second,
+		Logger:            discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("runtime.New: %v", err)
+	}
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("runtime.Start: %v", err)
+	}
+	defer rt.Stop()
+
+	parent, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "e2e-nz-parent",
+		Title:              "Agy job exiting with 2",
+		Agent:              "agy",
+		Host:               "ubuntu",
+		Workdir:            "/work/demo",
+		AcceptanceCriteria: "should not pass on non-zero exit",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob parent: %v", err)
+	}
+	parentID := parent.ID
+	child, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID: "e2e-nz-child",
+		Title:     "Child depending on failing agy job",
+		ParentID:  &parentID,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob child: %v", err)
+	}
+
+	waitUntil(t, 3*time.Second, "parent failed+delivered and child cancelled", func() bool {
+		p, err1 := st.GetJob(ctx, parent.ID)
+		c, err2 := st.GetJob(ctx, child.ID)
+		return err1 == nil && err2 == nil &&
+			p.Status == store.StatusFailed && p.DeliveredAt != nil &&
+			c.Status == store.StatusCancelled
+	})
+
+	gotParent, err := st.GetJob(ctx, parent.ID)
+	if err != nil {
+		t.Fatalf("GetJob parent: %v", err)
+	}
+	if !strings.Contains(gotParent.LastError, "2") || !strings.Contains(gotParent.LastError, "flag needs an argument: -print") {
+		t.Errorf("parent LastError = %q, want exit code 2 and log tail", gotParent.LastError)
+	}
+	if !strings.Contains(gotParent.ResultText, "exit_code: 2") || !strings.Contains(gotParent.ResultText, logTail) {
+		t.Errorf("parent ResultText:\n%s", gotParent.ResultText)
+	}
+	if mockAdapter.LaunchCalls(child.ID) != 0 {
+		t.Errorf("child LaunchCalls = %d, want 0", mockAdapter.LaunchCalls(child.ID))
+	}
+
+	// Verify delivery payload records status="failed" and last_error.
+	deliveryPath := filepath.Join(stateDir, "deliveries", fmt.Sprintf("job-%d.json", parent.ID))
+	data, err := os.ReadFile(deliveryPath)
+	if err != nil {
+		t.Fatalf("read delivery file: %v", err)
+	}
+	var payload DeliveryPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal delivery file: %v", err)
+	}
+	if payload.Status != "failed" || !strings.Contains(payload.LastError, "2") {
+		t.Errorf("unexpected delivery payload: %+v", payload)
+	}
+}

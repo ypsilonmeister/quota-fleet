@@ -11,6 +11,16 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
+// PromptStyle controls how prompt.txt is delivered to an agent CLI in run.sh.
+type PromptStyle string
+
+const (
+	// PromptStyleStdin redirects prompt.txt to the agent's standard input (`< prompt.txt`).
+	PromptStyleStdin PromptStyle = config.PromptStyleStdin
+	// PromptStyleArgument reads prompt.txt at runtime and passes its contents as an argument (`"$(cat prompt.txt)"`).
+	PromptStyleArgument PromptStyle = config.PromptStyleArgument
+)
+
 // AgentDriver holds resolved, config-driven execution metadata for a single agent on a host.
 type AgentDriver struct {
 	Name                string
@@ -19,6 +29,7 @@ type AgentDriver struct {
 	Resume              string
 	SessionLogGlob      string
 	SandboxFlag         string
+	PromptStyle         PromptStyle
 	CommandOverride     string
 	Env                 map[string]string
 	ForceStdinNoDevNull bool
@@ -31,6 +42,7 @@ type defaultDriverSpec struct {
 	preflight           string
 	launch              string
 	sessionLogGlob      string
+	promptStyle         PromptStyle
 	forceStdinNoDevNull bool
 }
 
@@ -39,16 +51,19 @@ var builtinDriverDefaults = map[string]defaultDriverSpec{
 		preflight:      "claude --version",
 		launch:         "claude -p --model {model}",
 		sessionLogGlob: "~/.claude/projects/*/*.jsonl",
+		promptStyle:    PromptStyleStdin,
 	},
 	"codex": {
 		preflight:           "codex --version",
 		launch:              "codex exec",
 		sessionLogGlob:      "~/.codex/sessions/*/*.jsonl",
+		promptStyle:         PromptStyleStdin,
 		forceStdinNoDevNull: true,
 	},
 	"agy": {
-		preflight: "agy --version",
-		launch:    "agy --print --model {model}",
+		preflight:   "agy --version",
+		launch:      "agy --model {model} --print",
+		promptStyle: PromptStyleArgument,
 	},
 }
 
@@ -61,13 +76,17 @@ func ResolveDriver(cfg *config.Config, host config.HostConfig, agentName string)
 	}
 
 	drv := AgentDriver{
-		Name: name,
+		Name:        name,
+		PromptStyle: PromptStyleStdin,
 	}
 
 	if def, ok := builtinDriverDefaults[name]; ok {
 		drv.Preflight = def.preflight
 		drv.Launch = def.launch
 		drv.SessionLogGlob = def.sessionLogGlob
+		if def.promptStyle != "" {
+			drv.PromptStyle = def.promptStyle
+		}
 		drv.ForceStdinNoDevNull = def.forceStdinNoDevNull
 	}
 
@@ -87,6 +106,17 @@ func ResolveDriver(cfg *config.Config, host config.HostConfig, agentName string)
 			}
 			if strings.TrimSpace(ac.SandboxFlag) != "" {
 				drv.SandboxFlag = strings.TrimSpace(ac.SandboxFlag)
+			}
+			if ps := strings.TrimSpace(ac.PromptStyle); ps != "" {
+				switch PromptStyle(ps) {
+				case PromptStyleStdin:
+					drv.PromptStyle = PromptStyleStdin
+				case PromptStyleArgument:
+					drv.PromptStyle = PromptStyleArgument
+					drv.ForceStdinNoDevNull = false
+				default:
+					return AgentDriver{}, fmt.Errorf("adapter: agent %q has unsupported prompt_style %q", name, ps)
+				}
 			}
 		}
 	}
@@ -200,15 +230,33 @@ func (d AgentDriver) BuildLaunchCommand(job *store.Job, workdir, promptFile, log
 
 	cmd := strings.Join(expanded, " ")
 
-	// Wire prompt stdin and log redirections.
-	// Codex always receives prompt.txt on stdin and must NEVER get `</dev/null`.
-	// Other agents also receive prompt.txt on stdin unless their template used `{prompt_file}`.
-	if d.ForceStdinNoDevNull || !usedPromptPlaceholder {
-		cmd = fmt.Sprintf("%s < %s > %s 2>&1", cmd, shellPath(promptFile), shellPath(logFile))
-	} else {
-		cmd = fmt.Sprintf("%s </dev/null > %s 2>&1", cmd, shellPath(logFile))
+	// Wire prompt delivery (argument vs stdin) and log redirections.
+	switch d.effectivePromptStyle() {
+	case PromptStyleArgument:
+		if usedPromptPlaceholder {
+			cmd = fmt.Sprintf("%s </dev/null > %s 2>&1", cmd, shellPath(logFile))
+		} else {
+			cmd = fmt.Sprintf(`%s "$(cat %s)" </dev/null > %s 2>&1`, cmd, shellPath(promptFile), shellPath(logFile))
+		}
+	default:
+		// Codex always receives prompt.txt on stdin and must NEVER get `</dev/null`.
+		// Other stdin-style agents also receive prompt.txt on stdin unless their template used `{prompt_file}`.
+		if d.ForceStdinNoDevNull || !usedPromptPlaceholder {
+			cmd = fmt.Sprintf("%s < %s > %s 2>&1", cmd, shellPath(promptFile), shellPath(logFile))
+		} else {
+			cmd = fmt.Sprintf("%s </dev/null > %s 2>&1", cmd, shellPath(logFile))
+		}
 	}
 	return cmd, nil
+}
+
+func (d AgentDriver) effectivePromptStyle() PromptStyle {
+	switch PromptStyle(strings.TrimSpace(string(d.PromptStyle))) {
+	case PromptStyleArgument:
+		return PromptStyleArgument
+	default:
+		return PromptStyleStdin
+	}
 }
 
 // ShouldAttachSandboxFlag implements the explicit sandbox relaxation policy (design §5):

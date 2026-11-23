@@ -44,7 +44,8 @@ type Store struct {
 // Open opens (or creates) the SQLite database at dbPath, enables WAL mode and
 // busy_timeout, serializes writes on a single connection, and ensures the schema exists.
 func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
-	if strings.TrimSpace(dbPath) == "" {
+	dbPath = strings.TrimSpace(dbPath)
+	if dbPath == "" {
 		return nil, fmt.Errorf("%w: db path must not be empty", ErrInvalidInput)
 	}
 	busyMS := opts.BusyTimeoutMS
@@ -57,8 +58,14 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 	}
 
 	isMem := isMemoryPath(dbPath)
+	resolvedPath := dbPath
 	if !isMem {
-		dir := filepath.Dir(dbPath)
+		absPath, err := filepath.Abs(dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve db path %q: %w", dbPath, err)
+		}
+		resolvedPath = absPath
+		dir := filepath.Dir(resolvedPath)
 		if dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return nil, fmt.Errorf("create db parent dir: %w", err)
@@ -66,7 +73,7 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		}
 	}
 
-	dsn := buildDSN(dbPath, busyMS, isMem)
+	dsn := buildDSN(resolvedPath, busyMS, isMem)
 
 	writeDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -127,9 +134,13 @@ func buildDSN(dbPath string, busyMS int, isMem bool) string {
 	if isMem {
 		return dbPath
 	}
+	slashPath := filepath.ToSlash(dbPath)
+	if !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
 	u := url.URL{
 		Scheme: "file",
-		Path:   dbPath,
+		Path:   slashPath,
 	}
 	q := url.Values{}
 	q.Add("_pragma", "journal_mode(WAL)")

@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -298,8 +301,8 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		}
 	})
 
-	// 3. Agy on ubuntu: host command override (`~/.local/bin/agy`) + empty model strips `--model {model}`.
-	t.Run("agy launch applies host command override and omits empty model", func(t *testing.T) {
+	// 3. Agy on ubuntu: host command override (`~/.local/bin/agy`), argument prompt style, and empty model omits `--model`.
+	t.Run("agy launch applies host command override, argument prompt style, and omits empty model", func(t *testing.T) {
 		fake := NewFakeTransport()
 		fake.OnContains("setsid nohup", CommandResult{Stdout: "7777\n"}, nil)
 		a := NewSSHAdapter(cfg, SSHAdapterOptions{Transport: fake})
@@ -311,7 +314,7 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 			Host:         "ubuntu",
 			Workdir:      "~/agent-work/job-12",
 			Model:        "",
-			Instructions: "Summarize changes.",
+			Instructions: "Summarize changes with $HOME and 'quotes'.",
 		}
 
 		if _, err := a.Launch(ctx, job); err != nil {
@@ -319,13 +322,165 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		}
 
 		calls := fake.Calls()
-		_, runSh := extractBase64Payloads(t, calls[0].Command)
-		wantCmd := `"$HOME"/'.local/bin/agy' --print < "$HOME"/'agent-work/job-12/prompt.txt' > "$HOME"/'agent-work/job-12/agent.log' 2>&1`
+		promptText, runSh := extractBase64Payloads(t, calls[0].Command)
+		if !strings.Contains(promptText, "Summarize changes with $HOME and 'quotes'.") {
+			t.Errorf("promptText = %q", promptText)
+		}
+		wantCmd := `"$HOME"/'.local/bin/agy' --print "$(cat "$HOME"/'agent-work/job-12/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-12/agent.log' 2>&1`
 		if !strings.Contains(runSh, wantCmd) {
 			t.Errorf("agy run.sh missing expected launch line %q:\n%s", wantCmd, runSh)
 		}
+		if strings.Contains(runSh, "< \"$HOME\"/'agent-work/job-12/prompt.txt'") {
+			t.Errorf("agy run.sh must not pass prompt via stdin redirection:\n%s", runSh)
+		}
+		if strings.Contains(runSh, "Summarize changes") {
+			t.Errorf("agy run.sh must read prompt from file at runtime rather than embedding prompt text:\n%s", runSh)
+		}
 		if strings.Contains(runSh, "--model") || strings.Contains(runSh, "{model}") {
 			t.Errorf("agy run.sh should omit --model when job.Model is empty:\n%s", runSh)
+		}
+	})
+
+	// 4. Agy built-in default launch with explicit model puts --model before --print so --print receives prompt arg.
+	t.Run("agy builtin default launch with model", func(t *testing.T) {
+		cfgDefault := testFleetConfig()
+		delete(cfgDefault.Agents, "agy") // exercise builtinDriverDefaults["agy"]
+
+		fake := NewFakeTransport()
+		fake.OnContains("setsid nohup", CommandResult{Stdout: "7778\n"}, nil)
+		a := NewSSHAdapter(cfgDefault, SSHAdapterOptions{Transport: fake})
+
+		job := &store.Job{
+			ID:           13,
+			Title:        "Agy model task",
+			Agent:        "agy",
+			Host:         "ubuntu",
+			Workdir:      "~/agent-work/job-13",
+			Model:        "gemini-2.5-pro",
+			Instructions: "Check tests.",
+		}
+
+		if _, err := a.Launch(ctx, job); err != nil {
+			t.Fatalf("Launch agy with model: %v", err)
+		}
+
+		_, runSh := extractBase64Payloads(t, fake.Calls()[0].Command)
+		wantCmd := `"$HOME"/'.local/bin/agy' --model 'gemini-2.5-pro' --print "$(cat "$HOME"/'agent-work/job-13/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-13/agent.log' 2>&1`
+		if !strings.Contains(runSh, wantCmd) {
+			t.Errorf("agy run.sh missing expected model launch line %q:\n%s", wantCmd, runSh)
+		}
+	})
+
+	// 5. Config prompt_style overrides built-in defaults (both agy->stdin and claude->argument).
+	t.Run("config prompt_style overrides defaults", func(t *testing.T) {
+		cfgOverride := testFleetConfig()
+		agyCfg := cfgOverride.Agents["agy"]
+		agyCfg.PromptStyle = config.PromptStyleStdin
+		cfgOverride.Agents["agy"] = agyCfg
+
+		claudeCfg := cfgOverride.Agents["claude"]
+		claudeCfg.PromptStyle = config.PromptStyleArgument
+		cfgOverride.Agents["claude"] = claudeCfg
+
+		fake := NewFakeTransport()
+		fake.OnContains("setsid nohup", CommandResult{Stdout: "8888\n"}, nil)
+		a := NewSSHAdapter(cfgOverride, SSHAdapterOptions{Transport: fake})
+
+		agyJob := &store.Job{
+			ID:           14,
+			Title:        "Agy stdin override",
+			Agent:        "agy",
+			Host:         "ubuntu",
+			Workdir:      "~/agent-work/job-14",
+			Instructions: "hello",
+		}
+		if _, err := a.Launch(ctx, agyJob); err != nil {
+			t.Fatalf("Launch agy stdin override: %v", err)
+		}
+		_, agyRunSh := extractBase64Payloads(t, fake.Calls()[0].Command)
+		wantAgy := `"$HOME"/'.local/bin/agy' --print < "$HOME"/'agent-work/job-14/prompt.txt' > "$HOME"/'agent-work/job-14/agent.log' 2>&1`
+		if !strings.Contains(agyRunSh, wantAgy) {
+			t.Errorf("agy stdin override run.sh missing %q:\n%s", wantAgy, agyRunSh)
+		}
+
+		claudeJob := &store.Job{
+			ID:           15,
+			Title:        "Claude argument override",
+			Agent:        "claude",
+			Host:         "ubuntu",
+			Workdir:      "~/agent-work/job-15",
+			Model:        "claude-sonnet-4-6",
+			Instructions: "hello",
+		}
+		if _, err := a.Launch(ctx, claudeJob); err != nil {
+			t.Fatalf("Launch claude argument override: %v", err)
+		}
+		_, claudeRunSh := extractBase64Payloads(t, fake.Calls()[2].Command)
+		wantClaude := `claude -p --model 'claude-sonnet-4-6' --permission-mode bypassPermissions "$(cat "$HOME"/'agent-work/job-15/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-15/agent.log' 2>&1`
+		if !strings.Contains(claudeRunSh, wantClaude) {
+			t.Errorf("claude argument override run.sh missing %q:\n%s", wantClaude, claudeRunSh)
+		}
+	})
+
+	// 6. Verify generated argument-style run.sh actually passes prompt.txt verbatim under POSIX /bin/sh.
+	t.Run("argument style run.sh executes cleanly under sh with special chars", func(t *testing.T) {
+		workdir := t.TempDir()
+		binPath := filepath.Join(workdir, "fake-agy.sh")
+		capturePath := filepath.Join(workdir, "captured-arg.txt")
+		fakeBin := "#!/bin/sh\n" +
+			"if [ \"$1\" != \"--print\" ]; then echo \"bad flag: $1\" >&2; exit 2; fi\n" +
+			"printf '%s' \"$2\" > " + shellQuote(capturePath) + "\n"
+		if err := os.WriteFile(binPath, []byte(fakeBin), 0o700); err != nil {
+			t.Fatalf("write fake-agy.sh: %v", err)
+		}
+
+		job := &store.Job{
+			ID:           16,
+			Title:        "Shell roundtrip",
+			Agent:        "agy",
+			Host:         "local",
+			Workdir:      workdir,
+			Instructions: "Line 1 with $UNSET_VAR `echo nope` 'single' \"double\"\n日本語テスト",
+		}
+		drv := AgentDriver{
+			Name:            "agy",
+			Launch:          "agy --model {model} --print",
+			PromptStyle:     PromptStyleArgument,
+			CommandOverride: binPath,
+		}
+		promptPath := filepath.Join(workdir, promptFileName)
+		logPath := filepath.Join(workdir, logFileName)
+		runShPath := filepath.Join(workdir, runScriptName)
+
+		promptText := BuildPromptText(job)
+		if err := os.WriteFile(promptPath, []byte(promptText), 0o600); err != nil {
+			t.Fatalf("write prompt.txt: %v", err)
+		}
+		launchCmd, err := drv.BuildLaunchCommand(job, workdir, promptPath, logPath, false)
+		if err != nil {
+			t.Fatalf("BuildLaunchCommand: %v", err)
+		}
+		runScript := BuildRunScript(workdir, drv, launchCmd)
+		if err := os.WriteFile(runShPath, []byte(runScript), 0o700); err != nil {
+			t.Fatalf("write run.sh: %v", err)
+		}
+
+		cmd := exec.Command("sh", runShPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			logBytes, _ := os.ReadFile(logPath)
+			t.Fatalf("sh run.sh failed: %v\ncombined: %s\nagent.log: %s\nrun.sh:\n%s", err, string(out), string(logBytes), runScript)
+		}
+		gotArg, err := os.ReadFile(capturePath)
+		if err != nil {
+			t.Fatalf("read captured arg: %v", err)
+		}
+		wantArg := strings.TrimRight(promptText, "\n")
+		if string(gotArg) != wantArg {
+			t.Errorf("captured arg = %q, want %q", string(gotArg), wantArg)
+		}
+		exitBytes, err := os.ReadFile(filepath.Join(workdir, exitFileName))
+		if err != nil || strings.TrimSpace(string(exitBytes)) != "0" {
+			t.Errorf("agent.exit = %q (err=%v), want 0", string(exitBytes), err)
 		}
 	})
 }

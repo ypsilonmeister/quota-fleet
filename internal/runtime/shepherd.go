@@ -5,13 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
+
+const maxLastErrorLogBytes = 512
 
 // ShepherdOptions configures a Shepherd.
 type ShepherdOptions struct {
@@ -134,41 +138,56 @@ func (s *Shepherd) finishExitedJob(ctx context.Context, job *store.Job, state ad
 	}
 	ev.ExitCode = state.ExitCode
 
-	evalRes, err := s.evaluator.Evaluate(ctx, job, ev)
-	if err != nil {
-		if ctx.Err() == nil {
-			s.logger.Printf("shepherd evaluate error for job #%d: %v", job.ID, err)
-		}
-		return
-	}
-
-	resultText := evalRes.FormatText()
-
 	var terminalJob *store.Job
-	if evalRes.Passed {
-		res, err := s.store.Complete(ctx, job.ID, job.ClaimedBy, resultText)
+	if state.ExitCode != 0 {
+		reason, resultText := formatNonZeroExitFailure(state.ExitCode, ev.FinalReport)
+		res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
 				// Lost ownership; stop before delivery per docs/02-job-model.md.
 				return
 			}
-			s.logger.Printf("shepherd complete job #%d error: %v", job.ID, err)
+			s.logger.Printf("shepherd fail job #%d (exit_code=%d) error: %v", job.ID, state.ExitCode, err)
 			return
 		}
 		terminalJob = res.Job
-		s.logger.Printf("shepherd completed job #%d (promoted=%v)", job.ID, res.PromotedChildIDs)
+		s.logger.Printf("shepherd failed job #%d (exit_code=%d, cancelled_children=%v)", job.ID, state.ExitCode, res.CancelledChildIDs)
 	} else {
-		reason := evalRes.FailSummary()
-		res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
+		evalRes, err := s.evaluator.Evaluate(ctx, job, ev)
 		if err != nil {
-			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
+			if ctx.Err() == nil {
+				s.logger.Printf("shepherd evaluate error for job #%d: %v", job.ID, err)
+			}
+			return
+		}
+
+		resultText := evalRes.FormatText()
+
+		if evalRes.Passed {
+			res, err := s.store.Complete(ctx, job.ID, job.ClaimedBy, resultText)
+			if err != nil {
+				if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
+					// Lost ownership; stop before delivery per docs/02-job-model.md.
+					return
+				}
+				s.logger.Printf("shepherd complete job #%d error: %v", job.ID, err)
 				return
 			}
-			s.logger.Printf("shepherd fail job #%d error: %v", job.ID, err)
-			return
+			terminalJob = res.Job
+			s.logger.Printf("shepherd completed job #%d (promoted=%v)", job.ID, res.PromotedChildIDs)
+		} else {
+			reason := evalRes.FailSummary()
+			res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
+			if err != nil {
+				if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
+					return
+				}
+				s.logger.Printf("shepherd fail job #%d error: %v", job.ID, err)
+				return
+			}
+			terminalJob = res.Job
+			s.logger.Printf("shepherd failed job #%d (cancelled_children=%v)", job.ID, res.CancelledChildIDs)
 		}
-		terminalJob = res.Job
-		s.logger.Printf("shepherd failed job #%d (cancelled_children=%v)", job.ID, res.CancelledChildIDs)
 	}
 
 	// Free slot became available; wake Launcher for any already-queued jobs.
@@ -178,6 +197,29 @@ func (s *Shepherd) finishExitedJob(ctx context.Context, job *store.Job, state ad
 	if err := deliverAndMark(ctx, s.store, s.notifier, terminalJob); err != nil && ctx.Err() == nil {
 		s.logger.Printf("shepherd delivery error for job #%d: %v", terminalJob.ID, err)
 	}
+}
+
+func formatNonZeroExitFailure(exitCode int, logTail string) (reason, resultText string) {
+	trimmed := strings.TrimSpace(logTail)
+	if trimmed == "" {
+		return fmt.Sprintf("agent exited with code %d", exitCode),
+			fmt.Sprintf("overall: FAIL\nexit_code: %d", exitCode)
+	}
+	snippet := truncateTailUTF8(trimmed, maxLastErrorLogBytes)
+	reason = fmt.Sprintf("agent exited with code %d: %s", exitCode, snippet)
+	resultText = fmt.Sprintf("overall: FAIL\nexit_code: %d\nagent_log_tail:\n%s", exitCode, trimmed)
+	return reason, resultText
+}
+
+func truncateTailUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	start := len(s) - maxBytes
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return "..." + strings.TrimSpace(s[start:])
 }
 
 func (s *Shepherd) notifyLauncher() {
