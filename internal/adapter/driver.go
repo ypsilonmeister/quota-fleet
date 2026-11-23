@@ -59,7 +59,7 @@ var builtinDriverDefaults = map[string]defaultDriverSpec{
 	},
 	"codex": {
 		preflight:           "codex --version",
-		launch:              "codex exec",
+		launch:              "codex exec --skip-git-repo-check",
 		sessionLogGlob:      "~/.codex/sessions/*/*.jsonl",
 		promptStyle:         PromptStyleStdin,
 		forceStdinNoDevNull: true,

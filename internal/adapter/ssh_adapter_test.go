@@ -301,6 +301,38 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		}
 	})
 
+	// 2b. Codex built-in default launch includes --skip-git-repo-check right after exec.
+	t.Run("codex builtin default launch includes --skip-git-repo-check", func(t *testing.T) {
+		cfgDefault := testFleetConfig()
+		delete(cfgDefault.Agents, "codex") // exercise builtinDriverDefaults["codex"]
+
+		fake := NewFakeTransport()
+		fake.OnContains("setsid nohup", CommandResult{Stdout: "9002\n"}, nil)
+		a := NewSSHAdapter(cfgDefault, SSHAdapterOptions{Transport: fake})
+
+		job := &store.Job{
+			ID:           111,
+			Title:        "Codex builtin default",
+			Agent:        "codex",
+			Host:         "penguin",
+			Workdir:      "/home/worker/agent-work/job-111",
+			Instructions: "Run in plain non-git workdir.",
+		}
+
+		if _, err := a.Launch(ctx, job); err != nil {
+			t.Fatalf("Launch codex builtin default: %v", err)
+		}
+
+		_, runSh := extractBase64Payloads(t, fake.Calls()[0].Command)
+		wantCmd := `codex exec --skip-git-repo-check < '/home/worker/agent-work/job-111/prompt.txt' > '/home/worker/agent-work/job-111/agent.log' 2>&1`
+		if !strings.Contains(runSh, wantCmd) {
+			t.Errorf("codex builtin default run.sh missing %q:\n%s", wantCmd, runSh)
+		}
+		if strings.Contains(runSh, "</dev/null") {
+			t.Errorf("codex builtin default run.sh must NOT contain </dev/null:\n%s", runSh)
+		}
+	})
+
 	// 3. Agy on ubuntu: host command override (`~/.local/bin/agy`), argument prompt style, and empty model omits `--model`.
 	t.Run("agy launch applies host command override, argument prompt style, and omits empty model", func(t *testing.T) {
 		fake := NewFakeTransport()
@@ -793,5 +825,49 @@ func TestSSHAdapterPreflightConfigDriven(t *testing.T) {
 	}
 	if calls[2].Command != `claude --version` {
 		t.Errorf("claude preflight = %q", calls[2].Command)
+	}
+}
+
+func TestResolveDriverCodexBuiltinLaunchDefault(t *testing.T) {
+	drv, err := ResolveDriver(nil, config.HostConfig{}, "codex")
+	if err != nil {
+		t.Fatalf("ResolveDriver(codex): %v", err)
+	}
+	if drv.Launch != "codex exec --skip-git-repo-check" {
+		t.Fatalf("drv.Launch = %q, want %q", drv.Launch, "codex exec --skip-git-repo-check")
+	}
+
+	job := &store.Job{ID: 1, Agent: "codex", Instructions: "hello"}
+
+	linuxCmd, err := drv.BuildLaunchCommand(job, "/tmp/work", "/tmp/work/prompt.txt", "/tmp/work/agent.log", false)
+	if err != nil {
+		t.Fatalf("BuildLaunchCommand: %v", err)
+	}
+	wantLinux := `codex exec --skip-git-repo-check < '/tmp/work/prompt.txt' > '/tmp/work/agent.log' 2>&1`
+	if linuxCmd != wantLinux {
+		t.Errorf("linux launch cmd = %q, want %q", linuxCmd, wantLinux)
+	}
+
+	winCmd, err := drv.BuildWindowsLaunchCommand(job, `C:\work`, "prompt.txt", "agent.log", "agent.err.log", false)
+	if err != nil {
+		t.Fatalf("BuildWindowsLaunchCommand: %v", err)
+	}
+	wantWin := `codex exec --skip-git-repo-check - < prompt.txt > agent.log 2> agent.err.log`
+	if winCmd != wantWin {
+		t.Errorf("windows launch cmd = %q, want %q", winCmd, wantWin)
+	}
+
+	// Explicit launch in fleet.yaml still overrides built-in default.
+	cfgOverride := &config.Config{
+		Agents: map[string]config.AgentConfig{
+			"codex": {Launch: "codex exec --custom-flag"},
+		},
+	}
+	drvOverride, err := ResolveDriver(cfgOverride, config.HostConfig{}, "codex")
+	if err != nil {
+		t.Fatalf("ResolveDriver(codex override): %v", err)
+	}
+	if drvOverride.Launch != "codex exec --custom-flag" {
+		t.Errorf("override drv.Launch = %q, want %q", drvOverride.Launch, "codex exec --custom-flag")
 	}
 }

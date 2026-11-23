@@ -441,6 +441,37 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 		}
 	})
 
+	t.Run("codex builtin default launch includes --skip-git-repo-check", func(t *testing.T) {
+		cfgDefault := testWindowsFleetConfig()
+		delete(cfgDefault.Agents, "codex") // exercise builtinDriverDefaults["codex"]
+
+		fake := NewFakeTransport()
+		fake.OnContains("Win32_Process", CommandResult{Stdout: "7004\r\n"}, nil)
+		a := NewSSHAdapter(cfgDefault, SSHAdapterOptions{Transport: fake})
+
+		job := &store.Job{
+			ID:           2031,
+			Title:        "Codex Windows builtin default",
+			Agent:        "codex",
+			Host:         "home-win",
+			Workdir:      `C:\Users\worker\agent-work\job-2031`,
+			Instructions: "Run in plain non-git workdir.",
+		}
+
+		if _, err := a.Launch(ctx, job); err != nil {
+			t.Fatalf("Launch codex builtin default: %v", err)
+		}
+
+		_, runCmd := extractWindowsBase64Payloads(t, fake.Calls()[0].Command)
+		wantLine := `C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < prompt.txt > agent.log 2> agent.err.log`
+		if !strings.Contains(runCmd, wantLine) {
+			t.Errorf("codex builtin default agent-run.cmd missing %q:\n%s", wantLine, runCmd)
+		}
+		if strings.Contains(runCmd, "</dev/null") || strings.Contains(runCmd, "< NUL") {
+			t.Errorf("codex builtin default agent-run.cmd must NEVER contain </dev/null or < NUL:\n%s", runCmd)
+		}
+	})
+
 	t.Run("sandbox flag omitted when workdir is outside workdir_root and no worktree_spec", func(t *testing.T) {
 		fake := NewFakeTransport()
 		fake.OnContains("Win32_Process", CommandResult{Stdout: "7002\r\n"}, nil)
