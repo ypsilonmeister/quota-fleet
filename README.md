@@ -4,12 +4,40 @@ A design and specification for running a **fleet of coding agents on flat-rate
 subscription quotas**, with a verification pipeline that makes their output
 trustworthy enough to merge.
 
-> Status: **design phase**. This repository currently contains the
-> architecture and the specifications. It is extracted from a working private
-> system that has already developed and shipped real software (see the
-> [case study](docs/05-case-study.md)). A standalone reference implementation
-> is planned; the specifications here are written so that the core can be
-> rebuilt without the original hosting environment.
+> Status: **active implementation**. Core phases 1–3 and Phase 4 preparation
+> (SQLite job store, HTTP API, Dispatcher/Launcher/Shepherd/Reconciler runtime,
+> SSH/local host adapter, Quota Gate, typed+decision Evaluator, file/webhook
+> Notifier, and Phase UI-0 bootstrap CLI) are implemented. The embedded web UI
+> is planned for **Phase UI-1**, and the MCP server (`quota-fleet mcp`) is
+> planned for **Phase UI-2** (see [docs/07-ui-and-mcp.md](docs/07-ui-and-mcp.md)).
+
+## Quickstart
+
+1. **Get the binary** (single static Go binary, `CGO_ENABLED=0`):
+   ```bash
+   CGO_ENABLED=0 go build -o quota-fleet ./cmd/quota-fleet
+   ```
+2. **Initialize and start the server**:
+   ```bash
+   ./quota-fleet init
+   ./quota-fleet serve
+   ```
+   `quota-fleet init` writes a minimal `fleet.yaml` (mode `0600`) with a
+   generated `instance_id` and Bearer API token. `quota-fleet serve` prints a
+   startup banner showing the active adapter, gate mode, evaluator mode,
+   notifier, API auth status, and planned UI URL.
+3. **Register your first job in the UI**:
+   Open the UI URL shown in the startup banner (default `http://127.0.0.1:8737/ui/`).
+   *Note: the embedded web UI is planned for **Phase UI-1**; until then, you can
+   register jobs via CLI (`quota-fleet job create --title "..."`) or the HTTP API.
+   To generate MCP client config snippets for AI clients, run `quota-fleet mcp config`.*
+
+## Supported OS boundaries (v1)
+
+- **`quota-fleet serve` and local worker execution**: Linux (including Windows
+  **WSL2**).
+- **Native macOS / Windows**: CLI and MCP client connections to a remote
+  `quota-fleet serve` instance only (native local `serve` is out of scope for v1).
 
 ## Why this exists
 
@@ -66,11 +94,15 @@ the missing control plane around them.
 
 ## Repository layout
 
+- `cmd/quota-fleet/` — CLI entrypoint (`init`, `serve`, `job`, `gate`, `mcp config`, `config check`, `status`)
+- `internal/` — store, config, API server, runtime, SSH/local adapter, quota gate, evaluator
 - `docs/01-architecture.md` — components and how they interact
 - `docs/02-job-model.md` — job states, claims, chains, failure semantics
 - `docs/03-quota-gate.md` — pools, the hold/release gate, burn-down jobs
 - `docs/04-pipeline-conventions.md` — the implement/review/fix pipeline rules
 - `docs/05-case-study.md` — the system in production: a real OSS release
+- `docs/06-implementation-design.md` — standalone implementation specification
+- `docs/07-ui-and-mcp.md` — embedded UI and MCP design (v2)
 
 ## License
 

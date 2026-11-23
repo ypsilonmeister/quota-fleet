@@ -57,6 +57,11 @@ const (
 	DefaultWebhookTimeout = 5 * time.Second
 	// DefaultWebhookRetries is the default number of retries after the initial webhook attempt (total 3 attempts).
 	DefaultWebhookRetries = 2
+
+	// DefaultMaxClaimed is the default maximum number of concurrently claimed jobs.
+	DefaultMaxClaimed = 3
+	// DefaultAttemptsCap is the default maximum number of launch attempts per job.
+	DefaultAttemptsCap = 3
 )
 
 // Config represents the quota-fleet configuration loaded from fleet.yaml.
@@ -272,6 +277,45 @@ type LimitsConfig struct {
 	AttemptsCap int `yaml:"attempts_cap"`
 }
 
+// EffectiveMaxClaimed returns the configured max_claimed limit or DefaultMaxClaimed (3) when unset.
+func (l LimitsConfig) EffectiveMaxClaimed() int {
+	if l.MaxClaimed <= 0 {
+		return DefaultMaxClaimed
+	}
+	return l.MaxClaimed
+}
+
+// EffectiveAttemptsCap returns the configured attempts_cap limit or DefaultAttemptsCap (3) when unset.
+func (l LimitsConfig) EffectiveAttemptsCap() int {
+	if l.AttemptsCap <= 0 {
+		return DefaultAttemptsCap
+	}
+	return l.AttemptsCap
+}
+
+// UnmarshalYAML preserves default values for omitted fields while allowing explicit zero/negative values
+// to be caught by Validate().
+func (l *LimitsConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode && value.Tag == "!!null" {
+		return nil
+	}
+	type rawLimits struct {
+		MaxClaimed  *int `yaml:"max_claimed"`
+		AttemptsCap *int `yaml:"attempts_cap"`
+	}
+	var raw rawLimits
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	if raw.MaxClaimed != nil {
+		l.MaxClaimed = *raw.MaxClaimed
+	}
+	if raw.AttemptsCap != nil {
+		l.AttemptsCap = *raw.AttemptsCap
+	}
+	return nil
+}
+
 // HostConfig defines a worker host and optional per-host agent overrides.
 type HostConfig struct {
 	Transport             string                       `yaml:"transport"`
@@ -334,8 +378,14 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse unmarshals YAML bytes into Config. Unknown keys are ignored leniently.
+// Omitted limits fields default to DefaultMaxClaimed and DefaultAttemptsCap.
 func Parse(data []byte) (*Config, error) {
-	var cfg Config
+	cfg := Config{
+		Limits: LimitsConfig{
+			MaxClaimed:  DefaultMaxClaimed,
+			AttemptsCap: DefaultAttemptsCap,
+		},
+	}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}

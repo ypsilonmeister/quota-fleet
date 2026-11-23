@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -174,8 +175,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stdout, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s, evaluator=%s, gate_mode=%s)\n",
-			listen, cfg.InstanceID, dbPath, cfg.Runtime.EffectiveAdapter(), cfg.Evaluator.EffectiveMode(), cfg.Quota.EffectiveGateMode())
+		printServeBanner(stdout, logger, cfg, listen, dbPath, deliveriesDir)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
@@ -193,5 +193,55 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 			return 1
 		}
 		return 0
+	}
+}
+
+func formatPlannedUIURL(listen string) string {
+	addr := strings.TrimSpace(listen)
+	if addr == "" {
+		addr = config.DefaultAPIListen
+	}
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
+	}
+	return "http://" + addr + "/ui/"
+}
+
+func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, listen, dbPath, deliveriesDir string) {
+	adapterName := cfg.Runtime.EffectiveAdapter()
+	gateMode := cfg.Quota.EffectiveGateMode()
+	evalMode := cfg.Evaluator.EffectiveMode()
+	apiKeyEnv := cfg.Evaluator.EffectiveAPIKeyEnv()
+
+	notifierSummary := fmt.Sprintf("file (%s)", deliveriesDir)
+	if cfg.Notifier.EffectiveWebhookURL() != "" {
+		notifierSummary = fmt.Sprintf("file (%s) + webhook", deliveriesDir)
+	}
+
+	apiAuthSummary := "disabled (no token)"
+	if strings.TrimSpace(cfg.API.Token) != "" {
+		apiAuthSummary = "enabled (bearer token)"
+	} else if cfg.API.RequireAuth {
+		apiAuthSummary = "enabled (require_auth=true, token unset)"
+	}
+
+	fmt.Fprintf(w, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s, evaluator=%s, gate_mode=%s)\n",
+		listen, cfg.InstanceID, dbPath, adapterName, evalMode, gateMode)
+	fmt.Fprintf(w, "  adapter:   %s\n", adapterName)
+	fmt.Fprintf(w, "  gate_mode: %s\n", gateMode)
+	fmt.Fprintf(w, "  evaluator: %s\n", evalMode)
+	fmt.Fprintf(w, "  notifier:  %s\n", notifierSummary)
+	fmt.Fprintf(w, "  api_auth:  %s\n", apiAuthSummary)
+	fmt.Fprintf(w, "  ui_url:    %s (planned in Phase UI-1)\n", formatPlannedUIURL(listen))
+
+	if evalMode == config.EvaluatorModeTypedDecision && strings.TrimSpace(os.Getenv(apiKeyEnv)) == "" {
+		warnMsg := fmt.Sprintf(
+			"%s is not set while evaluator.mode is %q; free-form acceptance criteria will fail evaluation (set %s or set evaluator.mode to %q)",
+			apiKeyEnv, evalMode, apiKeyEnv, config.EvaluatorModeAlwaysPass,
+		)
+		fmt.Fprintf(w, "  WARNING:   %s\n", warnMsg)
+		if logger != nil {
+			logger.Printf("WARNING: %s", warnMsg)
+		}
 	}
 }

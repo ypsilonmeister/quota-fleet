@@ -961,3 +961,73 @@ notifier:
 		})
 	}
 }
+
+func TestLimitsDefaultsAndExplicitOverrides(t *testing.T) {
+	tests := []struct {
+		name            string
+		yaml            string
+		wantMaxClaimed  int
+		wantAttemptsCap int
+	}{
+		{
+			name:            "limits section omitted",
+			yaml:            "instance_id: \"inst-limits-omitted\"\n",
+			wantMaxClaimed:  DefaultMaxClaimed,
+			wantAttemptsCap: DefaultAttemptsCap,
+		},
+		{
+			name:            "limits section null",
+			yaml:            "instance_id: \"inst-limits-null\"\nlimits:\n",
+			wantMaxClaimed:  DefaultMaxClaimed,
+			wantAttemptsCap: DefaultAttemptsCap,
+		},
+		{
+			name:            "limits section empty map",
+			yaml:            "instance_id: \"inst-limits-empty\"\nlimits: {}\n",
+			wantMaxClaimed:  DefaultMaxClaimed,
+			wantAttemptsCap: DefaultAttemptsCap,
+		},
+		{
+			name:            "only max_claimed specified",
+			yaml:            "instance_id: \"inst-limits-partial-1\"\nlimits:\n  max_claimed: 5\n",
+			wantMaxClaimed:  5,
+			wantAttemptsCap: DefaultAttemptsCap,
+		},
+		{
+			name:            "only attempts_cap specified",
+			yaml:            "instance_id: \"inst-limits-partial-2\"\nlimits:\n  attempts_cap: 7\n",
+			wantMaxClaimed:  DefaultMaxClaimed,
+			wantAttemptsCap: 7,
+		},
+		{
+			name:            "both explicitly specified",
+			yaml:            "instance_id: \"inst-limits-both\"\nlimits:\n  max_claimed: 2\n  attempts_cap: 4\n",
+			wantMaxClaimed:  2,
+			wantAttemptsCap: 4,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("Parse() unexpected error: %v", err)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() unexpected error: %v", err)
+			}
+			if cfg.Limits.MaxClaimed != tc.wantMaxClaimed {
+				t.Errorf("Limits.MaxClaimed = %d, want %d", cfg.Limits.MaxClaimed, tc.wantMaxClaimed)
+			}
+			if cfg.Limits.AttemptsCap != tc.wantAttemptsCap {
+				t.Errorf("Limits.AttemptsCap = %d, want %d", cfg.Limits.AttemptsCap, tc.wantAttemptsCap)
+			}
+			if cfg.Limits.EffectiveMaxClaimed() != tc.wantMaxClaimed {
+				t.Errorf("EffectiveMaxClaimed() = %d, want %d", cfg.Limits.EffectiveMaxClaimed(), tc.wantMaxClaimed)
+			}
+			if cfg.Limits.EffectiveAttemptsCap() != tc.wantAttemptsCap {
+				t.Errorf("EffectiveAttemptsCap() = %d, want %d", cfg.Limits.EffectiveAttemptsCap(), tc.wantAttemptsCap)
+			}
+		})
+	}
+}
