@@ -197,6 +197,43 @@ func TestUIAgentVersionsAssetsPresent(t *testing.T) {
 	}
 }
 
+func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
+	html := string(indexHTML)
+	for _, token := range []string{
+		`data-direction="console"`,
+		`id="direction-switch"`,
+		`data-set-direction="console"`,
+		`data-set-direction="ledger"`,
+	} {
+		if !strings.Contains(html, token) {
+			t.Errorf("index.html missing expected direction switcher token %q", token)
+		}
+	}
+
+	css := string(styleCSS)
+	for _, token := range []string{
+		`data-direction="console"`,
+		`data-direction="ledger"`,
+		`.direction-switch`,
+		`Hiragino Mincho ProN`,
+	} {
+		if !strings.Contains(css, token) {
+			t.Errorf("style.css missing expected direction styling token %q", token)
+		}
+	}
+
+	js := string(appJS)
+	for _, token := range []string{
+		`qf-direction`,
+		`data-direction`,
+		`applyDirection`,
+	} {
+		if !strings.Contains(js, token) {
+			t.Errorf("app.js missing expected direction persistence token %q", token)
+		}
+	}
+}
+
 func TestChainTreeLogicWithNode(t *testing.T) {
 	nodeBin, err := exec.LookPath("node")
 	if err != nil {

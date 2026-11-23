@@ -3,6 +3,13 @@
 
   const TOKEN_KEY = "quota_fleet_token";
   const AUTH_MODE_KEY = "quota_fleet_auth_mode";
+  const DIRECTION_KEY = "qf-direction";
+  const DEFAULT_DIRECTION = "console";
+  const VALID_DIRECTIONS = new Set(["console", "ledger"]);
+
+  function normalizeDirection(value) {
+    return VALID_DIRECTIONS.has(value) ? value : DEFAULT_DIRECTION;
+  }
   const ALL_STATUSES = [
     "draft",
     "queued",
@@ -642,9 +649,44 @@
     btnConnectNoAuth: document.getElementById("btn-connect-no-auth"),
     btnRefresh: document.getElementById("btn-refresh"),
     btnToken: document.getElementById("btn-token"),
+    directionSwitch: document.getElementById("direction-switch"),
     metaBadges: document.getElementById("meta-badges"),
     bannerArea: document.getElementById("banner-area")
   };
+
+  function readStoredDirection() {
+    try {
+      return normalizeDirection(localStorage.getItem(DIRECTION_KEY));
+    } catch (_err) {
+      return DEFAULT_DIRECTION;
+    }
+  }
+
+  function applyDirection(dir, persist) {
+    const next = normalizeDirection(dir);
+    document.documentElement.setAttribute("data-direction", next);
+    const schemeMeta = document.querySelector('meta[name="color-scheme"]');
+    if (schemeMeta) {
+      schemeMeta.setAttribute("content", next === "ledger" ? "light" : "dark");
+    }
+    if (dom.directionSwitch) {
+      const buttons = dom.directionSwitch.querySelectorAll("[data-set-direction]");
+      for (const btn of buttons) {
+        const active = btn.getAttribute("data-set-direction") === next;
+        btn.classList.toggle("active", active);
+        btn.setAttribute("aria-pressed", active ? "true" : "false");
+      }
+    }
+    if (persist) {
+      try {
+        localStorage.setItem(DIRECTION_KEY, next);
+      } catch (_err) {
+        // Storage may be unavailable; direction still applies for this session.
+      }
+    }
+  }
+
+  applyDirection(readStoredDirection(), false);
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -2965,6 +3007,22 @@
 
   dom.btnToken.addEventListener("click", function () {
     showAuthGate("");
+  });
+
+  if (dom.directionSwitch) {
+    dom.directionSwitch.addEventListener("click", function (ev) {
+      const btn = ev.target && ev.target.closest ? ev.target.closest("[data-set-direction]") : null;
+      if (!btn) {
+        return;
+      }
+      applyDirection(btn.getAttribute("data-set-direction"), true);
+    });
+  }
+
+  window.addEventListener("storage", function (ev) {
+    if (ev && ev.key === DIRECTION_KEY) {
+      applyDirection(ev.newValue, false);
+    }
   });
 
   document.addEventListener("click", function (ev) {

@@ -1,8 +1,9 @@
 <!doctype html>
-<html lang="ja">
+<html lang="ja" data-direction="console">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
   <title>quota-fleet</title>
   <link rel="stylesheet" href="/ui/assets/style.css">
   <script defer src="/ui/assets/app.js"></script>
@@ -22,6 +23,10 @@
       </nav>
       <div class="topbar-actions">
         <span id="meta-badges" class="meta-badges"></span>
+        <div id="direction-switch" class="direction-switch" role="group" aria-label="表示意匠の切替">
+          <button type="button" class="direction-btn active" data-set-direction="console" aria-pressed="true">計器盤</button>
+          <button type="button" class="direction-btn" data-set-direction="ledger" aria-pressed="false">台帳</button>
+        </div>
         <button id="btn-refresh" type="button" class="btn btn-sm">更新</button>
         <button id="btn-token" type="button" class="btn btn-sm btn-ghost">トークン</button>
       </div>
