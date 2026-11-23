@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseAndValidateFullDesignExample(t *testing.T) {
@@ -786,6 +787,165 @@ evaluator:
   max_eval_retries: -2
 `,
 			wantErr: "evaluator.max_eval_retries",
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNotifierConfigDefaultsAndValidation(t *testing.T) {
+	// Default values when notifier section is omitted.
+	cfg, err := Parse([]byte(`
+instance_id: "inst-notif-default"
+limits: { max_claimed: 1, attempts_cap: 1 }
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.Notifier.EffectiveWebhookURL(); got != "" {
+		t.Errorf("EffectiveWebhookURL() = %q, want empty", got)
+	}
+	if got := cfg.Notifier.EffectiveWebhookTimeout(); got != DefaultWebhookTimeout {
+		t.Errorf("EffectiveWebhookTimeout() = %v, want %v", got, DefaultWebhookTimeout)
+	}
+	if got := cfg.Notifier.EffectiveWebhookRetries(); got != DefaultWebhookRetries {
+		t.Errorf("EffectiveWebhookRetries() = %d, want %d", got, DefaultWebhookRetries)
+	}
+
+	// Explicit valid notifier config.
+	cfgExplicit, err := Parse([]byte(`
+instance_id: "inst-notif-explicit"
+limits: { max_claimed: 1, attempts_cap: 1 }
+notifier:
+  webhook_url: "https://hooks.example.com/quota-fleet"
+  webhook_timeout: "10s"
+  webhook_retries: 4
+`))
+	if err != nil {
+		t.Fatalf("Parse explicit: %v", err)
+	}
+	if err := cfgExplicit.Validate(); err != nil {
+		t.Fatalf("Validate explicit: %v", err)
+	}
+	if got := cfgExplicit.Notifier.EffectiveWebhookURL(); got != "https://hooks.example.com/quota-fleet" {
+		t.Errorf("EffectiveWebhookURL() = %q", got)
+	}
+	if got := cfgExplicit.Notifier.EffectiveWebhookTimeout(); got != 10*time.Second {
+		t.Errorf("EffectiveWebhookTimeout() = %v, want 10s", got)
+	}
+	if got := cfgExplicit.Notifier.EffectiveWebhookRetries(); got != 4 {
+		t.Errorf("EffectiveWebhookRetries() = %d, want 4", got)
+	}
+
+	// Explicit webhook_retries: 0 is valid and preserved (not overridden by default 2).
+	cfgZeroRetries, err := Parse([]byte(`
+instance_id: "inst-notif-zero"
+limits: { max_claimed: 1, attempts_cap: 1 }
+notifier:
+  webhook_url: "http://127.0.0.1:9999/deliver"
+  webhook_retries: 0
+`))
+	if err != nil {
+		t.Fatalf("Parse zero retries: %v", err)
+	}
+	if err := cfgZeroRetries.Validate(); err != nil {
+		t.Fatalf("Validate zero retries: %v", err)
+	}
+	if got := cfgZeroRetries.Notifier.EffectiveWebhookRetries(); got != 0 {
+		t.Errorf("EffectiveWebhookRetries() = %d, want 0", got)
+	}
+
+	// Fallback behavior of Effective* on invalid raw values.
+	neg := -3
+	badCfg := NotifierConfig{
+		WebhookTimeout: "not-a-duration",
+		WebhookRetries: &neg,
+	}
+	if got := badCfg.EffectiveWebhookTimeout(); got != DefaultWebhookTimeout {
+		t.Errorf("bad timeout fallback = %v, want %v", got, DefaultWebhookTimeout)
+	}
+	if got := badCfg.EffectiveWebhookRetries(); got != DefaultWebhookRetries {
+		t.Errorf("negative retries fallback = %d, want %d", got, DefaultWebhookRetries)
+	}
+
+	// Invalid notifier configs rejected by Validate().
+	invalidCases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "non-http scheme",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+notifier:
+  webhook_url: "ftp://hooks.example.com/deliver"
+`,
+			wantErr: "notifier.webhook_url",
+		},
+		{
+			name: "missing scheme and host",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+notifier:
+  webhook_url: "/local/path"
+`,
+			wantErr: "notifier.webhook_url",
+		},
+		{
+			name: "http without host",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+notifier:
+  webhook_url: "http:///no-host"
+`,
+			wantErr: "notifier.webhook_url",
+		},
+		{
+			name: "bad webhook_timeout",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+notifier:
+  webhook_timeout: "soon"
+`,
+			wantErr: "notifier.webhook_timeout",
+		},
+		{
+			name: "zero webhook_timeout",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+notifier:
+  webhook_timeout: "0s"
+`,
+			wantErr: "notifier.webhook_timeout",
+		},
+		{
+			name: "negative webhook_retries",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+notifier:
+  webhook_retries: -1
+`,
+			wantErr: "notifier.webhook_retries",
 		},
 	}
 	for _, tc := range invalidCases {

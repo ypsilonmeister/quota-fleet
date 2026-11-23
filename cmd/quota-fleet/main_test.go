@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/runtime"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -917,5 +920,150 @@ quota:
 	}
 	if !strings.Contains(out.String(), "held=true") || !strings.Contains(out.String(), "mode=enforce") {
 		t.Errorf("gate decisions output missing enforce hold markers:\n%s", out.String())
+	}
+}
+
+func TestServeWiringWithWebhookNotifier(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	cfgPath := filepath.Join(dir, "fleet.yaml")
+
+	var (
+		mu       sync.Mutex
+		received []runtime.DeliveryPayload
+	)
+	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Content-Type") != "application/json" {
+			http.Error(w, "bad content-type", http.StatusBadRequest)
+			return
+		}
+		var payload runtime.DeliveryPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		received = append(received, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhookSrv.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cfgYAML := fmt.Sprintf(`
+instance_id: "serve-webhook-inst"
+state_dir: "%s"
+api:
+  listen: "%s"
+runtime:
+  adapter: "mock"
+  dispatch_interval: "15ms"
+  shepherd_interval: "15ms"
+  reconcile_interval: "30ms"
+  stale_claimed_after: "5s"
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+evaluator:
+  mode: "always-pass"
+notifier:
+  webhook_url: "%s"
+  webhook_timeout: "2s"
+  webhook_retries: 1
+`, filepath.ToSlash(stateDir), addr, webhookSrv.URL)
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var out, errBuf bytes.Buffer
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runServeContext(ctx, []string{"--config", cfgPath}, &out, &errBuf)
+	}()
+
+	baseURL := "http://" + addr
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := http.Get(baseURL + "/status")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("serve did not become ready on %s; stderr=%s", addr, errBuf.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	reqBody := `{"request_id":"serve-wh-1","title":"Serve Webhook Delivery Job","acceptance_criteria":"ok"}`
+	resp, err := http.Post(baseURL+"/jobs", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		cancel()
+		t.Fatalf("POST /jobs: %v", err)
+	}
+	var createResp struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
+		_ = resp.Body.Close()
+		cancel()
+		t.Fatalf("decode create response: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated || createResp.Job.ID == 0 {
+		cancel()
+		t.Fatalf("POST /jobs status=%d id=%d", resp.StatusCode, createResp.Job.ID)
+	}
+
+	// Wait until both webhook delivery and local delivery file are observed.
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(received)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("webhook did not receive delivery for job #%d in time; stderr=%s", createResp.Job.ID, errBuf.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	deliveryFile := filepath.Join(stateDir, "deliveries", fmt.Sprintf("job-%d.json", createResp.Job.ID))
+	if _, err := os.Stat(deliveryFile); err != nil {
+		cancel()
+		t.Fatalf("expected delivery file %s alongside webhook: %v", deliveryFile, err)
+	}
+
+	mu.Lock()
+	gotPayload := received[0]
+	mu.Unlock()
+	if gotPayload.JobID != createResp.Job.ID || gotPayload.Title != "Serve Webhook Delivery Job" || gotPayload.Status != "done" {
+		cancel()
+		t.Fatalf("unexpected webhook payload: %+v", gotPayload)
+	}
+
+	cancel()
+	select {
+	case code := <-doneCh:
+		if code != 0 {
+			t.Fatalf("serve exit code = %d, want 0; stderr=%s", code, errBuf.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("serve did not shut down gracefully within timeout")
 	}
 }

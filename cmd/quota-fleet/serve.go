@@ -107,10 +107,24 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 
 	logger := log.New(stderr, "quota-fleet: ", log.LstdFlags)
 
+	fileNotifier := runtime.NewFileNotifier(deliveriesDir, st)
+	var jobNotifier runtime.Notifier = fileNotifier
+	if webhookURL := cfg.Notifier.EffectiveWebhookURL(); webhookURL != "" {
+		webhookNotifier := runtime.NewWebhookNotifier(runtime.WebhookNotifierOptions{
+			URL:        webhookURL,
+			Timeout:    cfg.Notifier.EffectiveWebhookTimeout(),
+			Retries:    cfg.Notifier.EffectiveWebhookRetries(),
+			RetriesSet: cfg.Notifier.WebhookRetries != nil,
+			Logger:     logger,
+		})
+		jobNotifier = runtime.NewMultiNotifier(fileNotifier, webhookNotifier)
+	}
+
 	rt, err := runtime.New(runtime.Options{
 		Store:             st,
 		Adapter:           execAdapter,
 		Evaluator:         jobEvaluator,
+		Notifier:          jobNotifier,
 		InstanceID:        cfg.InstanceID,
 		StateDir:          stateDir,
 		DeliveriesDir:     deliveriesDir,

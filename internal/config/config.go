@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,11 @@ const (
 	DefaultEvaluatorDecisionThreshold = 0.5
 	// DefaultEvaluatorMaxEvalRetries is the default number of consecutive evaluation errors before failing a job.
 	DefaultEvaluatorMaxEvalRetries = 3
+
+	// DefaultWebhookTimeout is the default per-attempt HTTP timeout for webhook deliveries.
+	DefaultWebhookTimeout = 5 * time.Second
+	// DefaultWebhookRetries is the default number of retries after the initial webhook attempt (total 3 attempts).
+	DefaultWebhookRetries = 2
 )
 
 // Config represents the quota-fleet configuration loaded from fleet.yaml.
@@ -65,6 +71,33 @@ type Config struct {
 	Pools      map[string]PoolConfig  `yaml:"pools"`
 	Quota      QuotaConfig            `yaml:"quota"`
 	Evaluator  EvaluatorConfig        `yaml:"evaluator"`
+	Notifier   NotifierConfig         `yaml:"notifier"`
+}
+
+// NotifierConfig holds delivery and report notification settings.
+type NotifierConfig struct {
+	WebhookURL     string `yaml:"webhook_url"`
+	WebhookTimeout string `yaml:"webhook_timeout"`
+	WebhookRetries *int   `yaml:"webhook_retries"`
+}
+
+// EffectiveWebhookURL returns the trimmed webhook URL, or empty when disabled.
+func (n NotifierConfig) EffectiveWebhookURL() string {
+	return strings.TrimSpace(n.WebhookURL)
+}
+
+// EffectiveWebhookTimeout returns the configured per-attempt webhook timeout or DefaultWebhookTimeout (5s).
+func (n NotifierConfig) EffectiveWebhookTimeout() time.Duration {
+	return parseDurationOrDefault(n.WebhookTimeout, DefaultWebhookTimeout)
+}
+
+// EffectiveWebhookRetries returns the configured webhook retry count after the initial attempt,
+// defaulting to DefaultWebhookRetries (2) when unset or negative.
+func (n NotifierConfig) EffectiveWebhookRetries() int {
+	if n.WebhookRetries == nil || *n.WebhookRetries < 0 {
+		return DefaultWebhookRetries
+	}
+	return *n.WebhookRetries
 }
 
 // EvaluatorConfig holds acceptance criteria evaluator settings.
@@ -393,6 +426,19 @@ func (c *Config) Validate() error {
 	}
 	if c.Evaluator.MaxEvalRetries != nil && *c.Evaluator.MaxEvalRetries <= 0 {
 		errs = append(errs, fmt.Errorf("evaluator.max_eval_retries must be > 0 (got %d)", *c.Evaluator.MaxEvalRetries))
+	}
+
+	if rawURL := strings.TrimSpace(c.Notifier.WebhookURL); rawURL != "" {
+		u, err := url.Parse(rawURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			errs = append(errs, fmt.Errorf("notifier.webhook_url must be a valid http or https URL (got %q)", c.Notifier.WebhookURL))
+		}
+	}
+	if err := validatePositiveDuration("notifier.webhook_timeout", c.Notifier.WebhookTimeout); err != nil {
+		errs = append(errs, err)
+	}
+	if c.Notifier.WebhookRetries != nil && *c.Notifier.WebhookRetries < 0 {
+		errs = append(errs, fmt.Errorf("notifier.webhook_retries must be >= 0 (got %d)", *c.Notifier.WebhookRetries))
 	}
 
 	return errors.Join(errs...)
