@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,12 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 	_ "modernc.org/sqlite"
 )
+
+var testNonceMarkerRE = regexp.MustCompile(`__QUOTA_FLEET_CMD_NOT_FOUND_[0-9a-f]{32}__:`)
+
+func extractTestNotFoundMarker(cmd string) string {
+	return testNonceMarkerRE.FindString(cmd)
+}
 
 type fakeFileAccess struct {
 	runFn func(ctx context.Context, command string) (adapter.ExecResult, error)
@@ -218,7 +225,7 @@ func TestChecker_DriftLifecyclePinExclusionAndProbeFailures(t *testing.T) {
 			case strings.Contains(cmd, "agy") && strings.Contains(cmd, "-v"):
 				return adapter.ExecResult{ExitCode: 0, Output: "agy 0.5.0\n"}, nil
 			default:
-				return adapter.ExecResult{ExitCode: 127, Output: adapter.VersionProbeNotFoundMarker + " unknown\n"}, nil
+				return adapter.ExecResult{ExitCode: 127, Output: extractTestNotFoundMarker(cmd) + " unknown\n"}, nil
 			}
 		},
 		"ubuntu-vm": func(cmd string) (adapter.ExecResult, error) {
@@ -288,7 +295,7 @@ func TestChecker_DriftLifecyclePinExclusionAndProbeFailures(t *testing.T) {
 		case strings.Contains(cmd, "codex"):
 			return adapter.ExecResult{ExitCode: 0, Output: "codex-cli 0.171.0\n"}, nil
 		default:
-			return adapter.ExecResult{ExitCode: 127, Output: adapter.VersionProbeNotFoundMarker + " agy\n"}, nil
+			return adapter.ExecResult{ExitCode: 127, Output: extractTestNotFoundMarker(cmd) + " agy\n"}, nil
 		}
 	}
 	outputs["home-win"] = func(cmd string) (adapter.ExecResult, error) {
@@ -419,70 +426,110 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 	now := time.Date(2026, 11, 24, 7, 30, 0, 0, time.UTC)
 
 	// 1. Direct classifyProbeResult cases.
+	testMarker := "__QUOTA_FLEET_CMD_NOT_FOUND_0123456789abcdef0123456789abcdef__:"
 	cases := []struct {
 		name       string
 		targetExe  string
+		marker     string
 		res        adapter.ExecResult
 		runErr     error
 		wantStatus store.AgentVersionStatus
 	}{
 		{
-			name:       "pre-check not found marker",
+			name:       "pre-check not found marker with matching nonce",
 			targetExe:  "agy",
-			res:        adapter.ExecResult{ExitCode: 127, Output: adapter.VersionProbeNotFoundMarker + " agy\n"},
+			marker:     testMarker,
+			res:        adapter.ExecResult{ExitCode: 127, Output: testMarker + " agy\n"},
 			wantStatus: store.AgentVersionStatusNotFound,
+		},
+		{
+			name:       "static marker without nonce must be error",
+			targetExe:  "agy",
+			marker:     testMarker,
+			res:        adapter.ExecResult{ExitCode: 127, Output: adapter.VersionProbeNotFoundMarker + " agy\n"},
+			wantStatus: store.AgentVersionStatusError,
+		},
+		{
+			name:       "wrong nonce marker must be error",
+			targetExe:  "agy",
+			marker:     testMarker,
+			res:        adapter.ExecResult{ExitCode: 127, Output: "__QUOTA_FLEET_CMD_NOT_FOUND_fedcba9876543210fedcba9876543210__: agy\n"},
+			wantStatus: store.AgentVersionStatusError,
+		},
+		{
+			name:       "matching nonce marker with trailing text must be error",
+			targetExe:  "agy",
+			marker:     testMarker,
+			res:        adapter.ExecResult{ExitCode: 127, Output: testMarker + " agy extra\n"},
+			wantStatus: store.AgentVersionStatusError,
+		},
+		{
+			name:       "matching nonce marker with non-127 exit code must be error",
+			targetExe:  "agy",
+			marker:     testMarker,
+			res:        adapter.ExecResult{ExitCode: 1, Output: testMarker + " agy\n"},
+			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "config missing file error must be error not not_found",
 			targetExe:  "claude",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 1, Output: "config: no such file or directory"},
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "bare exit 127 without marker or target shell error must be error",
 			targetExe:  "claude",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 127, Output: ""},
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "wrapper missing child dependency exit 127 must be error",
 			targetExe:  "/usr/local/bin/claude-wrapper",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 127, Output: "sh: 1: missing-dep: not found"},
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "bare exit 9009 without target message must be error",
 			targetExe:  "codex",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 9009, Output: "'helper' is not recognized as an internal or external command"},
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "sh not found output without pre-check marker must be error",
 			targetExe:  "agy",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 127, Output: "sh: 1: agy: not found"},
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "command output naming itself command not found with exit 1 must be error",
 			targetExe:  "agent",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 1, Output: "agent: command not found"},
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "bash command not found without pre-check marker must be error",
 			targetExe:  "codex",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 127, Output: "bash: line 1: codex: command not found"},
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "powershell not recognized without pre-check marker must be error",
 			targetExe:  "codex",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 1, Output: "codex : The term 'codex' is not recognized as the name of a cmdlet, function, script file, or operable program."},
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "powershell not recognized naming different command must be error",
 			targetExe:  "codex",
+			marker:     testMarker,
 			res:        adapter.ExecResult{ExitCode: 1, Output: "helper : The term 'helper' is not recognized as the name of a cmdlet, function, script file, or operable program."},
 			wantStatus: store.AgentVersionStatusError,
 		},
@@ -490,7 +537,7 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyProbeResult("h1", "agent", tc.targetExe, tc.res, tc.runErr, now)
+			got := classifyProbeResult("h1", "agent", tc.targetExe, tc.marker, tc.res, tc.runErr, now)
 			if got.Status != tc.wantStatus {
 				t.Errorf("classifyProbeResult() status = %q (detail=%q), want %q", got.Status, got.ErrorDetail, tc.wantStatus)
 			}
@@ -498,6 +545,20 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 				t.Errorf("failed probe must have empty version, got %q", got.Version)
 			}
 		})
+	}
+
+	// Verify each BuildVersionCommand call generates a distinct random nonce marker.
+	drv := adapter.AgentDriver{Name: "agy"}
+	_, m1, err := drv.BuildVersionCommand(nil, false)
+	if err != nil {
+		t.Fatalf("BuildVersionCommand 1: %v", err)
+	}
+	_, m2, err := drv.BuildVersionCommand(nil, false)
+	if err != nil {
+		t.Fatalf("BuildVersionCommand 2: %v", err)
+	}
+	if !testNonceMarkerRE.MatchString(m1) || !testNonceMarkerRE.MatchString(m2) || m1 == m2 {
+		t.Fatalf("expected distinct random nonce markers, got m1=%q m2=%q", m1, m2)
 	}
 
 	// 2. End-to-end execution via LocalFileAccess + BuildVersionCommand.
@@ -533,6 +594,16 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 	if err := os.WriteFile(nonExecOnPathBin, []byte("#!/bin/sh\necho 1.0.0\n"), 0o644); err != nil {
 		t.Fatalf("write non-exec-on-path: %v", err)
 	}
+	// Repro 4: PATH="" with a non-executable file in the current working directory.
+	nonExecEmptyPathBin := filepath.Join(dir, "non-exec-empty-path")
+	if err := os.WriteFile(nonExecEmptyPathBin, []byte("#!/bin/sh\necho 1.0.0\n"), 0o644); err != nil {
+		t.Fatalf("write non-exec-empty-path: %v", err)
+	}
+	// Repro 5: executable prints a static pre-check-like marker line and exits 127.
+	markerOutputBin := filepath.Join(pathDir, "marker-output")
+	if err := os.WriteFile(markerOutputBin, []byte("#!/bin/sh\necho '"+adapter.VersionProbeNotFoundMarker+" marker-output' >&2\nexit 127\n"), 0o755); err != nil {
+		t.Fatalf("write marker-output: %v", err)
+	}
 	missingPathBin := filepath.Join(dir, "does-not-exist-bin")
 
 	st, err := store.Open(context.Background(), ":memory:", store.Options{InstanceID: "test"})
@@ -542,32 +613,50 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 	defer st.Close()
 
 	pathEnv := map[string]string{"PATH": pathDir + ":/usr/bin:/bin"}
+	emptyPathEnv := map[string]string{"PATH": ""}
+	leadingColonPathEnv := map[string]string{"PATH": ":" + pathDir}
+	trailingColonPathEnv := map[string]string{"PATH": pathDir + ":"}
+	doubleColonPathEnv := map[string]string{"PATH": pathDir + "::/usr/bin"}
 	cfg := &config.Config{
 		InstanceID: "test",
 		Hosts: map[string]config.HostConfig{
 			"local": {
 				Transport: "local",
 				Agents: map[string]config.HostAgentOverride{
-					"cfg-fail":            {Command: cfgFailBin},
-					"wrapper-missing-dep": {Command: wrapperMissingDepBin},
-					"non-exec":            {Command: nonExecBin},
-					"agent-self-err":      {Command: "agent-self-err", Env: pathEnv},
-					"bad-shebang":         {Command: badShebangBin},
-					"non-exec-on-path":    {Command: "non-exec-on-path", Env: pathEnv},
-					"missing-path":        {Command: missingPathBin},
-					"missing-bare":        {Command: "definitely-absent-agent-cmd-xyz", Env: pathEnv},
+					"cfg-fail":                 {Command: cfgFailBin},
+					"wrapper-missing-dep":      {Command: wrapperMissingDepBin},
+					"non-exec":                 {Command: nonExecBin},
+					"agent-self-err":           {Command: "agent-self-err", Env: pathEnv},
+					"bad-shebang":              {Command: badShebangBin},
+					"non-exec-on-path":         {Command: "non-exec-on-path", Env: pathEnv},
+					"non-exec-empty-path":      {Command: "non-exec-empty-path", Env: emptyPathEnv},
+					"missing-empty-path":       {Command: "definitely-absent-empty-path-xyz", Env: emptyPathEnv},
+					"non-exec-cwd-not-in-path": {Command: "non-exec-empty-path", Env: pathEnv},
+					"non-exec-leading-colon":   {Command: "non-exec-empty-path", Env: leadingColonPathEnv},
+					"non-exec-trailing-colon":  {Command: "non-exec-empty-path", Env: trailingColonPathEnv},
+					"non-exec-double-colon":    {Command: "non-exec-empty-path", Env: doubleColonPathEnv},
+					"marker-output":            {Command: "marker-output", Env: pathEnv},
+					"missing-path":             {Command: missingPathBin},
+					"missing-bare":             {Command: "definitely-absent-agent-cmd-xyz", Env: pathEnv},
 				},
 			},
 		},
 		Agents: map[string]config.AgentConfig{
-			"cfg-fail":            {},
-			"wrapper-missing-dep": {},
-			"non-exec":            {},
-			"agent-self-err":      {},
-			"bad-shebang":         {},
-			"non-exec-on-path":    {},
-			"missing-path":        {},
-			"missing-bare":        {},
+			"cfg-fail":                 {},
+			"wrapper-missing-dep":      {},
+			"non-exec":                 {},
+			"agent-self-err":           {},
+			"bad-shebang":              {},
+			"non-exec-on-path":         {},
+			"non-exec-empty-path":      {},
+			"missing-empty-path":       {},
+			"non-exec-cwd-not-in-path": {},
+			"non-exec-leading-colon":   {},
+			"non-exec-trailing-colon":  {},
+			"non-exec-double-colon":    {},
+			"marker-output":            {},
+			"missing-path":             {},
+			"missing-bare":             {},
 		},
 	}
 
@@ -591,14 +680,21 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 	}
 
 	wantStatuses := map[string]store.AgentVersionStatus{
-		"cfg-fail":            store.AgentVersionStatusError,
-		"wrapper-missing-dep": store.AgentVersionStatusError,
-		"non-exec":            store.AgentVersionStatusError,
-		"agent-self-err":      store.AgentVersionStatusError,
-		"bad-shebang":         store.AgentVersionStatusError,
-		"non-exec-on-path":    store.AgentVersionStatusError,
-		"missing-path":        store.AgentVersionStatusNotFound,
-		"missing-bare":        store.AgentVersionStatusNotFound,
+		"cfg-fail":                 store.AgentVersionStatusError,
+		"wrapper-missing-dep":      store.AgentVersionStatusError,
+		"non-exec":                 store.AgentVersionStatusError,
+		"agent-self-err":           store.AgentVersionStatusError,
+		"bad-shebang":              store.AgentVersionStatusError,
+		"non-exec-on-path":         store.AgentVersionStatusError,
+		"non-exec-empty-path":      store.AgentVersionStatusError,
+		"missing-empty-path":       store.AgentVersionStatusNotFound,
+		"non-exec-cwd-not-in-path": store.AgentVersionStatusNotFound,
+		"non-exec-leading-colon":   store.AgentVersionStatusError,
+		"non-exec-trailing-colon":  store.AgentVersionStatusError,
+		"non-exec-double-colon":    store.AgentVersionStatusError,
+		"marker-output":            store.AgentVersionStatusError,
+		"missing-path":             store.AgentVersionStatusNotFound,
+		"missing-bare":             store.AgentVersionStatusNotFound,
 	}
 	for _, c := range res.Matrix.Entries {
 		want, ok := wantStatuses[c.Agent]

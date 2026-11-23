@@ -181,7 +181,7 @@ func (c *Checker) Check(ctx context.Context) (*CheckResult, error) {
 }
 
 func (c *Checker) probeOne(ctx context.Context, fa adapter.FileAccess, hostName string, hostCfg config.HostConfig, agentName string, now time.Time) store.AgentVersion {
-	cmd, targetExe, err := buildAgentVersionCommand(c.cfg, hostCfg, agentName)
+	cmd, targetExe, notFoundMarker, err := buildAgentVersionCommand(c.cfg, hostCfg, agentName)
 	if err != nil {
 		return store.AgentVersion{
 			Host:        hostName,
@@ -196,10 +196,10 @@ func (c *Checker) probeOne(ctx context.Context, fa adapter.FileAccess, hostName 
 	defer cancel()
 
 	res, runErr := fa.RunCommand(probeCtx, cmd)
-	return classifyProbeResult(hostName, agentName, targetExe, res, runErr, now)
+	return classifyProbeResult(hostName, agentName, targetExe, notFoundMarker, res, runErr, now)
 }
 
-func buildAgentVersionCommand(cfg *config.Config, hostCfg config.HostConfig, agentName string) (string, string, error) {
+func buildAgentVersionCommand(cfg *config.Config, hostCfg config.HostConfig, agentName string) (string, string, string, error) {
 	driver, err := adapter.ResolveDriver(cfg, hostCfg, agentName)
 	if err != nil {
 		// Allow agents that only specify a host command override or agent name without a launch template.
@@ -225,11 +225,11 @@ func buildAgentVersionCommand(cfg *config.Config, hostCfg config.HostConfig, age
 
 	versionArgs := resolveVersionArgs(cfg, hostCfg, agentName)
 	isWin := strings.EqualFold(strings.TrimSpace(hostCfg.OS), "windows")
-	cmd, err := driver.BuildVersionCommand(versionArgs, isWin)
+	cmd, notFoundMarker, err := driver.BuildVersionCommand(versionArgs, isWin)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return cmd, driver.ResolveBaseCommand(), nil
+	return cmd, driver.ResolveBaseCommand(), notFoundMarker, nil
 }
 
 func resolveVersionArgs(cfg *config.Config, hostCfg config.HostConfig, agentName string) []string {
@@ -246,7 +246,7 @@ func resolveVersionArgs(cfg *config.Config, hostCfg config.HostConfig, agentName
 	return nil
 }
 
-func classifyProbeResult(hostName, agentName, targetExe string, res adapter.ExecResult, runErr error, now time.Time) store.AgentVersion {
+func classifyProbeResult(hostName, agentName, targetExe, notFoundMarker string, res adapter.ExecResult, runErr error, now time.Time) store.AgentVersion {
 	if runErr != nil {
 		detail := runErr.Error()
 		if trimmed := strings.TrimSpace(res.Output); trimmed != "" {
@@ -263,7 +263,7 @@ func classifyProbeResult(hostName, agentName, targetExe string, res adapter.Exec
 
 	trimmedOut := strings.TrimSpace(res.Output)
 	if res.ExitCode != 0 {
-		if detail, ok := detectTargetCommandNotFound(targetExe, res.ExitCode, trimmedOut); ok {
+		if detail, ok := detectTargetCommandNotFound(targetExe, notFoundMarker, res.ExitCode, res.Output); ok {
 			return store.AgentVersion{
 				Host:        hostName,
 				Agent:       agentName,
@@ -317,22 +317,26 @@ func classifyProbeResult(hostName, agentName, targetExe string, res adapter.Exec
 }
 
 // detectTargetCommandNotFound classifies a probe failure as not_found strictly when
-// BuildVersionCommand's pre-check emitted VersionProbeNotFoundMarker with exit code 127.
-// Output-text heuristics are intentionally not used because an existing executable (or its
-// shebang/runtime failure) can emit shell-like "not found" errors after resolution succeeded.
-func detectTargetCommandNotFound(targetExe string, exitCode int, output string) (string, bool) {
+// BuildVersionCommand's pre-check emitted the exact per-probe nonce-bearing marker line
+// with exit code 127. Output-text heuristics and static markers are intentionally rejected
+// so an existing executable cannot spoof not_found.
+func detectTargetCommandNotFound(targetExe, notFoundMarker string, exitCode int, output string) (string, bool) {
 	if exitCode != 127 {
 		return "", false
 	}
+	marker := strings.TrimSpace(notFoundMarker)
+	if marker == "" {
+		return "", false
+	}
+	target := strings.TrimSpace(targetExe)
+	expectedLine := marker
+	if target != "" {
+		expectedLine = marker + " " + target
+	}
 	for _, line := range strings.Split(output, "\n") {
-		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-		if strings.HasPrefix(trimmed, adapter.VersionProbeNotFoundMarker) {
-			missing := strings.TrimSpace(strings.TrimPrefix(trimmed, adapter.VersionProbeNotFoundMarker))
-			if missing == "" {
-				missing = strings.TrimSpace(targetExe)
-			}
-			if missing != "" {
-				return fmt.Sprintf("command not found: %s", missing), true
+		if strings.TrimSuffix(line, "\r") == expectedLine {
+			if target != "" {
+				return fmt.Sprintf("command not found: %s", target), true
 			}
 			return "command not found (exit 127)", true
 		}

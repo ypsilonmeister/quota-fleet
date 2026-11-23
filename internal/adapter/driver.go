@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"path"
@@ -205,19 +206,33 @@ func (d AgentDriver) ResolveBaseCommand() string {
 	return strings.TrimSpace(d.Name)
 }
 
-// VersionProbeNotFoundMarker is emitted by BuildVersionCommand when the target executable
-// cannot be resolved before invocation, distinguishing command absence from runtime failures.
+// VersionProbeNotFoundMarker is the static prefix for per-probe not-found markers.
 const VersionProbeNotFoundMarker = "__QUOTA_FLEET_CMD_NOT_FOUND__:"
+
+// NewVersionProbeNotFoundMarker generates a unique per-probe marker embedding a
+// random 128-bit hex nonce so target command output cannot spoof pre-check not_found.
+func NewVersionProbeNotFoundMarker() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("adapter: generate version probe nonce: %w", err)
+	}
+	return fmt.Sprintf("__QUOTA_FLEET_CMD_NOT_FOUND_%x__:", b), nil
+}
 
 // BuildVersionCommand builds the shell command passed to FileAccess.RunCommand
 // to query the agent's version (`<command> <version_args...>`), defaulting to `--version`.
 // Before executing the target command, it checks whether the target executable can be resolved
-// and emits VersionProbeNotFoundMarker with exit code 127 only when the executable itself is absent.
+// and emits a per-probe nonce-bearing marker with exit code 127 only when the executable itself is absent.
+// It returns the rendered command string and the exact marker prefix expected for this probe.
 // On Windows, it returns PowerShell statements suitable for windowsFileAccess.RunCommand.
-func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (string, error) {
+func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (string, string, error) {
 	exe := d.ResolveBaseCommand()
 	if exe == "" {
-		return "", fmt.Errorf("adapter: agent %q has no executable command configured", d.Name)
+		return "", "", fmt.Errorf("adapter: agent %q has no executable command configured", d.Name)
+	}
+	notFoundMarker, err := NewVersionProbeNotFoundMarker()
+	if err != nil {
+		return "", "", err
 	}
 	args := versionArgs
 	if len(args) == 0 {
@@ -231,12 +246,12 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 		if strings.ContainsAny(exe, `/\`) {
 			stmts = append(stmts, fmt.Sprintf(
 				"if (-not (Get-Command %s -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath %s)) { [Console]::Error.WriteLine(%s + ' ' + %s); exit 127 }",
-				exeExpr, exeExpr, psExpr(VersionProbeNotFoundMarker), exeExpr,
+				exeExpr, exeExpr, psExpr(notFoundMarker), exeExpr,
 			))
 		} else {
 			stmts = append(stmts, fmt.Sprintf(
 				"if (-not (Get-Command %s -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath %s) -and -not (($env:PATH -split ';') | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ %s) -PathType Leaf) } | Select-Object -First 1)) { [Console]::Error.WriteLine(%s + ' ' + %s); exit 127 }",
-				exeExpr, exeExpr, exeExpr, psExpr(VersionProbeNotFoundMarker), exeExpr,
+				exeExpr, exeExpr, exeExpr, psExpr(notFoundMarker), exeExpr,
 			))
 		}
 		psTokens := make([]string, 0, 1+len(args))
@@ -245,7 +260,7 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 			psTokens = append(psTokens, psExpr(a))
 		}
 		stmts = append(stmts, "& "+strings.Join(psTokens, " "))
-		return strings.Join(stmts, "; "), nil
+		return strings.Join(stmts, "; "), notFoundMarker, nil
 	}
 
 	exeToken := formatRemoteCommandToken(exe)
@@ -253,14 +268,13 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 	if strings.Contains(exe, "/") {
 		preCheck = fmt.Sprintf(
 			"if [ ! -e %s ]; then printf '%%s %%s\\n' %s %s >&2; exit 127; fi",
-			exeToken, shellQuote(VersionProbeNotFoundMarker), shellQuote(exe),
+			exeToken, shellQuote(notFoundMarker), shellQuote(exe),
 		)
 	} else {
 		exeQuoted := shellQuote(exe)
 		preCheck = fmt.Sprintf(
 			"if ! command -v %s >/dev/null 2>&1; then "+
 				"__qf_hit=''; "+
-				"if [ -n \"$PATH\" ]; then "+
 				"__qf_path=\"${PATH}:\"; "+
 				"while [ -n \"$__qf_path\" ]; do "+
 				"__qf_dir=\"${__qf_path%%%%:*}\"; "+
@@ -270,14 +284,13 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 				"__qf_hit=\"$__qf_dir/\"%s; break; "+
 				"fi; "+
 				"done; "+
-				"fi; "+
 				"if [ -n \"$__qf_hit\" ]; then "+
 				"printf '%%s: permission denied (not executable)\\n' \"$__qf_hit\" >&2; exit 126; "+
 				"fi; "+
 				"printf '%%s %%s\\n' %s %s >&2; exit 127; "+
 				"fi",
 			exeToken, exeQuoted, exeQuoted, exeQuoted,
-			shellQuote(VersionProbeNotFoundMarker), exeQuoted,
+			shellQuote(notFoundMarker), exeQuoted,
 		)
 	}
 
@@ -292,10 +305,10 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 	}
 	cmd := preCheck + "; " + strings.Join(parts, " ")
 	if len(d.Env) == 0 {
-		return cmd, nil
+		return cmd, notFoundMarker, nil
 	}
 	lines := append(formatEnvExports(d.Env), cmd)
-	return strings.Join(lines, "; "), nil
+	return strings.Join(lines, "; "), notFoundMarker, nil
 }
 
 // selectLaunchTemplate chooses the resume template when job.SessionID is set and the driver
