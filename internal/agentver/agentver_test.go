@@ -218,7 +218,7 @@ func TestChecker_DriftLifecyclePinExclusionAndProbeFailures(t *testing.T) {
 			case strings.Contains(cmd, "agy") && strings.Contains(cmd, "-v"):
 				return adapter.ExecResult{ExitCode: 0, Output: "agy 0.5.0\n"}, nil
 			default:
-				return adapter.ExecResult{ExitCode: 127, Output: "sh: 1: unknown: not found"}, nil
+				return adapter.ExecResult{ExitCode: 127, Output: adapter.VersionProbeNotFoundMarker + " unknown\n"}, nil
 			}
 		},
 		"ubuntu-vm": func(cmd string) (adapter.ExecResult, error) {
@@ -288,7 +288,7 @@ func TestChecker_DriftLifecyclePinExclusionAndProbeFailures(t *testing.T) {
 		case strings.Contains(cmd, "codex"):
 			return adapter.ExecResult{ExitCode: 0, Output: "codex-cli 0.171.0\n"}, nil
 		default:
-			return adapter.ExecResult{ExitCode: 127, Output: "sh: 1: agy: not found"}, nil
+			return adapter.ExecResult{ExitCode: 127, Output: adapter.VersionProbeNotFoundMarker + " agy\n"}, nil
 		}
 	}
 	outputs["home-win"] = func(cmd string) (adapter.ExecResult, error) {
@@ -457,22 +457,28 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 			wantStatus: store.AgentVersionStatusError,
 		},
 		{
-			name:       "direct sh not found naming target exe",
+			name:       "sh not found output without pre-check marker must be error",
 			targetExe:  "agy",
 			res:        adapter.ExecResult{ExitCode: 127, Output: "sh: 1: agy: not found"},
-			wantStatus: store.AgentVersionStatusNotFound,
+			wantStatus: store.AgentVersionStatusError,
 		},
 		{
-			name:       "direct bash command not found naming target exe",
+			name:       "command output naming itself command not found with exit 1 must be error",
+			targetExe:  "agent",
+			res:        adapter.ExecResult{ExitCode: 1, Output: "agent: command not found"},
+			wantStatus: store.AgentVersionStatusError,
+		},
+		{
+			name:       "bash command not found without pre-check marker must be error",
 			targetExe:  "codex",
 			res:        adapter.ExecResult{ExitCode: 127, Output: "bash: line 1: codex: command not found"},
-			wantStatus: store.AgentVersionStatusNotFound,
+			wantStatus: store.AgentVersionStatusError,
 		},
 		{
-			name:       "direct powershell not recognized naming target exe",
+			name:       "powershell not recognized without pre-check marker must be error",
 			targetExe:  "codex",
 			res:        adapter.ExecResult{ExitCode: 1, Output: "codex : The term 'codex' is not recognized as the name of a cmdlet, function, script file, or operable program."},
-			wantStatus: store.AgentVersionStatusNotFound,
+			wantStatus: store.AgentVersionStatusError,
 		},
 		{
 			name:       "powershell not recognized naming different command must be error",
@@ -496,6 +502,10 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 
 	// 2. End-to-end execution via LocalFileAccess + BuildVersionCommand.
 	dir := t.TempDir()
+	pathDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(pathDir, 0o755); err != nil {
+		t.Fatalf("mkdir pathDir: %v", err)
+	}
 	cfgFailBin := filepath.Join(dir, "cfg-fail")
 	if err := os.WriteFile(cfgFailBin, []byte("#!/bin/sh\necho 'config: no such file or directory' >&2\nexit 1\n"), 0o755); err != nil {
 		t.Fatalf("write cfg-fail: %v", err)
@@ -508,6 +518,21 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 	if err := os.WriteFile(nonExecBin, []byte("#!/bin/sh\necho 1.0.0\n"), 0o644); err != nil {
 		t.Fatalf("write non-exec: %v", err)
 	}
+	// Repro 1: executable exists and prints "<name>: command not found" on stderr with exit 1.
+	selfNotFoundErrBin := filepath.Join(pathDir, "agent-self-err")
+	if err := os.WriteFile(selfNotFoundErrBin, []byte("#!/bin/sh\necho 'agent-self-err: command not found' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write agent-self-err: %v", err)
+	}
+	// Repro 2: executable script exists at absolute path, but its shebang interpreter is missing.
+	badShebangBin := filepath.Join(dir, "bad-shebang")
+	if err := os.WriteFile(badShebangBin, []byte("#!/nonexistent/qf-missing-interpreter-xyz\necho 1.0.0\n"), 0o755); err != nil {
+		t.Fatalf("write bad-shebang: %v", err)
+	}
+	// Repro 3: file exists on PATH by bare name, but lacks the execute bit.
+	nonExecOnPathBin := filepath.Join(pathDir, "non-exec-on-path")
+	if err := os.WriteFile(nonExecOnPathBin, []byte("#!/bin/sh\necho 1.0.0\n"), 0o644); err != nil {
+		t.Fatalf("write non-exec-on-path: %v", err)
+	}
 	missingPathBin := filepath.Join(dir, "does-not-exist-bin")
 
 	st, err := store.Open(context.Background(), ":memory:", store.Options{InstanceID: "test"})
@@ -516,6 +541,7 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 	}
 	defer st.Close()
 
+	pathEnv := map[string]string{"PATH": pathDir + ":/usr/bin:/bin"}
 	cfg := &config.Config{
 		InstanceID: "test",
 		Hosts: map[string]config.HostConfig{
@@ -525,8 +551,11 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 					"cfg-fail":            {Command: cfgFailBin},
 					"wrapper-missing-dep": {Command: wrapperMissingDepBin},
 					"non-exec":            {Command: nonExecBin},
+					"agent-self-err":      {Command: "agent-self-err", Env: pathEnv},
+					"bad-shebang":         {Command: badShebangBin},
+					"non-exec-on-path":    {Command: "non-exec-on-path", Env: pathEnv},
 					"missing-path":        {Command: missingPathBin},
-					"missing-bare":        {Command: "definitely-absent-agent-cmd-xyz"},
+					"missing-bare":        {Command: "definitely-absent-agent-cmd-xyz", Env: pathEnv},
 				},
 			},
 		},
@@ -534,6 +563,9 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 			"cfg-fail":            {},
 			"wrapper-missing-dep": {},
 			"non-exec":            {},
+			"agent-self-err":      {},
+			"bad-shebang":         {},
+			"non-exec-on-path":    {},
 			"missing-path":        {},
 			"missing-bare":        {},
 		},
@@ -562,6 +594,9 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 		"cfg-fail":            store.AgentVersionStatusError,
 		"wrapper-missing-dep": store.AgentVersionStatusError,
 		"non-exec":            store.AgentVersionStatusError,
+		"agent-self-err":      store.AgentVersionStatusError,
+		"bad-shebang":         store.AgentVersionStatusError,
+		"non-exec-on-path":    store.AgentVersionStatusError,
 		"missing-path":        store.AgentVersionStatusNotFound,
 		"missing-bare":        store.AgentVersionStatusNotFound,
 	}
@@ -572,6 +607,9 @@ func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T
 		}
 		if c.Status != want {
 			t.Errorf("agent %q status = %q (detail=%q), want %q", c.Agent, c.Status, c.ErrorDetail, want)
+		}
+		if strings.TrimSpace(c.ErrorDetail) == "" {
+			t.Errorf("agent %q expected non-empty ErrorDetail for status %q", c.Agent, c.Status)
 		}
 	}
 }

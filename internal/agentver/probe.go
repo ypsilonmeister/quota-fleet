@@ -316,62 +316,27 @@ func classifyProbeResult(hostName, agentName, targetExe string, res adapter.Exec
 	}
 }
 
-// detectTargetCommandNotFound distinguishes absence of the target executable itself from
-// runtime failures of an already-launched command (e.g., missing config files or missing
-// child dependencies inside a wrapper script).
+// detectTargetCommandNotFound classifies a probe failure as not_found strictly when
+// BuildVersionCommand's pre-check emitted VersionProbeNotFoundMarker with exit code 127.
+// Output-text heuristics are intentionally not used because an existing executable (or its
+// shebang/runtime failure) can emit shell-like "not found" errors after resolution succeeded.
 func detectTargetCommandNotFound(targetExe string, exitCode int, output string) (string, bool) {
-	// 1. Authoritative pre-check marker emitted by BuildVersionCommand before invoking targetExe.
-	if exitCode == 127 {
-		for _, line := range strings.Split(output, "\n") {
-			trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-			if strings.HasPrefix(trimmed, adapter.VersionProbeNotFoundMarker) {
-				missing := strings.TrimSpace(strings.TrimPrefix(trimmed, adapter.VersionProbeNotFoundMarker))
-				if missing == "" {
-					missing = strings.TrimSpace(targetExe)
-				}
-				if missing != "" {
-					return fmt.Sprintf("command not found: %s", missing), true
-				}
-				return "command not found (exit 127)", true
-			}
-		}
-	}
-
-	// 2. Fallback for direct shell errors that explicitly name targetExe as unresolved.
-	// Bare exit codes (127/9009) and generic "no such file or directory" messages are
-	// intentionally NOT treated as not_found because an executed binary or wrapper can emit them.
-	exe := strings.ToLower(strings.TrimSpace(targetExe))
-	if exe == "" || output == "" {
+	if exitCode != 127 {
 		return "", false
 	}
-
-	for _, rawLine := range strings.Split(output, "\n") {
-		line := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(rawLine, "\r")))
-		if line == "" {
-			continue
-		}
-		// POSIX sh / dash: "sh: 1: <exe>: not found" or "<exe>: not found"
-		if strings.HasSuffix(line, ": "+exe+": not found") || line == exe+": not found" {
-			return output, true
-		}
-		// bash / zsh: "bash: <exe>: command not found", "bash: line 1: <exe>: command not found",
-		// "zsh: command not found: <exe>", "<exe>: command not found"
-		if strings.HasSuffix(line, ": "+exe+": command not found") ||
-			line == exe+": command not found" ||
-			strings.HasSuffix(line, "command not found: "+exe) {
-			return output, true
-		}
-		// PowerShell: "The term '<exe>' is not recognized as the name of a cmdlet..."
-		if strings.Contains(line, "the term '"+exe+"' is not recognized as the name of a cmdlet") ||
-			strings.Contains(line, "the term '"+exe+"' is not recognized as a name of a cmdlet") {
-			return output, true
-		}
-		// Windows cmd.exe: "'<exe>' is not recognized as an internal or external command"
-		if strings.Contains(line, "'"+exe+"' is not recognized as an internal or external command") {
-			return output, true
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if strings.HasPrefix(trimmed, adapter.VersionProbeNotFoundMarker) {
+			missing := strings.TrimSpace(strings.TrimPrefix(trimmed, adapter.VersionProbeNotFoundMarker))
+			if missing == "" {
+				missing = strings.TrimSpace(targetExe)
+			}
+			if missing != "" {
+				return fmt.Sprintf("command not found: %s", missing), true
+			}
+			return "command not found (exit 127)", true
 		}
 	}
-
 	return "", false
 }
 

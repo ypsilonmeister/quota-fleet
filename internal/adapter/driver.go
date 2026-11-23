@@ -228,10 +228,17 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 		var stmts []string
 		stmts = append(stmts, formatPowerShellEnvAssigns(d.Env)...)
 		exeExpr := psExpr(exe)
-		stmts = append(stmts, fmt.Sprintf(
-			"if (-not (Get-Command %s -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath %s)) { [Console]::Error.WriteLine(%s + ' ' + %s); exit 127 }",
-			exeExpr, exeExpr, psExpr(VersionProbeNotFoundMarker), exeExpr,
-		))
+		if strings.ContainsAny(exe, `/\`) {
+			stmts = append(stmts, fmt.Sprintf(
+				"if (-not (Get-Command %s -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath %s)) { [Console]::Error.WriteLine(%s + ' ' + %s); exit 127 }",
+				exeExpr, exeExpr, psExpr(VersionProbeNotFoundMarker), exeExpr,
+			))
+		} else {
+			stmts = append(stmts, fmt.Sprintf(
+				"if (-not (Get-Command %s -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath %s) -and -not (($env:PATH -split ';') | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ %s) -PathType Leaf) } | Select-Object -First 1)) { [Console]::Error.WriteLine(%s + ' ' + %s); exit 127 }",
+				exeExpr, exeExpr, exeExpr, psExpr(VersionProbeNotFoundMarker), exeExpr,
+			))
+		}
 		psTokens := make([]string, 0, 1+len(args))
 		psTokens = append(psTokens, exeExpr)
 		for _, a := range args {
@@ -249,9 +256,28 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 			exeToken, shellQuote(VersionProbeNotFoundMarker), shellQuote(exe),
 		)
 	} else {
+		exeQuoted := shellQuote(exe)
 		preCheck = fmt.Sprintf(
-			"if ! command -v %s >/dev/null 2>&1; then printf '%%s %%s\\n' %s %s >&2; exit 127; fi",
-			exeToken, shellQuote(VersionProbeNotFoundMarker), shellQuote(exe),
+			"if ! command -v %s >/dev/null 2>&1; then "+
+				"__qf_hit=''; "+
+				"if [ -n \"$PATH\" ]; then "+
+				"__qf_path=\"${PATH}:\"; "+
+				"while [ -n \"$__qf_path\" ]; do "+
+				"__qf_dir=\"${__qf_path%%%%:*}\"; "+
+				"__qf_path=\"${__qf_path#*:}\"; "+
+				"[ -n \"$__qf_dir\" ] || __qf_dir=.; "+
+				"if [ -e \"$__qf_dir/\"%s ] && [ ! -d \"$__qf_dir/\"%s ]; then "+
+				"__qf_hit=\"$__qf_dir/\"%s; break; "+
+				"fi; "+
+				"done; "+
+				"fi; "+
+				"if [ -n \"$__qf_hit\" ]; then "+
+				"printf '%%s: permission denied (not executable)\\n' \"$__qf_hit\" >&2; exit 126; "+
+				"fi; "+
+				"printf '%%s %%s\\n' %s %s >&2; exit 127; "+
+				"fi",
+			exeToken, exeQuoted, exeQuoted, exeQuoted,
+			shellQuote(VersionProbeNotFoundMarker), exeQuoted,
 		)
 	}
 
