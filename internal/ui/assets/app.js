@@ -14,6 +14,242 @@
   ];
   const CANCELLABLE_STATUSES = new Set(["draft", "queued", "waiting"]);
   const REQUEUEABLE_STATUSES = new Set(["failed", "cancelled"]);
+  const SUMMARY_STATUS_ORDER = [
+    { key: "done", label: "done" },
+    { key: "claimed", label: "実行中" },
+    { key: "queued", label: "queued" },
+    { key: "waiting", label: "waiting" },
+    { key: "failed", label: "失敗" },
+    { key: "cancelled", label: "キャンセル" },
+    { key: "draft", label: "draft" }
+  ];
+
+  // ==================== Pure Chain / Tree Helpers ====================
+  function buildJobForest(jobs) {
+    const byId = new Map();
+    if (Array.isArray(jobs)) {
+      for (const j of jobs) {
+        if (!j || typeof j.id !== "number" || !Number.isFinite(j.id)) {
+          continue;
+        }
+        if (!byId.has(j.id)) {
+          byId.set(j.id, j);
+        }
+      }
+    }
+
+    const childrenByParent = new Map();
+    const obviousRoots = [];
+
+    for (const j of byId.values()) {
+      const pid = j.parent_id;
+      const hasValidParent = Boolean(pid && pid !== j.id && byId.has(pid));
+      if (hasValidParent) {
+        if (!childrenByParent.has(pid)) {
+          childrenByParent.set(pid, []);
+        }
+        childrenByParent.get(pid).push(j);
+      } else {
+        obviousRoots.push(j);
+      }
+    }
+
+    for (const list of childrenByParent.values()) {
+      list.sort(function (a, b) {
+        return a.id - b.id;
+      });
+    }
+    obviousRoots.sort(function (a, b) {
+      return a.id - b.id;
+    });
+
+    const visited = new Set();
+
+    function buildSubtree(job, depth, isOrphanRoot) {
+      visited.add(job.id);
+      const node = {
+        job: job,
+        depth: depth,
+        isOrphanRoot: Boolean(isOrphanRoot),
+        children: []
+      };
+      const rawChildren = childrenByParent.get(job.id) || [];
+      for (const child of rawChildren) {
+        if (visited.has(child.id)) {
+          continue;
+        }
+        node.children.push(buildSubtree(child, depth + 1, false));
+      }
+      return node;
+    }
+
+    const forest = [];
+
+    for (const rootJob of obviousRoots) {
+      if (visited.has(rootJob.id)) {
+        continue;
+      }
+      const isOrphanRoot = Boolean(rootJob.parent_id && rootJob.parent_id !== rootJob.id && !byId.has(rootJob.parent_id));
+      forest.push(buildSubtree(rootJob, 0, isOrphanRoot));
+    }
+
+    // Any remaining unvisited jobs belong to pure parent_id cycles (e.g. A -> B -> A).
+    // Break each cycle deterministically by picking the lowest unvisited ID as root.
+    if (visited.size < byId.size) {
+      const remaining = Array.from(byId.values())
+        .filter(function (j) { return !visited.has(j.id); })
+        .sort(function (a, b) { return a.id - b.id; });
+      for (const cycleJob of remaining) {
+        if (visited.has(cycleJob.id)) {
+          continue;
+        }
+        forest.push(buildSubtree(cycleJob, 0, false));
+      }
+    }
+
+    function maxIdInTree(node, seen) {
+      if (!node || !node.job || seen.has(node.job.id)) {
+        return 0;
+      }
+      seen.add(node.job.id);
+      let maxId = node.job.id;
+      for (const ch of node.children) {
+        const childMax = maxIdInTree(ch, seen);
+        if (childMax > maxId) {
+          maxId = childMax;
+        }
+      }
+      return maxId;
+    }
+
+    forest.sort(function (a, b) {
+      const maxDiff = maxIdInTree(b, new Set()) - maxIdInTree(a, new Set());
+      if (maxDiff !== 0) {
+        return maxDiff;
+      }
+      return b.job.id - a.job.id;
+    });
+
+    return forest;
+  }
+
+  function summarizeChainProgress(rootNode) {
+    const counts = {};
+    let total = 0;
+    const seen = new Set();
+
+    function walk(node) {
+      if (!node || !node.job || seen.has(node.job.id)) {
+        return;
+      }
+      seen.add(node.job.id);
+      total += 1;
+      const st = node.job.status || "unknown";
+      counts[st] = (counts[st] || 0) + 1;
+      if (Array.isArray(node.children)) {
+        for (const ch of node.children) {
+          walk(ch);
+        }
+      }
+    }
+
+    walk(rootNode);
+    return { total: total, counts: counts };
+  }
+
+  function formatChainProgressSummary(summary) {
+    if (!summary || !summary.total) {
+      return "全0件";
+    }
+    const counts = summary.counts || {};
+    const parts = [];
+    const knownKeys = new Set();
+    for (const item of SUMMARY_STATUS_ORDER) {
+      knownKeys.add(item.key);
+      const n = counts[item.key] || 0;
+      if (n > 0) {
+        parts.push(item.label + " " + n + "件");
+      }
+    }
+    for (const key of Object.keys(counts)) {
+      if (!knownKeys.has(key) && counts[key] > 0) {
+        parts.push(key + " " + counts[key] + "件");
+      }
+    }
+    if (parts.length === 0) {
+      return "全" + summary.total + "件";
+    }
+    return "全" + summary.total + "件中 " + parts.join("・");
+  }
+
+  function flattenChainTree(rootNode) {
+    const rows = [];
+    const seen = new Set();
+
+    function walk(node, depth, guides, isLast) {
+      if (!node || !node.job || seen.has(node.job.id)) {
+        return;
+      }
+      seen.add(node.job.id);
+      rows.push({
+        job: node.job,
+        depth: depth,
+        guides: guides.slice(),
+        isLast: isLast,
+        isRoot: depth === 0,
+        isOrphanRoot: Boolean(node.isOrphanRoot),
+        summary: depth === 0 ? summarizeChainProgress(node) : null
+      });
+      const kids = Array.isArray(node.children) ? node.children : [];
+      for (let i = 0; i < kids.length; i += 1) {
+        const childIsLast = i === kids.length - 1;
+        const nextGuides = depth === 0 ? [] : guides.concat([!isLast]);
+        walk(kids[i], depth + 1, nextGuides, childIsLast);
+      }
+    }
+
+    walk(rootNode, 0, [], true);
+    return rows;
+  }
+
+  function treeContainsStatus(rootNode, targetStatus) {
+    if (!targetStatus || targetStatus === "all") {
+      return true;
+    }
+    const seen = new Set();
+    function walk(node) {
+      if (!node || !node.job || seen.has(node.job.id)) {
+        return false;
+      }
+      seen.add(node.job.id);
+      if (node.job.status === targetStatus) {
+        return true;
+      }
+      if (Array.isArray(node.children)) {
+        for (const ch of node.children) {
+          if (walk(ch)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+    return walk(rootNode);
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      buildJobForest: buildJobForest,
+      summarizeChainProgress: summarizeChainProgress,
+      formatChainProgressSummary: formatChainProgressSummary,
+      flattenChainTree: flattenChainTree,
+      treeContainsStatus: treeContainsStatus
+    };
+  }
+
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return;
+  }
 
   const state = {
     meta: null,
@@ -550,36 +786,188 @@
     ]);
   }
 
+  function buildTreePrefix(guides, isLast) {
+    const items = [];
+    for (let i = 0; i < guides.length; i += 1) {
+      items.push(el("span", {
+        className: guides[i] ? "tree-guide tree-guide-line" : "tree-guide"
+      }));
+    }
+    items.push(el("span", {
+      className: isLast ? "tree-branch tree-branch-last" : "tree-branch tree-branch-mid"
+    }));
+    return el("span", { className: "tree-prefix", "aria-hidden": "true" }, items);
+  }
+
+  function buildChainJobsTable(forest, emptyText) {
+    if (!forest || forest.length === 0) {
+      return el("div", { className: "card empty-state", text: emptyText || "該当するジョブはありません。" });
+    }
+    const rows = [];
+    for (const rootNode of forest) {
+      const flatRows = flattenChainTree(rootNode);
+      for (const item of flatRows) {
+        const j = item.job;
+        const agentHost = (j.agent || "-") + " / " + (j.host || "-");
+        const lineChildren = [
+          navLink("/ui/jobs/" + j.id, "#" + j.id, "mono"),
+          navLink("/ui/jobs/" + j.id, j.title || "(無題)")
+        ];
+        if (item.isOrphanRoot && j.parent_id) {
+          lineChildren.push(
+            el("span", { className: "chain-orphan-note" }, [
+              "(親 ",
+              navLink("/ui/jobs/" + j.parent_id, "#" + j.parent_id, "mono"),
+              " 未取得)"
+            ])
+          );
+        }
+
+        const nodeMainChildren = [
+          el("div", { className: "chain-node-line" }, lineChildren)
+        ];
+        if (item.isRoot && item.summary) {
+          nodeMainChildren.push(
+            el("div", {
+              className: "chain-summary",
+              text: formatChainProgressSummary(item.summary)
+            })
+          );
+        }
+
+        const cellChildren = [];
+        if (item.depth > 0) {
+          cellChildren.push(buildTreePrefix(item.guides, item.isLast));
+        }
+        cellChildren.push(el("div", { className: "chain-node-main" }, nodeMainChildren));
+
+        rows.push(el("tr", { className: item.isRoot ? "chain-root-row" : "chain-child-row" }, [
+          el("td", null, [el("div", { className: "chain-node-cell" }, cellChildren)]),
+          el("td", null, [statusBadge(j.status)]),
+          el("td", { className: "mono", text: agentHost }),
+          el("td", { className: "small muted", text: formatTime(j.created_at) })
+        ]));
+      }
+    }
+
+    return el("div", { className: "table-wrap" }, [
+      el("table", { className: "chain-table" }, [
+        el("thead", null, [
+          el("tr", null, [
+            el("th", { scope: "col", text: "チェーン / ジョブ" }),
+            el("th", { scope: "col", text: "状態" }),
+            el("th", { scope: "col", text: "agent / host" }),
+            el("th", { scope: "col", text: "作成時刻" })
+          ])
+        ]),
+        el("tbody", null, rows)
+      ])
+    ]);
+  }
+
   // ==================== 2. Jobs List (/ui/jobs) ====================
   async function renderJobsList(searchParams) {
-    const requestedStatus = (searchParams && searchParams.get("status")) || "queued";
-    const activeStatus = ALL_STATUSES.includes(requestedStatus) ? requestedStatus : "queued";
+    const requestedView = (searchParams && searchParams.get("view")) || "flat";
+    const activeView = requestedView === "chain" ? "chain" : "flat";
+    const requestedStatus = (searchParams && searchParams.get("status")) || (activeView === "chain" ? "all" : "queued");
+    const activeStatus = activeView === "chain"
+      ? (requestedStatus === "all" || ALL_STATUSES.includes(requestedStatus) ? requestedStatus : "all")
+      : (ALL_STATUSES.includes(requestedStatus) ? requestedStatus : "queued");
     const filterAgent = (searchParams && searchParams.get("agent")) || "";
     const filterHost = (searchParams && searchParams.get("host")) || "";
     const filterQ = (searchParams && searchParams.get("q")) || "";
 
     setLoading("ジョブ一覧");
 
-    const params = new URLSearchParams();
-    params.set("status", activeStatus);
-    params.set("desc", "true");
-    params.set("limit", "50");
-    if (filterAgent) params.set("agent", filterAgent);
-    if (filterHost) params.set("host", filterHost);
-    if (filterQ) params.set("q", filterQ);
-
-    const [statusRes, metaRes, jobsRes] = await Promise.all([
-      apiFetch("/status"),
-      state.meta ? Promise.resolve({ ok: true, data: state.meta }) : apiFetch("/meta"),
-      apiFetch("/jobs?" + params.toString())
-    ]);
-
-    if (!statusRes.ok) {
-      throw new Error(errorMessageFromResp(statusRes, "ステータス取得に失敗しました"));
+    function buildJobsURL(view, st, ag, ho, q) {
+      const sp = new URLSearchParams();
+      if (view === "chain") {
+        sp.set("view", "chain");
+        if (st && st !== "all") {
+          sp.set("status", st);
+        }
+      } else {
+        sp.set("status", ALL_STATUSES.includes(st) ? st : "queued");
+      }
+      if (ag) sp.set("agent", ag);
+      if (ho) sp.set("host", ho);
+      if (q) sp.set("q", q);
+      return "/ui/jobs?" + sp.toString();
     }
-    if (!jobsRes.ok) {
-      throw new Error(errorMessageFromResp(jobsRes, "ジョブ一覧の取得に失敗しました"));
+
+    let statusRes;
+    let metaRes;
+    let loadedJobs = [];
+    let nextCursor = 0;
+    let hasMore = false;
+    let flatParams = null;
+    const truncatedStatuses = [];
+
+    if (activeView === "chain") {
+      const statusFetches = ALL_STATUSES.map(function (st) {
+        const sp = new URLSearchParams();
+        sp.set("status", st);
+        sp.set("desc", "true");
+        sp.set("limit", "100");
+        if (filterAgent) sp.set("agent", filterAgent);
+        if (filterHost) sp.set("host", filterHost);
+        if (filterQ) sp.set("q", filterQ);
+        return apiFetch("/jobs?" + sp.toString()).then(function (res) {
+          return { status: st, res: res };
+        });
+      });
+
+      const results = await Promise.all([
+        apiFetch("/status"),
+        state.meta ? Promise.resolve({ ok: true, data: state.meta }) : apiFetch("/meta"),
+        ...statusFetches
+      ]);
+      statusRes = results[0];
+      metaRes = results[1];
+      const listResults = results.slice(2);
+
+      if (!statusRes.ok) {
+        throw new Error(errorMessageFromResp(statusRes, "ステータス取得に失敗しました"));
+      }
+      for (const item of listResults) {
+        if (!item.res.ok) {
+          throw new Error(errorMessageFromResp(item.res, "ジョブ一覧 (" + item.status + ") の取得に失敗しました"));
+        }
+        const jobs = (item.res.data && Array.isArray(item.res.data.jobs)) ? item.res.data.jobs : [];
+        loadedJobs = loadedJobs.concat(jobs);
+        if (item.res.data && item.res.data.has_more) {
+          truncatedStatuses.push(item.status);
+        }
+      }
+    } else {
+      flatParams = new URLSearchParams();
+      flatParams.set("status", activeStatus);
+      flatParams.set("desc", "true");
+      flatParams.set("limit", "50");
+      if (filterAgent) flatParams.set("agent", filterAgent);
+      if (filterHost) flatParams.set("host", filterHost);
+      if (filterQ) flatParams.set("q", filterQ);
+
+      const results = await Promise.all([
+        apiFetch("/status"),
+        state.meta ? Promise.resolve({ ok: true, data: state.meta }) : apiFetch("/meta"),
+        apiFetch("/jobs?" + flatParams.toString())
+      ]);
+      statusRes = results[0];
+      metaRes = results[1];
+      const jobsRes = results[2];
+
+      if (!statusRes.ok) {
+        throw new Error(errorMessageFromResp(statusRes, "ステータス取得に失敗しました"));
+      }
+      if (!jobsRes.ok) {
+        throw new Error(errorMessageFromResp(jobsRes, "ジョブ一覧の取得に失敗しました"));
+      }
+      loadedJobs = (jobsRes.data && jobsRes.data.jobs) ? jobsRes.data.jobs.slice() : [];
+      nextCursor = jobsRes.data ? jobsRes.data.next_cursor : 0;
+      hasMore = Boolean(jobsRes.data && jobsRes.data.has_more);
     }
+
     state.status = statusRes.data;
     if (metaRes.ok && metaRes.data) {
       state.meta = metaRes.data;
@@ -587,31 +975,64 @@
     renderMetaBadges();
 
     const counts = (statusRes.data && statusRes.data.counts) || {};
-    let loadedJobs = (jobsRes.data && jobsRes.data.jobs) ? jobsRes.data.jobs.slice() : [];
-    let nextCursor = jobsRes.data ? jobsRes.data.next_cursor : 0;
-    let hasMore = Boolean(jobsRes.data && jobsRes.data.has_more);
+    const totalCount = (statusRes.data && statusRes.data.total) || 0;
 
-    function buildJobsURL(st, ag, ho, q) {
-      const sp = new URLSearchParams();
-      sp.set("status", st);
-      if (ag) sp.set("agent", ag);
-      if (ho) sp.set("host", ho);
-      if (q) sp.set("q", q);
-      return "/ui/jobs?" + sp.toString();
-    }
-
-    const tabs = el("div", { className: "tabs" }, ALL_STATUSES.map(function (st) {
-      return el("button", {
+    const viewToggle = el("div", { className: "view-toggle", role: "group", "aria-label": "表示切替" }, [
+      el("button", {
         type: "button",
-        className: "tab" + (st === activeStatus ? " active" : ""),
+        className: "view-toggle-btn" + (activeView === "flat" ? " active" : ""),
+        "aria-pressed": activeView === "flat" ? "true" : "false",
+        text: "フラット表示",
         onClick: function () {
-          navigate(buildJobsURL(st, filterAgent, filterHost, filterQ));
+          if (activeView !== "flat") {
+            const nextStatus = activeStatus === "all" ? "queued" : activeStatus;
+            navigate(buildJobsURL("flat", nextStatus, filterAgent, filterHost, filterQ));
+          }
         }
-      }, [
-        el("span", { text: st }),
-        el("span", { className: "tab-count", text: String(counts[st] || 0) })
-      ]);
-    }));
+      }),
+      el("button", {
+        type: "button",
+        className: "view-toggle-btn" + (activeView === "chain" ? " active" : ""),
+        "aria-pressed": activeView === "chain" ? "true" : "false",
+        text: "チェーン表示",
+        onClick: function () {
+          if (activeView !== "chain") {
+            navigate(buildJobsURL("chain", "all", filterAgent, filterHost, filterQ));
+          }
+        }
+      })
+    ]);
+
+    const tabItems = [];
+    if (activeView === "chain") {
+      tabItems.push(
+        el("button", {
+          type: "button",
+          className: "tab" + (activeStatus === "all" ? " active" : ""),
+          onClick: function () {
+            navigate(buildJobsURL("chain", "all", filterAgent, filterHost, filterQ));
+          }
+        }, [
+          el("span", { text: "すべて" }),
+          el("span", { className: "tab-count", text: String(totalCount) })
+        ])
+      );
+    }
+    for (const st of ALL_STATUSES) {
+      tabItems.push(
+        el("button", {
+          type: "button",
+          className: "tab" + (st === activeStatus ? " active" : ""),
+          onClick: function () {
+            navigate(buildJobsURL(activeView, st, filterAgent, filterHost, filterQ));
+          }
+        }, [
+          el("span", { text: st }),
+          el("span", { className: "tab-count", text: String(counts[st] || 0) })
+        ])
+      );
+    }
+    const tabs = el("div", { className: "tabs" }, tabItems);
 
     const agentOpts = [el("option", { value: "", text: "すべて" })];
     const agents = (state.meta && Array.isArray(state.meta.agents)) ? state.meta.agents : [];
@@ -644,7 +1065,7 @@
       className: "filter-bar",
       onSubmit: function (ev) {
         ev.preventDefault();
-        navigate(buildJobsURL(activeStatus, agentSelect.value, hostSelect.value, qInput.value.trim()));
+        navigate(buildJobsURL(activeView, activeStatus, agentSelect.value, hostSelect.value, qInput.value.trim()));
       }
     }, [
       el("label", { className: "field" }, [
@@ -666,20 +1087,38 @@
           className: "btn btn-ghost",
           text: "クリア",
           onClick: function () {
-            navigate(buildJobsURL(activeStatus, "", "", ""));
+            navigate(buildJobsURL(activeView, activeStatus, "", "", ""));
           }
         })
       ])
     ]);
 
-    const tableContainer = el("div", null, [
-      buildJobsTable(loadedJobs, "該当するジョブはありません。")
-    ]);
+    const truncationNotice = (activeView === "chain" && truncatedStatuses.length > 0)
+      ? el("div", {
+          className: "alert alert-info small",
+          text: "一部の状態 (" + truncatedStatuses.join(", ") + ") は最新 100 件まで取得してチェーンを構築しています。"
+        })
+      : null;
+
+    let tableNode;
+    if (activeView === "chain") {
+      const fullForest = buildJobForest(loadedJobs);
+      const visibleForest = activeStatus === "all"
+        ? fullForest
+        : fullForest.filter(function (rootNode) {
+            return treeContainsStatus(rootNode, activeStatus);
+          });
+      tableNode = buildChainJobsTable(visibleForest, "該当するチェーンはありません。");
+    } else {
+      tableNode = buildJobsTable(loadedJobs, "該当するジョブはありません。");
+    }
+
+    const tableContainer = el("div", null, [tableNode]);
     const loadMoreContainer = el("div", { className: "load-more-row" });
 
     function updateLoadMore() {
       loadMoreContainer.replaceChildren();
-      if (!hasMore || !nextCursor) {
+      if (activeView !== "flat" || !hasMore || !nextCursor || !flatParams) {
         return;
       }
       const btn = el("button", {
@@ -690,7 +1129,7 @@
           btn.disabled = true;
           btn.textContent = "読み込み中...";
           try {
-            const nextParams = new URLSearchParams(params.toString());
+            const nextParams = new URLSearchParams(flatParams.toString());
             nextParams.set("cursor", String(nextCursor));
             const moreRes = await apiFetch("/jobs?" + nextParams.toString());
             if (!moreRes.ok) {
@@ -714,16 +1153,181 @@
     }
     updateLoadMore();
 
-    dom.app.replaceChildren(
+    const pageNodes = [
       el("div", { className: "page-header" }, [
         el("h1", { text: "ジョブ一覧" }),
-        navLink("/ui/jobs/new", "+ 新規ジョブ登録", "btn btn-primary")
+        el("div", { className: "btn-row" }, [
+          viewToggle,
+          navLink("/ui/jobs/new", "+ 新規ジョブ登録", "btn btn-primary")
+        ])
       ]),
       tabs,
-      filterForm,
-      tableContainer,
-      loadMoreContainer
-    );
+      filterForm
+    ];
+    if (truncationNotice) {
+      pageNodes.push(truncationNotice);
+    }
+    pageNodes.push(tableContainer, loadMoreContainer);
+
+    dom.app.replaceChildren.apply(dom.app, pageNodes);
+  }
+
+  async function fetchChildrenAcrossStatuses(parentID) {
+    const results = await Promise.all(ALL_STATUSES.map(function (st) {
+      return apiFetch("/jobs?status=" + encodeURIComponent(st) + "&parent_id=" + parentID + "&limit=100");
+    }));
+    const children = [];
+    for (const cr of results) {
+      if (cr.ok && cr.data && Array.isArray(cr.data.jobs)) {
+        for (const cj of cr.data.jobs) {
+          children.push(cj);
+        }
+      }
+    }
+    return children;
+  }
+
+  async function fetchFullJobChain(job) {
+    const MAX_UP_STEPS = 50;
+    const MAX_EXPAND_NODES = 50;
+
+    const knownJobs = new Map();
+    knownJobs.set(job.id, job);
+
+    // 1. Walk upward via parent_id to locate the chain root (cycle-safe).
+    let current = job;
+    const seenUp = new Set([job.id]);
+    let steps = 0;
+    while (current.parent_id && Number.isInteger(current.parent_id) && current.parent_id > 0 && steps < MAX_UP_STEPS) {
+      if (seenUp.has(current.parent_id)) {
+        break;
+      }
+      seenUp.add(current.parent_id);
+      steps += 1;
+      const parentRes = await apiFetch("/jobs/" + current.parent_id);
+      if (!parentRes.ok || !parentRes.data || typeof parentRes.data.id !== "number") {
+        break;
+      }
+      knownJobs.set(parentRes.data.id, parentRes.data);
+      current = parentRes.data;
+    }
+
+    // 2. Walk downward (BFS) from the discovered root across all statuses.
+    const queue = [current.id];
+    const expanded = new Set();
+    while (queue.length > 0 && expanded.size < MAX_EXPAND_NODES) {
+      const budget = MAX_EXPAND_NODES - expanded.size;
+      const batch = [];
+      while (queue.length > 0 && batch.length < budget) {
+        const nextID = queue.shift();
+        if (!expanded.has(nextID)) {
+          expanded.add(nextID);
+          batch.push(nextID);
+        }
+      }
+      if (batch.length === 0) {
+        break;
+      }
+      const batchResults = await Promise.all(batch.map(fetchChildrenAcrossStatuses));
+      for (const kids of batchResults) {
+        for (const cj of kids) {
+          if (!cj || typeof cj.id !== "number") {
+            continue;
+          }
+          if (!knownJobs.has(cj.id)) {
+            knownJobs.set(cj.id, cj);
+          }
+          if (!expanded.has(cj.id)) {
+            queue.push(cj.id);
+          }
+        }
+      }
+    }
+
+    return Array.from(knownJobs.values());
+  }
+
+  function buildMiniChainSection(chainJobs, currentJobID) {
+    const forest = buildJobForest(chainJobs);
+    let primaryRoot = null;
+    for (const rootNode of forest) {
+      const flat = flattenChainTree(rootNode);
+      if (flat.some(function (row) { return row.job.id === currentJobID; })) {
+        primaryRoot = rootNode;
+        break;
+      }
+    }
+    if (!primaryRoot && forest.length > 0) {
+      primaryRoot = forest[0];
+    }
+
+    if (!primaryRoot) {
+      return el("section", { className: "section card" }, [
+        el("h2", { className: "section-title", text: "チェーン構成" }),
+        el("div", { className: "empty-state", text: "チェーン情報を取得できませんでした。" })
+      ]);
+    }
+
+    const summary = summarizeChainProgress(primaryRoot);
+    const rendered = new Set();
+
+    function renderTreeItem(node) {
+      if (!node || !node.job || rendered.has(node.job.id)) {
+        return null;
+      }
+      rendered.add(node.job.id);
+      const j = node.job;
+      const isCurrent = j.id === currentJobID;
+
+      const linkAttrs = {
+        href: "/ui/jobs/" + j.id,
+        dataset: { nav: "true" },
+        text: "#" + j.id + " " + (j.title || "(無題)")
+      };
+      if (isCurrent) {
+        linkAttrs["aria-current"] = "page";
+      }
+
+      const nodeParts = [
+        el("a", linkAttrs),
+        statusBadge(j.status)
+      ];
+      if (isCurrent) {
+        nodeParts.push(el("span", { className: "mini-tree-current-tag", text: "現在表示中" }));
+      }
+      if (node.isOrphanRoot && j.parent_id) {
+        nodeParts.push(
+          el("span", { className: "chain-orphan-note" }, [
+            "(親 ",
+            navLink("/ui/jobs/" + j.parent_id, "#" + j.parent_id, "mono"),
+            " 未取得)"
+          ])
+        );
+      }
+
+      const itemChildren = [
+        el("div", { className: "mini-tree-node" + (isCurrent ? " is-current" : "") }, nodeParts)
+      ];
+
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        const childLis = node.children.map(renderTreeItem).filter(Boolean);
+        if (childLis.length > 0) {
+          itemChildren.push(el("ul", { className: "mini-tree-children", role: "list" }, childLis));
+        }
+      }
+
+      return el("li", { className: "mini-tree-item" }, itemChildren);
+    }
+
+    const rootLi = renderTreeItem(primaryRoot);
+
+    return el("section", { className: "section card" }, [
+      el("div", { className: "mini-tree-header" }, [
+        el("h2", { className: "section-title", text: "チェーン構成" }),
+        el("span", { className: "chain-summary", text: formatChainProgressSummary(summary) })
+      ]),
+      el("ul", { className: "mini-tree", role: "list" }, rootLi ? [rootLi] : [])
+    ]);
   }
 
   // ==================== 3. Job Detail (/ui/jobs/{id}) ====================
@@ -745,25 +1349,14 @@
     }
     const job = jobRes.data;
 
-    const childFetches = ALL_STATUSES.map(function (st) {
-      return apiFetch("/jobs?status=" + encodeURIComponent(st) + "&parent_id=" + jobID + "&limit=100");
-    });
-    const [decisionsRes, ...childResults] = await Promise.all([
+    const [decisionsRes, chainJobs] = await Promise.all([
       apiFetch("/gate/decisions?job_id=" + jobID + "&limit=50"),
-      ...childFetches
+      fetchFullJobChain(job)
     ]);
 
-    const children = [];
-    for (const cr of childResults) {
-      if (cr.ok && cr.data && Array.isArray(cr.data.jobs)) {
-        for (const cj of cr.data.jobs) {
-          children.push(cj);
-        }
-      }
-    }
-    children.sort(function (a, b) {
-      return a.id - b.id;
-    });
+    const children = chainJobs
+      .filter(function (cj) { return cj.parent_id === jobID; })
+      .sort(function (a, b) { return a.id - b.id; });
 
     const decisions = (decisionsRes.ok && decisionsRes.data && decisionsRes.data.decisions) || [];
 
@@ -900,14 +1493,18 @@
       ]);
     })();
 
+    const miniChainSection = buildMiniChainSection(chainJobs, job.id);
+
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [
         el("h1", { text: "ジョブ #" + job.id + ": " + (job.title || "(無題)") }),
         el("div", { className: "btn-row" }, [
+          navLink("/ui/jobs?view=chain", "チェーン一覧", "btn"),
           navLink("/ui/jobs?status=" + encodeURIComponent(job.status), "一覧に戻る", "btn")
         ])
       ]),
       overviewCard,
+      miniChainSection,
       el("section", { className: "section card" }, [
         el("h2", { className: "section-title", text: "指示文 (instructions)" }),
         el("pre", { text: job.instructions || "(なし)" })
