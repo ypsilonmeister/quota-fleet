@@ -877,7 +877,7 @@ func TestBuildWindowsRunScriptCRLFNormalization(t *testing.T) {
 			`C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < prompt.txt > agent.log 2> agent.err.log`,
 		)
 		assertStrictCRLF(t, script)
-		if !strings.Contains(script, "@echo off\r\nsetlocal\r\nset \"FOO=bar\"\r\ncd /d \"C:\\Users\\worker\\agent-work\\job-900\" || exit /b 1\r\n") {
+		if !strings.Contains(script, "@echo off\r\nset \"FOO=bar\"\r\ncd /d \"C:\\Users\\worker\\agent-work\\job-900\" || exit /b 1\r\n") {
 			t.Errorf("unexpected script header:\n%q", script)
 		}
 	})
@@ -903,4 +903,33 @@ func TestBuildWindowsRunScriptCRLFNormalization(t *testing.T) {
 			t.Errorf("normalized launchCmd not found in script:\nwant substring: %q\ngot script: %q", want, script)
 		}
 	})
+}
+
+// Regression test: with `setlocal` present in agent-run.cmd, a WMI-launched batch's child
+// processes receive C:\Windows\System32 as their working directory instead of the `cd /d`
+// target (field-verified on home-win). Driver env vars must still be emitted as plain `set`
+// lines in the dedicated WMI process.
+func TestBuildWindowsRunScriptOmitsSetlocal(t *testing.T) {
+	driver := AgentDriver{
+		Name: "codex",
+		Env: map[string]string{
+			"ALPHA": "one",
+			"BETA":  "two",
+		},
+	}
+
+	script := BuildWindowsRunScript(
+		`C:\Users\worker\agent-work\job-903`,
+		driver,
+		`C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < prompt.txt > agent.log 2> agent.err.log`,
+	)
+
+	if strings.Contains(strings.ToLower(script), "setlocal") {
+		t.Fatalf("generated Windows run script must NOT contain setlocal (breaks child CWD under WMI):\n%s", script)
+	}
+
+	wantHeader := "@echo off\r\nset \"ALPHA=one\"\r\nset \"BETA=two\"\r\ncd /d \"C:\\Users\\worker\\agent-work\\job-903\" || exit /b 1\r\n"
+	if !strings.HasPrefix(script, wantHeader) {
+		t.Errorf("generated script header mismatch:\nwant prefix: %q\ngot script:  %q", wantHeader, script)
+	}
 }

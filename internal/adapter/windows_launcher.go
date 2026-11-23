@@ -498,12 +498,17 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 // It applies per-host env vars, enters workdir, invokes the agent command, and records
 // agent.exit + EXIT:<code> whenever control returns to the wrapper.
 // The final output is normalized to strict CRLF regardless of any line endings in launchCmd.
+//
+// Do NOT emit `setlocal` here: field experiments on home-win established that when a
+// WMI-launched batch script contains `setlocal`, child processes end up with
+// C:\Windows\System32 as their working directory instead of the `cd /d` target.
+// Because each invocation runs in a dedicated WMI cmd.exe process, plain `set` lines
+// are already isolated to that process without `setlocal`.
 func BuildWindowsRunScript(workdir string, driver AgentDriver, launchCmd string) string {
 	winWorkdir := normalizeWindowsPath(workdir)
 
 	var lines []string
 	lines = append(lines, "@echo off")
-	lines = append(lines, "setlocal")
 	lines = append(lines, formatCmdEnvSets(driver.Env)...)
 	lines = append(lines, fmt.Sprintf("cd /d %s || exit /b 1", cmdQuoteAlways(winWorkdir)))
 	lines = append(lines, fmt.Sprintf(`del /f /q "%s" "%s" 2>nul`, exitFileName, exitTmpFileName))
