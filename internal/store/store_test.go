@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openTestStore(t *testing.T) *Store {
@@ -1177,5 +1178,83 @@ func TestOpenRelativePath(t *testing.T) {
 				t.Errorf("expected DB file at %q: %v", expectedFile, err)
 			}
 		})
+	}
+}
+
+func TestGateDecisionsRecordAndListNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	j1, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "gd-1", Title: "Gate Job 1"})
+	if err != nil {
+		t.Fatalf("CreateJob 1: %v", err)
+	}
+	j2, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "gd-2", Title: "Gate Job 2"})
+	if err != nil {
+		t.Fatalf("CreateJob 2: %v", err)
+	}
+
+	// Validation errors.
+	if _, err := st.RecordGateDecision(ctx, GateDecision{JobID: 0, Decision: "would_pass"}); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("zero job_id err = %v, want ErrInvalidInput", err)
+	}
+	if _, err := st.RecordGateDecision(ctx, GateDecision{JobID: j1.ID, Decision: "bogus"}); !errors.Is(err, ErrInvalidInput) {
+		t.Errorf("invalid decision err = %v, want ErrInvalidInput", err)
+	}
+
+	measured := time.Date(2026, 11, 23, 1, 30, 0, 0, time.UTC)
+	d1, err := st.RecordGateDecision(ctx, GateDecision{
+		JobID:         j1.ID,
+		Mode:          "dry-run",
+		RequestedPool: "claude",
+		AltPools:      []string{"codex"},
+		Decision:      "would_pass",
+		SelectedPool:  "codex",
+		MeasuredAt:    &measured,
+		DecidedAt:     measured.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("RecordGateDecision d1: %v", err)
+	}
+	if d1.ID <= 0 || d1.SelectedPool != "codex" || len(d1.AltPools) != 1 || d1.AltPools[0] != "codex" {
+		t.Fatalf("d1 = %+v", d1)
+	}
+
+	d2, err := st.RecordGateDecision(ctx, GateDecision{
+		JobID:         j2.ID,
+		Mode:          "dry-run",
+		RequestedPool: "agy-argon",
+		Decision:      "would_pass",
+		SelectedPool:  "agy-argon",
+		Bypassed:      true,
+		Reason:        "unmeasured",
+		DecidedAt:     measured.Add(10 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("RecordGateDecision d2: %v", err)
+	}
+
+	list, err := st.ListGateDecisions(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListGateDecisions: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("ListGateDecisions len = %d, want 2", len(list))
+	}
+	// Newest first (d2 then d1).
+	if list[0].ID != d2.ID || !list[0].Bypassed || list[0].Reason != "unmeasured" || list[0].MeasuredAt != nil {
+		t.Errorf("list[0] = %+v, want d2", list[0])
+	}
+	if list[1].ID != d1.ID || list[1].SelectedPool != "codex" || list[1].MeasuredAt == nil || !list[1].MeasuredAt.Equal(measured) {
+		t.Errorf("list[1] = %+v, want d1", list[1])
+	}
+
+	// Limit respected.
+	limited, err := st.ListGateDecisions(ctx, 1)
+	if err != nil {
+		t.Fatalf("ListGateDecisions limit=1: %v", err)
+	}
+	if len(limited) != 1 || limited[0].ID != d2.ID {
+		t.Errorf("limited = %+v, want only d2", limited)
 	}
 }

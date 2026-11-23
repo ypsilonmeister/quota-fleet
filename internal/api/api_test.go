@@ -9,10 +9,13 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -497,5 +500,182 @@ func TestDeliveriesReturnsOnlyUndeliveredDoneAndFailed(t *testing.T) {
 	deliv2 := decodeResp[DeliveriesResponse](t, resp)
 	if len(deliv2.Jobs) != 1 || deliv2.Jobs[0].ID != jDoneUndel.ID {
 		t.Fatalf("deliveries after marking failed = %+v, want only %d", deliv2.Jobs, jDoneUndel.ID)
+	}
+}
+
+func TestDryRunQuotaGateOnCreateJob(t *testing.T) {
+	usagePath := filepath.Join(t.TempDir(), "usage.json")
+	usageJSON := `{
+		"updatedAt": "2026-11-23T10:29:49+09:00",
+		"services": {
+			"claude": {
+				"remainingPercent": 83,
+				"resetAt": "2026-11-26T20:00:00+09:00",
+				"subText": "5h 98%",
+				"subResetAt": "2026-11-23T14:30:00+09:00"
+			},
+			"codex": {
+				"remainingPercent": 38,
+				"resetAt": "2026-11-24T14:51:23+09:00",
+				"subText": "5h 70%",
+				"subResetAt": "2026-11-23T12:36:25+09:00"
+			},
+			"antigravity": {
+				"remainingPercent": 0,
+				"resetAt": "2026-11-28T18:00:17+09:00",
+				"subText": "5h 34%",
+				"subResetAt": "2026-11-23T11:00:02+09:00",
+				"altPercent": 48,
+				"altResetAt": "2026-11-26T01:32:24+09:00",
+				"altSubText": "5h 0%",
+				"altSubResetAt": "2026-11-23T15:30:02+09:00"
+			}
+		}
+	}`
+	if err := os.WriteFile(usagePath, []byte(usageJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile usage.json: %v", err)
+	}
+
+	fixedNow, _ := time.Parse(time.RFC3339, "2026-11-23T10:40:00+09:00")
+	pools := map[string]config.PoolConfig{
+		"claude":     {Provider: "claude-usage"},
+		"codex":      {Provider: "codex-usage"},
+		"agy-gemini": {Provider: "agy-usage", AppliesTo: []config.PoolTarget{{Agent: "agy", ModelFamily: "gemini"}}},
+		"agy-3p":     {Provider: "agy-usage", AppliesTo: []config.PoolTarget{{Agent: "agy", ModelFamily: "claude-gpt"}}},
+		"agy-argon":  {Unmeasured: true},
+	}
+
+	_, st, ts := newTestServer(t, Options{
+		InstanceID:      "gate-dryrun-inst",
+		MaxClaimed:      2,
+		GateMode:        config.GateModeDryRun,
+		QuotaUsageFile:  usagePath,
+		QuotaStaleAfter: 45 * time.Minute,
+		Pools:           pools,
+		Now:             func() time.Time { return fixedNow },
+	})
+
+	// 1. Healthy primary + alt_pools -> job created normally, selects soonest weekly reset (codex: 11/24 < claude: 11/26).
+	resp1 := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "dry-1",
+		Title:     "Prefer soonest weekly reset",
+		Agent:     "claude",
+		Pool:      "claude",
+		AltPools:  []string{"codex"},
+	})
+	if resp1.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /jobs #1 status = %d, want 201", resp1.StatusCode)
+	}
+	j1 := decodeResp[CreateJobResponse](t, resp1).Job
+
+	// 2. Exhausted pool resolved via applies_to (agy + gemini -> agy-gemini, weekly=0) -> job STILL created (dry-run), records would_hold blocked_by=weekly.
+	resp2 := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "dry-2",
+		Title:     "Applies-to exhausted job",
+		Agent:     "agy",
+		Model:     "gemini-2.5-pro",
+	})
+	if resp2.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /jobs #2 status = %d, want 201", resp2.StatusCode)
+	}
+	j2 := decodeResp[CreateJobResponse](t, resp2).Job
+	if j2.Status != "queued" {
+		t.Fatalf("dry-run job #2 status = %q, want queued", j2.Status)
+	}
+
+	// 3. Unmeasured pool bypass -> job created, records would_pass with bypassed=true and reason=unmeasured.
+	resp3 := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "dry-3",
+		Title:     "Unmeasured Argon job",
+		Pool:      "agy-argon",
+	})
+	if resp3.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /jobs #3 status = %d, want 201", resp3.StatusCode)
+	}
+	j3 := decodeResp[CreateJobResponse](t, resp3).Job
+
+	// 4. Exhausted by 5h via applies_to (agy + claude-sonnet -> agy-3p, 5h=0%).
+	resp4 := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "dry-4",
+		Title:     "5h exhausted job",
+		Agent:     "agy",
+		Model:     "claude-sonnet-4-5",
+	})
+	if resp4.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /jobs #4 status = %d, want 201", resp4.StatusCode)
+	}
+	j4 := decodeResp[CreateJobResponse](t, resp4).Job
+
+	// 5. Job without pool/alt_pools/applies_to match -> no gate decision recorded.
+	resp5 := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "dry-5",
+		Title:     "No pool job",
+	})
+	if resp5.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /jobs #5 status = %d, want 201", resp5.StatusCode)
+	}
+	_ = resp5.Body.Close()
+
+	// Duplicate request_id retry -> does not record a second decision.
+	respDup := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "dry-1",
+		Title:     "Prefer soonest weekly reset",
+		Pool:      "claude",
+	})
+	if respDup.StatusCode != http.StatusOK {
+		t.Fatalf("duplicate POST /jobs status = %d, want 200", respDup.StatusCode)
+	}
+	_ = respDup.Body.Close()
+
+	decisions, err := st.ListGateDecisions(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("ListGateDecisions: %v", err)
+	}
+	if len(decisions) != 4 {
+		t.Fatalf("len(decisions) = %d, want 4 (%+v)", len(decisions), decisions)
+	}
+
+	// Newest first: j4, j3, j2, j1.
+	if decisions[0].JobID != j4.ID || decisions[0].RequestedPool != "agy-3p" || decisions[0].Decision != "would_hold" || decisions[0].BlockedBy != "5h" {
+		t.Errorf("decision[0] = %+v, want job=%d agy-3p would_hold 5h", decisions[0], j4.ID)
+	}
+	if decisions[1].JobID != j3.ID || decisions[1].RequestedPool != "agy-argon" || decisions[1].Decision != "would_pass" || !decisions[1].Bypassed || decisions[1].Reason != "unmeasured" {
+		t.Errorf("decision[1] = %+v, want job=%d agy-argon bypassed", decisions[1], j3.ID)
+	}
+	if decisions[2].JobID != j2.ID || decisions[2].RequestedPool != "agy-gemini" || decisions[2].Decision != "would_hold" || decisions[2].BlockedBy != "weekly" {
+		t.Errorf("decision[2] = %+v, want job=%d agy-gemini would_hold weekly", decisions[2], j2.ID)
+	}
+	if decisions[3].JobID != j1.ID || decisions[3].Decision != "would_pass" || decisions[3].SelectedPool != "codex" || decisions[3].Bypassed {
+		t.Errorf("decision[3] = %+v, want job=%d would_pass selected=codex", decisions[3], j1.ID)
+	}
+	if decisions[3].MeasuredAt == nil {
+		t.Errorf("decision[3].MeasuredAt = nil, want parsed updatedAt")
+	}
+}
+
+func TestGateModeOffDoesNotRecordDecisions(t *testing.T) {
+	_, st, ts := newTestServer(t, Options{
+		InstanceID: "gate-off-inst",
+		MaxClaimed: 2,
+		GateMode:   config.GateModeOff,
+	})
+
+	resp := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "off-1",
+		Title:     "Gate off job",
+		Pool:      "claude",
+		AltPools:  []string{"codex"},
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /jobs status = %d, want 201", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
+
+	decisions, err := st.ListGateDecisions(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListGateDecisions: %v", err)
+	}
+	if len(decisions) != 0 {
+		t.Fatalf("expected 0 gate_decisions when gate_mode=off, got %d", len(decisions))
 	}
 }

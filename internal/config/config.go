@@ -23,6 +23,12 @@ const (
 	DefaultReconcileInterval = 30 * time.Second
 	DefaultStaleClaimedAfter = 15 * time.Minute
 	DefaultSignalMaxBytes    = int64(1 << 20) // 1 MiB
+	DefaultQuotaStaleAfter   = 45 * time.Minute
+
+	// GateModeOff disables Quota Gate checks on job registration.
+	GateModeOff = "off"
+	// GateModeDryRun evaluates Quota Gate on job registration and records decisions without holding jobs.
+	GateModeDryRun = "dry-run"
 
 	// PromptStyleStdin passes prompt.txt to the agent via stdin redirection (`< prompt.txt`).
 	PromptStyleStdin = "stdin"
@@ -40,6 +46,28 @@ type Config struct {
 	Hosts      map[string]HostConfig  `yaml:"hosts"`
 	Agents     map[string]AgentConfig `yaml:"agents"`
 	Pools      map[string]PoolConfig  `yaml:"pools"`
+	Quota      QuotaConfig            `yaml:"quota"`
+}
+
+// QuotaConfig holds Quota Gate and usage snapshot settings.
+type QuotaConfig struct {
+	UsageFile  string `yaml:"usage_file"`
+	StaleAfter string `yaml:"stale_after"`
+	GateMode   string `yaml:"gate_mode"`
+}
+
+// EffectiveStaleAfter returns the configured staleness threshold or DefaultQuotaStaleAfter (45m).
+func (q QuotaConfig) EffectiveStaleAfter() time.Duration {
+	return parseDurationOrDefault(q.StaleAfter, DefaultQuotaStaleAfter)
+}
+
+// EffectiveGateMode returns the configured gate mode, defaulting to "off".
+func (q QuotaConfig) EffectiveGateMode() string {
+	v := strings.TrimSpace(q.GateMode)
+	if v == "" {
+		return GateModeOff
+	}
+	return v
 }
 
 // RuntimeConfig holds settings for resident runtime components (Dispatcher,
@@ -264,6 +292,13 @@ func (c *Config) Validate() error {
 	}
 	if c.Runtime.SignalMaxBytes < 0 {
 		errs = append(errs, fmt.Errorf("runtime.signal_max_bytes must be >= 0 (got %d)", c.Runtime.SignalMaxBytes))
+	}
+
+	if err := validatePositiveDuration("quota.stale_after", c.Quota.StaleAfter); err != nil {
+		errs = append(errs, err)
+	}
+	if mode := strings.TrimSpace(c.Quota.GateMode); mode != "" && mode != GateModeOff && mode != GateModeDryRun {
+		errs = append(errs, fmt.Errorf("quota.gate_mode %q is not supported (allowed: %q, %q)", mode, GateModeOff, GateModeDryRun))
 	}
 
 	return errors.Join(errs...)

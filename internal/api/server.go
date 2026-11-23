@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -26,17 +30,30 @@ type Options struct {
 	Token       string
 	RequireAuth bool
 	Logger      *log.Logger
+
+	// Quota Gate integration settings (off | dry-run).
+	GateMode        string
+	QuotaUsageFile  string
+	QuotaStaleAfter time.Duration
+	Pools           map[string]config.PoolConfig
+	// Now overrides the evaluation clock in tests when non-nil.
+	Now func() time.Time
 }
 
 // Server exposes the quota-fleet Job Store over an HTTP JSON API.
 type Server struct {
-	store       *store.Store
-	instanceID  string
-	maxClaimed  int
-	token       string
-	requireAuth bool
-	logger      *log.Logger
-	handler     http.Handler
+	store           *store.Store
+	instanceID      string
+	maxClaimed      int
+	token           string
+	requireAuth     bool
+	logger          *log.Logger
+	gateMode        string
+	quotaUsageFile  string
+	quotaStaleAfter time.Duration
+	pools           map[string]config.PoolConfig
+	nowFn           func() time.Time
+	handler         http.Handler
 }
 
 // NewServer constructs an HTTP API server backed by st.
@@ -49,14 +66,31 @@ func NewServer(st *store.Store, opts Options) *Server {
 	if logger == nil {
 		logger = log.Default()
 	}
+	gateMode := strings.TrimSpace(opts.GateMode)
+	if gateMode == "" {
+		gateMode = config.GateModeOff
+	}
+	staleAfter := opts.QuotaStaleAfter
+	if staleAfter <= 0 {
+		staleAfter = config.DefaultQuotaStaleAfter
+	}
+	nowFn := opts.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
 
 	s := &Server{
-		store:       st,
-		instanceID:  opts.InstanceID,
-		maxClaimed:  maxClaimed,
-		token:       opts.Token,
-		requireAuth: opts.RequireAuth,
-		logger:      logger,
+		store:           st,
+		instanceID:      opts.InstanceID,
+		maxClaimed:      maxClaimed,
+		token:           opts.Token,
+		requireAuth:     opts.RequireAuth,
+		logger:          logger,
+		gateMode:        gateMode,
+		quotaUsageFile:  strings.TrimSpace(opts.QuotaUsageFile),
+		quotaStaleAfter: staleAfter,
+		pools:           opts.Pools,
+		nowFn:           nowFn,
 	}
 
 	if s.token == "" && !s.requireAuth {
@@ -154,6 +188,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if created && s.gateMode == config.GateModeDryRun {
+		s.recordDryRunGateDecision(r.Context(), job, req)
+	}
+
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
@@ -162,6 +200,42 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Job:     toJobDTO(job),
 		Created: created,
 	})
+}
+
+func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, req CreateJobRequest) {
+	reqPool := strings.TrimSpace(req.Pool)
+	if reqPool == "" {
+		reqPool = quota.ResolvePoolByAppliesTo(s.pools, req.Agent, req.Model)
+	}
+	if reqPool == "" && len(req.AltPools) == 0 {
+		return
+	}
+
+	eval, evalErr := quota.EvaluateFromFile(s.quotaUsageFile, reqPool, req.AltPools, quota.EvalOptions{
+		Now:        s.nowFn(),
+		StaleAfter: s.quotaStaleAfter,
+		Pools:      s.pools,
+	})
+	if evalErr != nil {
+		s.logger.Printf("WARNING: quota gate dry-run evaluation for job #%d failed to load snapshot: %v", job.ID, evalErr)
+	}
+
+	_, err := s.store.RecordGateDecision(ctx, store.GateDecision{
+		JobID:         job.ID,
+		Mode:          config.GateModeDryRun,
+		RequestedPool: eval.RequestedPool,
+		AltPools:      eval.AltPools,
+		Decision:      string(eval.Decision),
+		BlockedBy:     eval.BlockedBy,
+		SelectedPool:  eval.SelectedPool,
+		Bypassed:      eval.Bypassed,
+		Reason:        eval.Reason,
+		MeasuredAt:    eval.MeasuredAt,
+		DecidedAt:     eval.DecidedAt,
+	})
+	if err != nil {
+		s.logger.Printf("WARNING: failed to record dry-run gate decision for job #%d: %v", job.ID, err)
+	}
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {

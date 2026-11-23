@@ -100,4 +100,22 @@ CREATE TABLE IF NOT EXISTS reconciler_dedup (
     last_reported_at TEXT NOT NULL,
     count INTEGER NOT NULL DEFAULT 1
 );
+
+CREATE TABLE IF NOT EXISTS gate_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id),
+    mode TEXT NOT NULL DEFAULT 'dry-run',
+    requested_pool TEXT NOT NULL DEFAULT '',
+    alt_pools TEXT NOT NULL DEFAULT '[]',
+    decision TEXT NOT NULL CHECK(decision IN ('would_pass','would_hold','unknown')),
+    blocked_by TEXT NOT NULL DEFAULT '',
+    selected_pool TEXT NOT NULL DEFAULT '',
+    bypassed INTEGER NOT NULL DEFAULT 0,
+    reason TEXT NOT NULL DEFAULT '',
+    measured_at TEXT NULL,
+    decided_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gate_decisions_id_desc ON gate_decisions(id DESC);
+CREATE INDEX IF NOT EXISTS idx_gate_decisions_job_id ON gate_decisions(job_id);
 `

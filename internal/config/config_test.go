@@ -489,3 +489,95 @@ runtime:
 		})
 	}
 }
+
+func TestQuotaConfigDefaultsAndValidation(t *testing.T) {
+	cfg, err := Parse([]byte(`
+instance_id: "inst-q-default"
+limits: { max_claimed: 1, attempts_cap: 1 }
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.Quota.EffectiveGateMode(); got != GateModeOff {
+		t.Errorf("EffectiveGateMode() = %q, want %q", got, GateModeOff)
+	}
+	if got := cfg.Quota.EffectiveStaleAfter(); got != DefaultQuotaStaleAfter {
+		t.Errorf("EffectiveStaleAfter() = %v, want %v", got, DefaultQuotaStaleAfter)
+	}
+
+	cfgDry, err := Parse([]byte(`
+instance_id: "inst-q-dry"
+limits: { max_claimed: 1, attempts_cap: 1 }
+quota:
+  usage_file: ~/workspace/muse-widget/usage.json
+  stale_after: 30m
+  gate_mode: dry-run
+`))
+	if err != nil {
+		t.Fatalf("Parse dry-run: %v", err)
+	}
+	if err := cfgDry.Validate(); err != nil {
+		t.Fatalf("Validate dry-run: %v", err)
+	}
+	if cfgDry.Quota.UsageFile != "~/workspace/muse-widget/usage.json" {
+		t.Errorf("UsageFile = %q", cfgDry.Quota.UsageFile)
+	}
+	if cfgDry.Quota.EffectiveGateMode() != GateModeDryRun {
+		t.Errorf("EffectiveGateMode() = %q, want dry-run", cfgDry.Quota.EffectiveGateMode())
+	}
+	if cfgDry.Quota.EffectiveStaleAfter().Minutes() != 30 {
+		t.Errorf("EffectiveStaleAfter() = %v, want 30m", cfgDry.Quota.EffectiveStaleAfter())
+	}
+
+	invalidCases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "enforce not supported in Phase 3-1",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+quota:
+  gate_mode: enforce
+`,
+			wantErr: "quota.gate_mode",
+		},
+		{
+			name: "invalid stale_after duration",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+quota:
+  stale_after: "bad"
+`,
+			wantErr: "quota.stale_after",
+		},
+		{
+			name: "zero stale_after",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+quota:
+  stale_after: "0s"
+`,
+			wantErr: "quota.stale_after",
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}

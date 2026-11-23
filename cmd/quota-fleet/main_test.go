@@ -373,3 +373,153 @@ agents:
 		t.Errorf("expected stdout to log adapter=ssh, got %q", out.String())
 	}
 }
+
+func TestCLIGateCheckAndDecisions(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	cfgPath := filepath.Join(dir, "fleet.yaml")
+	usagePath := filepath.Join(dir, "usage.json")
+
+	now := time.Now().UTC().Truncate(time.Second)
+	usageJSON := fmt.Sprintf(`{
+		"updatedAt": "%s",
+		"services": {
+			"claude": {
+				"remainingPercent": 80,
+				"resetAt": "%s",
+				"subText": "5h 90%%",
+				"subResetAt": "%s"
+			},
+			"codex": {
+				"remainingPercent": 40,
+				"resetAt": "%s",
+				"subText": "5h 70%%",
+				"subResetAt": "%s"
+			}
+		}
+	}`,
+		now.Add(-5*time.Minute).Format(time.RFC3339),
+		now.Add(72*time.Hour).Format(time.RFC3339),
+		now.Add(3*time.Hour).Format(time.RFC3339),
+		now.Add(24*time.Hour).Format(time.RFC3339),
+		now.Add(2*time.Hour).Format(time.RFC3339),
+	)
+	if err := os.WriteFile(usagePath, []byte(usageJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile usage.json: %v", err)
+	}
+
+	cfgYAML := fmt.Sprintf(`
+instance_id: "cli-gate-inst"
+state_dir: "%s"
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+pools:
+  claude:
+    provider: claude-usage
+  codex:
+    provider: codex-usage
+  agy-argon:
+    unmeasured: true
+quota:
+  usage_file: "%s"
+  stale_after: 45m
+  gate_mode: dry-run
+`, filepath.ToSlash(stateDir), filepath.ToSlash(usagePath))
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("WriteFile fleet.yaml: %v", err)
+	}
+
+	// 1. gate check with alt-pools selects codex (soonest weekly reset).
+	var out, errBuf bytes.Buffer
+	code := run([]string{"gate", "check", "--config", cfgPath, "--pool", "claude", "--alt-pools", "codex"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("gate check exit=%d stderr=%q", code, errBuf.String())
+	}
+	checkOut := out.String()
+	for _, want := range []string{"decision:      would_pass", "selected_pool: codex"} {
+		if !strings.Contains(checkOut, want) {
+			t.Errorf("gate check output missing %q:\n%s", want, checkOut)
+		}
+	}
+
+	// 2. gate check for unmeasured pool reports bypass.
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{"gate", "check", "--config", cfgPath, "--pool", "agy-argon"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("gate check unmeasured exit=%d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "bypassed:      true") || !strings.Contains(out.String(), "reason:        unmeasured") {
+		t.Errorf("unexpected unmeasured gate check output:\n%s", out.String())
+	}
+
+	// 3. Seed two gate decisions and verify `gate decisions --limit` shows newest first.
+	dbPath := filepath.Join(stateDir, "fleet.db")
+	st, err := store.Open(context.Background(), dbPath, store.Options{InstanceID: "cli-gate-inst"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := st.InitInstanceID(context.Background(), "cli-gate-inst"); err != nil {
+		t.Fatalf("InitInstanceID: %v", err)
+	}
+	j1, _, err := st.CreateJob(context.Background(), store.CreateJobParams{RequestID: "cg-1", Title: "Job 1"})
+	if err != nil {
+		t.Fatalf("CreateJob 1: %v", err)
+	}
+	j2, _, err := st.CreateJob(context.Background(), store.CreateJobParams{RequestID: "cg-2", Title: "Job 2"})
+	if err != nil {
+		t.Fatalf("CreateJob 2: %v", err)
+	}
+	measured := now.Add(-5 * time.Minute)
+	if _, err := st.RecordGateDecision(context.Background(), store.GateDecision{
+		JobID:         j1.ID,
+		RequestedPool: "claude",
+		Decision:      "would_pass",
+		SelectedPool:  "claude",
+		MeasuredAt:    &measured,
+		DecidedAt:     now.Add(-2 * time.Minute),
+	}); err != nil {
+		t.Fatalf("RecordGateDecision 1: %v", err)
+	}
+	if _, err := st.RecordGateDecision(context.Background(), store.GateDecision{
+		JobID:         j2.ID,
+		RequestedPool: "codex",
+		Decision:      "would_hold",
+		BlockedBy:     "5h",
+		MeasuredAt:    &measured,
+		DecidedAt:     now.Add(-1 * time.Minute),
+	}); err != nil {
+		t.Fatalf("RecordGateDecision 2: %v", err)
+	}
+	_ = st.Close()
+
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{"gate", "decisions", "--config", cfgPath, "--limit", "10"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("gate decisions exit=%d stderr=%q", code, errBuf.String())
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("gate decisions lines = %d, want 2:\n%s", len(lines), out.String())
+	}
+	if !strings.Contains(lines[0], "job=#2") || !strings.Contains(lines[0], "would_hold") || !strings.Contains(lines[0], "blocked_by=5h") {
+		t.Errorf("first (newest) line = %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "job=#1") || !strings.Contains(lines[1], "would_pass") {
+		t.Errorf("second line = %q", lines[1])
+	}
+
+	// Limit=1 returns only the newest decision.
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{"gate", "decisions", "--config", cfgPath, "--limit", "1"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("gate decisions limit=1 exit=%d stderr=%q", code, errBuf.String())
+	}
+	lines1 := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines1) != 1 || !strings.Contains(lines1[0], "job=#2") {
+		t.Errorf("limit=1 output = %q, want only job=#2", out.String())
+	}
+}

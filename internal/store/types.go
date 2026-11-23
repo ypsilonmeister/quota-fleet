@@ -155,3 +155,19 @@ type OutboxEvent struct {
 	CreatedAt    time.Time
 	DispatchedAt *time.Time
 }
+
+// GateDecision represents a row in gate_decisions recording a Quota Gate verdict.
+type GateDecision struct {
+	ID            int64
+	JobID         int64
+	Mode          string
+	RequestedPool string
+	AltPools      []string
+	Decision      string
+	BlockedBy     string
+	SelectedPool  string
+	Bypassed      bool
+	Reason        string
+	MeasuredAt    *time.Time
+	DecidedAt     time.Time
+}

@@ -120,11 +120,15 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 	defer rt.Stop()
 
 	apiSrv := api.NewServer(st, api.Options{
-		InstanceID:  cfg.InstanceID,
-		MaxClaimed:  cfg.Limits.MaxClaimed,
-		Token:       cfg.API.Token,
-		RequireAuth: cfg.API.RequireAuth,
-		Logger:      logger,
+		InstanceID:      cfg.InstanceID,
+		MaxClaimed:      cfg.Limits.MaxClaimed,
+		Token:           cfg.API.Token,
+		RequireAuth:     cfg.API.RequireAuth,
+		Logger:          logger,
+		GateMode:        cfg.Quota.EffectiveGateMode(),
+		QuotaUsageFile:  cfg.Quota.UsageFile,
+		QuotaStaleAfter: cfg.Quota.EffectiveStaleAfter(),
+		Pools:           cfg.Pools,
 	})
 
 	httpSrv := &http.Server{
@@ -135,8 +139,8 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stdout, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s)\n",
-			listen, cfg.InstanceID, dbPath, cfg.Runtime.EffectiveAdapter())
+		fmt.Fprintf(stdout, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s, gate_mode=%s)\n",
+			listen, cfg.InstanceID, dbPath, cfg.Runtime.EffectiveAdapter(), cfg.Quota.EffectiveGateMode())
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

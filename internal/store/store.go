@@ -1173,6 +1173,147 @@ func (s *Store) RecordReconcilerDedup(ctx context.Context, dedupKey string) (boo
 	return isNew, nil
 }
 
+// RecordGateDecision inserts a Quota Gate evaluation record into gate_decisions.
+func (s *Store) RecordGateDecision(ctx context.Context, d GateDecision) (*GateDecision, error) {
+	if d.JobID <= 0 {
+		return nil, fmt.Errorf("%w: job_id must be > 0", ErrInvalidInput)
+	}
+	switch d.Decision {
+	case "would_pass", "would_hold", "unknown":
+	default:
+		return nil, fmt.Errorf("%w: invalid gate decision %q", ErrInvalidInput, d.Decision)
+	}
+
+	mode := strings.TrimSpace(d.Mode)
+	if mode == "" {
+		mode = "dry-run"
+	}
+	decidedAt := d.DecidedAt.UTC()
+	if decidedAt.IsZero() {
+		decidedAt = time.Now().UTC()
+	}
+	altPoolsJSON, err := encodeAltPools(d.AltPools)
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode alt_pools: %v", ErrInvalidInput, err)
+	}
+
+	var measuredArg any
+	var measuredCopy *time.Time
+	if d.MeasuredAt != nil && !d.MeasuredAt.IsZero() {
+		t := d.MeasuredAt.UTC()
+		measuredCopy = &t
+		measuredArg = formatTime(t)
+	}
+
+	bypassedInt := 0
+	if d.Bypassed {
+		bypassedInt = 1
+	}
+
+	var insertedID int64
+	err = s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		res, err := conn.ExecContext(ctx, `
+			INSERT INTO gate_decisions (
+				job_id, mode, requested_pool, alt_pools, decision,
+				blocked_by, selected_pool, bypassed, reason, measured_at, decided_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`,
+			d.JobID, mode, strings.TrimSpace(d.RequestedPool), altPoolsJSON, d.Decision,
+			strings.TrimSpace(d.BlockedBy), strings.TrimSpace(d.SelectedPool), bypassedInt,
+			strings.TrimSpace(d.Reason), measuredArg, formatTime(decidedAt),
+		)
+		if err != nil {
+			return err
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		insertedID = id
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	out := d
+	out.ID = insertedID
+	out.Mode = mode
+	out.RequestedPool = strings.TrimSpace(d.RequestedPool)
+	out.BlockedBy = strings.TrimSpace(d.BlockedBy)
+	out.SelectedPool = strings.TrimSpace(d.SelectedPool)
+	out.Reason = strings.TrimSpace(d.Reason)
+	out.MeasuredAt = measuredCopy
+	out.DecidedAt = decidedAt
+	if len(d.AltPools) > 0 {
+		out.AltPools = append([]string(nil), d.AltPools...)
+	}
+	return &out, nil
+}
+
+// ListGateDecisions returns recorded gate decisions ordered newest-first (id DESC).
+func (s *Store) ListGateDecisions(ctx context.Context, limit int) ([]*GateDecision, error) {
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	if limit > MaxListLimit {
+		limit = MaxListLimit
+	}
+
+	rows, err := s.readDB.QueryContext(ctx, `
+		SELECT
+			id, job_id, mode, requested_pool, alt_pools, decision,
+			blocked_by, selected_pool, bypassed, reason, measured_at, decided_at
+		FROM gate_decisions
+		ORDER BY id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var decisions []*GateDecision
+	for rows.Next() {
+		var (
+			d           GateDecision
+			altPoolsStr string
+			bypassedInt int
+			measuredNS  sql.NullString
+			decidedStr  string
+		)
+		if err := rows.Scan(
+			&d.ID, &d.JobID, &d.Mode, &d.RequestedPool, &altPoolsStr, &d.Decision,
+			&d.BlockedBy, &d.SelectedPool, &bypassedInt, &d.Reason, &measuredNS, &decidedStr,
+		); err != nil {
+			return nil, err
+		}
+		d.Bypassed = bypassedInt != 0
+		altPools, err := decodeAltPools(altPoolsStr)
+		if err != nil {
+			return nil, fmt.Errorf("decode gate decision alt_pools: %w", err)
+		}
+		d.AltPools = altPools
+		if measuredNS.Valid {
+			mt, err := parseTime(measuredNS.String)
+			if err != nil {
+				return nil, fmt.Errorf("parse gate decision measured_at: %w", err)
+			}
+			d.MeasuredAt = &mt
+		}
+		dt, err := parseTime(decidedStr)
+		if err != nil {
+			return nil, fmt.Errorf("parse gate decision decided_at: %w", err)
+		}
+		d.DecidedAt = dt
+		decisions = append(decisions, &d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return decisions, nil
+}
+
 // --- internal helpers ---
 
 type queryRower interface {
