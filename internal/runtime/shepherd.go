@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -25,7 +26,13 @@ type ShepherdOptions struct {
 	Notifier       Notifier
 	LauncherNotify chan<- struct{}
 	Interval       time.Duration
+	MaxEvalRetries int
 	Logger         *log.Logger
+}
+
+type evalFailureState struct {
+	claimedBy string
+	count     int
 }
 
 // Shepherd periodically inspects claimed jobs, evaluates exited runs, transitions them
@@ -37,7 +44,11 @@ type Shepherd struct {
 	notifier       Notifier
 	launcherNotify chan<- struct{}
 	interval       time.Duration
+	maxEvalRetries int
 	logger         *log.Logger
+
+	evalMu       sync.Mutex
+	evalFailures map[int64]evalFailureState
 }
 
 // NewShepherd creates a new Shepherd.
@@ -45,6 +56,10 @@ func NewShepherd(opts ShepherdOptions) *Shepherd {
 	interval := opts.Interval
 	if interval <= 0 {
 		interval = config.DefaultShepherdInterval
+	}
+	maxEvalRetries := opts.MaxEvalRetries
+	if maxEvalRetries <= 0 {
+		maxEvalRetries = config.DefaultEvaluatorMaxEvalRetries
 	}
 	logger := opts.Logger
 	if logger == nil {
@@ -57,7 +72,9 @@ func NewShepherd(opts ShepherdOptions) *Shepherd {
 		notifier:       opts.Notifier,
 		launcherNotify: opts.LauncherNotify,
 		interval:       interval,
+		maxEvalRetries: maxEvalRetries,
 		logger:         logger,
+		evalFailures:   make(map[int64]evalFailureState),
 	}
 }
 
@@ -140,6 +157,7 @@ func (s *Shepherd) finishExitedJob(ctx context.Context, job *store.Job, state ad
 
 	var terminalJob *store.Job
 	if state.ExitCode != 0 {
+		s.clearEvalFailure(job.ID)
 		reason, resultText := formatNonZeroExitFailure(state.ExitCode, ev.FinalReport)
 		res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
 		if err != nil {
@@ -155,38 +173,57 @@ func (s *Shepherd) finishExitedJob(ctx context.Context, job *store.Job, state ad
 	} else {
 		evalRes, err := s.evaluator.Evaluate(ctx, job, ev)
 		if err != nil {
-			if ctx.Err() == nil {
-				s.logger.Printf("shepherd evaluate error for job #%d: %v", job.ID, err)
-			}
-			return
-		}
-
-		resultText := evalRes.FormatText()
-
-		if evalRes.Passed {
-			res, err := s.store.Complete(ctx, job.ID, job.ClaimedBy, resultText)
-			if err != nil {
-				if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
-					// Lost ownership; stop before delivery per docs/02-job-model.md.
-					return
-				}
-				s.logger.Printf("shepherd complete job #%d error: %v", job.ID, err)
+			if ctx.Err() != nil {
 				return
 			}
+			count := s.recordEvalFailure(job.ID, job.ClaimedBy)
+			s.logger.Printf("shepherd evaluate error for job #%d (%d/%d): %v", job.ID, count, s.maxEvalRetries, err)
+			if count < s.maxEvalRetries {
+				return
+			}
+
+			reason, resultText := formatEvalErrorFailure(count, s.maxEvalRetries, err)
+			res, failErr := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
+			if failErr != nil {
+				if errors.Is(failErr, store.ErrConflict) || errors.Is(failErr, store.ErrTokenMismatch) {
+					s.clearEvalFailure(job.ID)
+					return
+				}
+				s.logger.Printf("shepherd fail job #%d after eval retries error: %v", job.ID, failErr)
+				return
+			}
+			s.clearEvalFailure(job.ID)
 			terminalJob = res.Job
-			s.logger.Printf("shepherd completed job #%d (promoted=%v)", job.ID, res.PromotedChildIDs)
+			s.logger.Printf("shepherd failed job #%d after %d evaluation errors (cancelled_children=%v)", job.ID, count, res.CancelledChildIDs)
 		} else {
-			reason := evalRes.FailSummary()
-			res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
-			if err != nil {
-				if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
+			s.clearEvalFailure(job.ID)
+			resultText := evalRes.FormatText()
+
+			if evalRes.Passed {
+				res, err := s.store.Complete(ctx, job.ID, job.ClaimedBy, resultText)
+				if err != nil {
+					if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
+						// Lost ownership; stop before delivery per docs/02-job-model.md.
+						return
+					}
+					s.logger.Printf("shepherd complete job #%d error: %v", job.ID, err)
 					return
 				}
-				s.logger.Printf("shepherd fail job #%d error: %v", job.ID, err)
-				return
+				terminalJob = res.Job
+				s.logger.Printf("shepherd completed job #%d (promoted=%v)", job.ID, res.PromotedChildIDs)
+			} else {
+				reason := evalRes.FailSummary()
+				res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
+				if err != nil {
+					if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
+						return
+					}
+					s.logger.Printf("shepherd fail job #%d error: %v", job.ID, err)
+					return
+				}
+				terminalJob = res.Job
+				s.logger.Printf("shepherd failed job #%d (cancelled_children=%v)", job.ID, res.CancelledChildIDs)
 			}
-			terminalJob = res.Job
-			s.logger.Printf("shepherd failed job #%d (cancelled_children=%v)", job.ID, res.CancelledChildIDs)
 		}
 	}
 
@@ -220,6 +257,37 @@ func truncateTailUTF8(s string, maxBytes int) string {
 		start++
 	}
 	return "..." + strings.TrimSpace(s[start:])
+}
+
+func formatEvalErrorFailure(count, maxRetries int, evalErr error) (reason, resultText string) {
+	msg := strings.TrimSpace(evalErr.Error())
+	if msg == "" {
+		msg = "unknown evaluation error"
+	}
+	reason = fmt.Sprintf("evaluation failed after %d/%d attempts: %s", count, maxRetries, truncateTailUTF8(msg, maxLastErrorLogBytes))
+	resultText = fmt.Sprintf("overall: FAIL\nevaluation_error: %s\neval_attempts: %d/%d", msg, count, maxRetries)
+	return reason, resultText
+}
+
+func (s *Shepherd) recordEvalFailure(jobID int64, claimedBy string) int {
+	s.evalMu.Lock()
+	defer s.evalMu.Unlock()
+	if s.evalFailures == nil {
+		s.evalFailures = make(map[int64]evalFailureState)
+	}
+	st := s.evalFailures[jobID]
+	if st.claimedBy != claimedBy {
+		st = evalFailureState{claimedBy: claimedBy, count: 0}
+	}
+	st.count++
+	s.evalFailures[jobID] = st
+	return st.count
+}
+
+func (s *Shepherd) clearEvalFailure(jobID int64) {
+	s.evalMu.Lock()
+	defer s.evalMu.Unlock()
+	delete(s.evalFailures, jobID)
 }
 
 func (s *Shepherd) notifyLauncher() {

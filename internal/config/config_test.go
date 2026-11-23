@@ -581,3 +581,139 @@ quota:
 		})
 	}
 }
+
+func TestEvaluatorConfigDefaultsAndValidation(t *testing.T) {
+	// Default values when evaluator section is omitted.
+	cfg, err := Parse([]byte(`
+instance_id: "inst-eval-default"
+limits: { max_claimed: 1, attempts_cap: 1 }
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.Evaluator.EffectiveMode(); got != EvaluatorModeTypedDecision {
+		t.Errorf("EffectiveMode() = %q, want %q", got, EvaluatorModeTypedDecision)
+	}
+	if got := cfg.Evaluator.EffectiveAPIKeyEnv(); got != DefaultEvaluatorAPIKeyEnv {
+		t.Errorf("EffectiveAPIKeyEnv() = %q, want %q", got, DefaultEvaluatorAPIKeyEnv)
+	}
+	if got := cfg.Evaluator.EffectiveDecisionThreshold(); got != DefaultEvaluatorDecisionThreshold {
+		t.Errorf("EffectiveDecisionThreshold() = %v, want %v", got, DefaultEvaluatorDecisionThreshold)
+	}
+	if got := cfg.Evaluator.EffectiveMaxEvalRetries(); got != DefaultEvaluatorMaxEvalRetries {
+		t.Errorf("EffectiveMaxEvalRetries() = %d, want %d", got, DefaultEvaluatorMaxEvalRetries)
+	}
+
+	// Explicit valid evaluator section.
+	cfgExplicit, err := Parse([]byte(`
+instance_id: "inst-eval-explicit"
+limits: { max_claimed: 1, attempts_cap: 1 }
+evaluator:
+  mode: always-pass
+  api_key_env: CUSTOM_GEMINI_KEY
+  decision_threshold: 0.75
+  max_eval_retries: 5
+`))
+	if err != nil {
+		t.Fatalf("Parse explicit: %v", err)
+	}
+	if err := cfgExplicit.Validate(); err != nil {
+		t.Fatalf("Validate explicit: %v", err)
+	}
+	if got := cfgExplicit.Evaluator.EffectiveMode(); got != EvaluatorModeAlwaysPass {
+		t.Errorf("EffectiveMode() = %q, want %q", got, EvaluatorModeAlwaysPass)
+	}
+	if got := cfgExplicit.Evaluator.EffectiveAPIKeyEnv(); got != "CUSTOM_GEMINI_KEY" {
+		t.Errorf("EffectiveAPIKeyEnv() = %q, want CUSTOM_GEMINI_KEY", got)
+	}
+	if got := cfgExplicit.Evaluator.EffectiveDecisionThreshold(); got != 0.75 {
+		t.Errorf("EffectiveDecisionThreshold() = %v, want 0.75", got)
+	}
+	if got := cfgExplicit.Evaluator.EffectiveMaxEvalRetries(); got != 5 {
+		t.Errorf("EffectiveMaxEvalRetries() = %d, want 5", got)
+	}
+
+	// Boundary decision_threshold values (0.0 and 1.0) are valid.
+	for _, th := range []string{"0.0", "1.0"} {
+		c, err := Parse([]byte("instance_id: inst\nlimits: { max_claimed: 1, attempts_cap: 1 }\nevaluator:\n  decision_threshold: " + th + "\n"))
+		if err != nil {
+			t.Fatalf("Parse threshold %s: %v", th, err)
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate threshold %s: %v", th, err)
+		}
+	}
+
+	// Invalid evaluator configs.
+	invalidCases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "unsupported evaluator mode",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+evaluator:
+  mode: llm-only
+`,
+			wantErr: "evaluator.mode",
+		},
+		{
+			name: "negative decision_threshold",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+evaluator:
+  decision_threshold: -0.1
+`,
+			wantErr: "evaluator.decision_threshold",
+		},
+		{
+			name: "decision_threshold > 1",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+evaluator:
+  decision_threshold: 1.5
+`,
+			wantErr: "evaluator.decision_threshold",
+		},
+		{
+			name: "zero max_eval_retries",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+evaluator:
+  max_eval_retries: 0
+`,
+			wantErr: "evaluator.max_eval_retries",
+		},
+		{
+			name: "negative max_eval_retries",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+evaluator:
+  max_eval_retries: -2
+`,
+			wantErr: "evaluator.max_eval_retries",
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}

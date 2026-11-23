@@ -207,6 +207,8 @@ runtime:
 limits:
   max_claimed: 2
   attempts_cap: 3
+evaluator:
+  mode: "always-pass"
 `, filepath.ToSlash(stateDir), addr)
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -371,6 +373,138 @@ agents:
 	}
 	if !strings.Contains(out.String(), "adapter=ssh") {
 		t.Errorf("expected stdout to log adapter=ssh, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "evaluator=typed+decision") {
+		t.Errorf("expected stdout to log default evaluator=typed+decision, got %q", out.String())
+	}
+}
+
+func TestServeDefaultTypedDecisionEvaluatorWithTypedCriteria(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	workdir := filepath.Join(dir, "work")
+	cfgPath := filepath.Join(dir, "fleet.yaml")
+
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll workdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "artifact.txt"), []byte("ok-token\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile artifact.txt: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	// No evaluator section -> defaults to typed+decision.
+	// Use a dedicated unset env var to verify typed-only criteria do not require an API key.
+	cfgYAML := fmt.Sprintf(`
+instance_id: "serve-typed-inst"
+state_dir: "%s"
+api:
+  listen: "%s"
+runtime:
+  adapter: "mock"
+  dispatch_interval: "15ms"
+  shepherd_interval: "15ms"
+  reconcile_interval: "30ms"
+  stale_claimed_after: "5s"
+limits:
+  max_claimed: 1
+  attempts_cap: 3
+evaluator:
+  api_key_env: "QUOTA_FLEET_UNSET_TEST_KEY"
+`, filepath.ToSlash(stateDir), addr)
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var out, errBuf bytes.Buffer
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runServeContext(ctx, []string{"--config", cfgPath}, &out, &errBuf)
+	}()
+
+	baseURL := "http://" + addr
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := http.Get(baseURL + "/status")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("serve did not become ready on %s; stderr=%s", addr, errBuf.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	payload, _ := json.Marshal(map[string]any{
+		"request_id":          "serve-typed-1",
+		"title":               "Typed Criteria Job",
+		"workdir":             workdir,
+		"acceptance_criteria": "file_exists: artifact.txt\ncontains: artifact.txt :: ok-token",
+	})
+	resp, err := http.Post(baseURL+"/jobs", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		cancel()
+		t.Fatalf("POST /jobs: %v", err)
+	}
+	var createResp struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&createResp)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated || createResp.Job.ID == 0 {
+		cancel()
+		t.Fatalf("POST /jobs status=%d id=%d", resp.StatusCode, createResp.Job.ID)
+	}
+
+	var resultText string
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		gresp, err := http.Get(fmt.Sprintf("%s/jobs/%d", baseURL, createResp.Job.ID))
+		if err == nil {
+			var jobResp struct {
+				Status      string  `json:"status"`
+				ResultText  string  `json:"result_text"`
+				DeliveredAt *string `json:"delivered_at"`
+			}
+			_ = json.NewDecoder(gresp.Body).Decode(&jobResp)
+			_ = gresp.Body.Close()
+			if jobResp.Status == "done" && jobResp.DeliveredAt != nil {
+				resultText = jobResp.ResultText
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("typed job #%d did not complete in time; stderr=%s", createResp.Job.ID, errBuf.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	if !strings.Contains(resultText, "typed file_exists") || !strings.Contains(resultText, "typed contains") {
+		t.Errorf("unexpected ResultText:\n%s", resultText)
+	}
+
+	cancel()
+	select {
+	case code := <-doneCh:
+		if code != 0 {
+			t.Fatalf("serve exit code = %d, want 0; stderr=%s", code, errBuf.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("serve did not shut down gracefully within timeout")
 	}
 }
 

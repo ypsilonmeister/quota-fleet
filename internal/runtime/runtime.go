@@ -26,6 +26,7 @@ type Options struct {
 	DeliveriesDir     string
 	MaxClaimed        int
 	AttemptsCap       int
+	MaxEvalRetries    int
 	DispatchInterval  time.Duration
 	ShepherdInterval  time.Duration
 	ReconcileInterval time.Duration
@@ -61,7 +62,7 @@ func New(opts Options) (*Runtime, error) {
 	}
 	eval := opts.Evaluator
 	if eval == nil {
-		eval = evaluator.NewAlwaysPass()
+		return nil, errors.New("runtime: Evaluator must not be nil")
 	}
 	logger := opts.Logger
 	if logger == nil {
@@ -141,6 +142,7 @@ func New(opts Options) (*Runtime, error) {
 		Notifier:       notifier,
 		LauncherNotify: notifyCh,
 		Interval:       shepherdInterval,
+		MaxEvalRetries: opts.MaxEvalRetries,
 		Logger:         logger,
 	})
 	reconciler := NewReconciler(ReconcilerOptions{

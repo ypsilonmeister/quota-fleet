@@ -90,17 +90,33 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		return 1
 	}
 
+	var jobEvaluator evaluator.Evaluator
+	switch cfg.Evaluator.EffectiveMode() {
+	case config.EvaluatorModeTypedDecision:
+		jobEvaluator = evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{
+			APIKeyEnv:         cfg.Evaluator.EffectiveAPIKeyEnv(),
+			DecisionThreshold: cfg.Evaluator.EffectiveDecisionThreshold(),
+			ThresholdSet:      cfg.Evaluator.DecisionThreshold != nil,
+		})
+	case config.EvaluatorModeAlwaysPass:
+		jobEvaluator = evaluator.NewAlwaysPass()
+	default:
+		fmt.Fprintf(stderr, "serve failed: unsupported evaluator.mode %q\n", cfg.Evaluator.Mode)
+		return 1
+	}
+
 	logger := log.New(stderr, "quota-fleet: ", log.LstdFlags)
 
 	rt, err := runtime.New(runtime.Options{
 		Store:             st,
 		Adapter:           execAdapter,
-		Evaluator:         evaluator.NewAlwaysPass(),
+		Evaluator:         jobEvaluator,
 		InstanceID:        cfg.InstanceID,
 		StateDir:          stateDir,
 		DeliveriesDir:     deliveriesDir,
 		MaxClaimed:        cfg.Limits.MaxClaimed,
 		AttemptsCap:       cfg.Limits.AttemptsCap,
+		MaxEvalRetries:    cfg.Evaluator.EffectiveMaxEvalRetries(),
 		DispatchInterval:  cfg.Runtime.EffectiveDispatchInterval(),
 		ShepherdInterval:  cfg.Runtime.EffectiveShepherdInterval(),
 		ReconcileInterval: cfg.Runtime.EffectiveReconcileInterval(),
@@ -139,8 +155,8 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stdout, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s, gate_mode=%s)\n",
-			listen, cfg.InstanceID, dbPath, cfg.Runtime.EffectiveAdapter(), cfg.Quota.EffectiveGateMode())
+		fmt.Fprintf(stdout, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s, evaluator=%s, gate_mode=%s)\n",
+			listen, cfg.InstanceID, dbPath, cfg.Runtime.EffectiveAdapter(), cfg.Evaluator.EffectiveMode(), cfg.Quota.EffectiveGateMode())
 		errCh <- httpSrv.ListenAndServe()
 	}()
 

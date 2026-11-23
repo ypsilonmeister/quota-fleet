@@ -1014,3 +1014,261 @@ func TestE2ENonZeroExitFailsJobAndCancelsChild(t *testing.T) {
 		t.Errorf("unexpected delivery payload: %+v", payload)
 	}
 }
+
+type scriptedEvaluator struct {
+	mu      sync.Mutex
+	calls   int
+	handler func(call int) (evaluator.Result, error)
+}
+
+func (e *scriptedEvaluator) Evaluate(ctx context.Context, job *store.Job, ev adapter.Evidence) (evaluator.Result, error) {
+	e.mu.Lock()
+	e.calls++
+	n := e.calls
+	e.mu.Unlock()
+	return e.handler(n)
+}
+
+func (e *scriptedEvaluator) Calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func TestShepherdEvaluationErrorRetriesAndFailsAtLimit(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openTestStore(t, "shepherd-eval-retries")
+	recNotifier := &recordingNotifier{}
+	mockAdapter := adapter.NewMock(adapter.MockOptions{})
+
+	evalErr := &evaluator.EvaluationUnavailableError{
+		Kind:   evaluator.UnavailableAPIError,
+		Reason: "decisions API returned HTTP 503",
+	}
+	scripted := &scriptedEvaluator{
+		handler: func(call int) (evaluator.Result, error) {
+			return evaluator.Result{}, evalErr
+		},
+	}
+
+	shepherd := NewShepherd(ShepherdOptions{
+		Store:          st,
+		Adapter:        mockAdapter,
+		Evaluator:      scripted,
+		Notifier:       recNotifier,
+		MaxEvalRetries: 3,
+		Logger:         discardLogger(),
+	})
+
+	parent, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "eval-retry-parent",
+		Title:              "Job with failing evaluator",
+		AcceptanceCriteria: "freeform criterion",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob parent: %v", err)
+	}
+	pid := parent.ID
+	child, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID: "eval-retry-child",
+		Title:     "Dependent child",
+		ParentID:  &pid,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob child: %v", err)
+	}
+
+	claimed, ok, err := st.Claim(ctx, 2)
+	if err != nil || !ok || claimed.ID != parent.ID {
+		t.Fatalf("Claim: ok=%v err=%v", ok, err)
+	}
+	mockAdapter.SetJobBehavior(parent.ID, adapter.MockBehavior{
+		ExitAfterPolls: 1,
+		ExitCode:       0,
+	})
+	if _, err := mockAdapter.Launch(ctx, claimed); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+
+	// Attempt 1 and 2: job stays claimed, not delivered, child stays waiting.
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := shepherd.SweepOnce(ctx); err != nil {
+			t.Fatalf("SweepOnce attempt %d: %v", attempt, err)
+		}
+		got, err := st.GetJob(ctx, parent.ID)
+		if err != nil {
+			t.Fatalf("GetJob attempt %d: %v", attempt, err)
+		}
+		if got.Status != store.StatusClaimed {
+			t.Fatalf("attempt %d: status = %s, want claimed", attempt, got.Status)
+		}
+		if got.DeliveredAt != nil {
+			t.Fatalf("attempt %d: DeliveredAt should still be nil", attempt)
+		}
+	}
+	if scripted.Calls() != 2 {
+		t.Fatalf("evaluator calls after 2 sweeps = %d, want 2", scripted.Calls())
+	}
+	if len(recNotifier.Deliveries()) != 0 {
+		t.Fatalf("deliveries before limit = %d, want 0", len(recNotifier.Deliveries()))
+	}
+
+	// Attempt 3 (reaches MaxEvalRetries=3): job transitions to failed with error reason, delivered, child cancelled.
+	if err := shepherd.SweepOnce(ctx); err != nil {
+		t.Fatalf("SweepOnce attempt 3: %v", err)
+	}
+	gotParent, err := st.GetJob(ctx, parent.ID)
+	if err != nil {
+		t.Fatalf("GetJob final: %v", err)
+	}
+	if gotParent.Status != store.StatusFailed {
+		t.Fatalf("final status = %s, want failed", gotParent.Status)
+	}
+	if gotParent.DeliveredAt == nil {
+		t.Errorf("final DeliveredAt = nil, want non-nil")
+	}
+	if !strings.Contains(gotParent.LastError, "3/3") || !strings.Contains(gotParent.LastError, "HTTP 503") {
+		t.Errorf("LastError missing retry count or eval error reason: %q", gotParent.LastError)
+	}
+	if !strings.Contains(gotParent.ResultText, "evaluation_error:") || !strings.Contains(gotParent.ResultText, "HTTP 503") {
+		t.Errorf("ResultText missing evaluation error details:\n%s", gotParent.ResultText)
+	}
+	gotChild, err := st.GetJob(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("GetJob child: %v", err)
+	}
+	if gotChild.Status != store.StatusCancelled {
+		t.Errorf("child status = %s, want cancelled", gotChild.Status)
+	}
+	if len(recNotifier.Deliveries()) != 1 {
+		t.Errorf("deliveries = %d, want 1", len(recNotifier.Deliveries()))
+	}
+}
+
+func TestShepherdEvaluationRetryCounterResetsOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openTestStore(t, "shepherd-eval-reset")
+	recNotifier := &recordingNotifier{}
+	mockAdapter := adapter.NewMock(adapter.MockOptions{})
+
+	scripted := &scriptedEvaluator{
+		handler: func(call int) (evaluator.Result, error) {
+			// Calls 1 & 2 error; call 3 succeeds with PASS.
+			// Calls 4 & 5 error (on requeued run); call 6 succeeds with FAIL (verifies counter reset on both PASS and FAIL).
+			switch call {
+			case 1, 2, 4, 5:
+				return evaluator.Result{}, &evaluator.EvaluationUnavailableError{
+					Kind:   evaluator.UnavailableTimeout,
+					Reason: "temporary timeout",
+				}
+			case 3:
+				return evaluator.Result{
+					Passed: true,
+					Criteria: []evaluator.CriterionResult{
+						{Criterion: "check ok", Passed: true, Evidence: "decision1 noul p=0.90 (>= 0.50)"},
+					},
+				}, nil
+			default:
+				return evaluator.Result{
+					Passed: false,
+					Criteria: []evaluator.CriterionResult{
+						{Criterion: "check ok", Passed: false, Evidence: "decision1 noul p=0.10 (< 0.50)"},
+					},
+				}, nil
+			}
+		},
+	}
+
+	shepherd := NewShepherd(ShepherdOptions{
+		Store:          st,
+		Adapter:        mockAdapter,
+		Evaluator:      scripted,
+		Notifier:       recNotifier,
+		MaxEvalRetries: 3,
+		Logger:         discardLogger(),
+	})
+
+	// Job 1: 2 errors then PASS on 3rd sweep -> Done, counter cleared.
+	j1, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "eval-reset-1",
+		Title:              "Recovers on 3rd attempt",
+		AcceptanceCriteria: "check ok",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob j1: %v", err)
+	}
+	c1, ok, err := st.Claim(ctx, 2)
+	if err != nil || !ok {
+		t.Fatalf("Claim j1: ok=%v err=%v", ok, err)
+	}
+	mockAdapter.SetJobBehavior(j1.ID, adapter.MockBehavior{ExitAfterPolls: 1, ExitCode: 0})
+	if _, err := mockAdapter.Launch(ctx, c1); err != nil {
+		t.Fatalf("Launch j1: %v", err)
+	}
+
+	for i := 1; i <= 2; i++ {
+		if err := shepherd.SweepOnce(ctx); err != nil {
+			t.Fatalf("j1 SweepOnce %d: %v", i, err)
+		}
+		g, _ := st.GetJob(ctx, j1.ID)
+		if g.Status != store.StatusClaimed {
+			t.Fatalf("j1 after sweep %d: status=%s, want claimed", i, g.Status)
+		}
+	}
+	if err := shepherd.SweepOnce(ctx); err != nil {
+		t.Fatalf("j1 SweepOnce 3: %v", err)
+	}
+	g1, err := st.GetJob(ctx, j1.ID)
+	if err != nil {
+		t.Fatalf("GetJob j1: %v", err)
+	}
+	if g1.Status != store.StatusDone {
+		t.Fatalf("j1 status = %s, want done", g1.Status)
+	}
+	shepherd.evalMu.Lock()
+	_, stillTracked := shepherd.evalFailures[j1.ID]
+	shepherd.evalMu.Unlock()
+	if stillTracked {
+		t.Errorf("expected evalFailures entry for job #%d to be cleared after success", j1.ID)
+	}
+
+	// Job 2: 2 errors then FAIL verdict on 3rd sweep -> Failed with verdict (not eval error), counter cleared.
+	j2, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "eval-reset-2",
+		Title:              "Fails cleanly on 3rd attempt",
+		AcceptanceCriteria: "check ok",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob j2: %v", err)
+	}
+	c2, ok, err := st.Claim(ctx, 2)
+	if err != nil || !ok {
+		t.Fatalf("Claim j2: ok=%v err=%v", ok, err)
+	}
+	mockAdapter.SetJobBehavior(j2.ID, adapter.MockBehavior{ExitAfterPolls: 1, ExitCode: 0})
+	if _, err := mockAdapter.Launch(ctx, c2); err != nil {
+		t.Fatalf("Launch j2: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		if err := shepherd.SweepOnce(ctx); err != nil {
+			t.Fatalf("j2 SweepOnce %d: %v", i, err)
+		}
+	}
+	g2, err := st.GetJob(ctx, j2.ID)
+	if err != nil {
+		t.Fatalf("GetJob j2: %v", err)
+	}
+	if g2.Status != store.StatusFailed {
+		t.Fatalf("j2 status = %s, want failed", g2.Status)
+	}
+	if !strings.Contains(g2.ResultText, "decision1 noul p=0.10 (< 0.50)") {
+		t.Errorf("j2 ResultText should reflect evaluator verdict, got:\n%s", g2.ResultText)
+	}
+	shepherd.evalMu.Lock()
+	_, stillTracked2 := shepherd.evalFailures[j2.ID]
+	shepherd.evalMu.Unlock()
+	if stillTracked2 {
+		t.Errorf("expected evalFailures entry for job #%d to be cleared after fail verdict", j2.ID)
+	}
+}

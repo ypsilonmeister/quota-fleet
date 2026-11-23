@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,19 @@ const (
 	PromptStyleStdin = "stdin"
 	// PromptStyleArgument passes prompt.txt contents as a command-line argument (`"$(cat prompt.txt)"`).
 	PromptStyleArgument = "argument"
+
+	// EvaluatorModeTypedDecision runs deterministic typed checks plus Gemini Decision 1 for free-form criteria.
+	EvaluatorModeTypedDecision = "typed+decision"
+	// EvaluatorModeAlwaysPass marks all acceptance criteria as PASS without running checks or calling Decision 1.
+	EvaluatorModeAlwaysPass = "always-pass"
+	// DefaultEvaluatorMode is the default evaluator mode ("typed+decision").
+	DefaultEvaluatorMode = EvaluatorModeTypedDecision
+	// DefaultEvaluatorAPIKeyEnv is the default environment variable holding the Gemini API key.
+	DefaultEvaluatorAPIKeyEnv = "GEMINI_API_KEY"
+	// DefaultEvaluatorDecisionThreshold is the default minimum noul probability required to pass.
+	DefaultEvaluatorDecisionThreshold = 0.5
+	// DefaultEvaluatorMaxEvalRetries is the default number of consecutive evaluation errors before failing a job.
+	DefaultEvaluatorMaxEvalRetries = 3
 )
 
 // Config represents the quota-fleet configuration loaded from fleet.yaml.
@@ -47,6 +61,52 @@ type Config struct {
 	Agents     map[string]AgentConfig `yaml:"agents"`
 	Pools      map[string]PoolConfig  `yaml:"pools"`
 	Quota      QuotaConfig            `yaml:"quota"`
+	Evaluator  EvaluatorConfig        `yaml:"evaluator"`
+}
+
+// EvaluatorConfig holds acceptance criteria evaluator settings.
+type EvaluatorConfig struct {
+	Mode              string   `yaml:"mode"`
+	APIKeyEnv         string   `yaml:"api_key_env"`
+	DecisionThreshold *float64 `yaml:"decision_threshold"`
+	MaxEvalRetries    *int     `yaml:"max_eval_retries"`
+}
+
+// EffectiveMode returns the configured evaluator mode, defaulting to "typed+decision".
+func (e EvaluatorConfig) EffectiveMode() string {
+	v := strings.TrimSpace(e.Mode)
+	if v == "" {
+		return DefaultEvaluatorMode
+	}
+	return v
+}
+
+// EffectiveAPIKeyEnv returns the configured environment variable name for the API key,
+// defaulting to "GEMINI_API_KEY".
+func (e EvaluatorConfig) EffectiveAPIKeyEnv() string {
+	v := strings.TrimSpace(e.APIKeyEnv)
+	if v == "" {
+		return DefaultEvaluatorAPIKeyEnv
+	}
+	return v
+}
+
+// EffectiveDecisionThreshold returns the configured Decision 1 noul probability threshold,
+// defaulting to 0.5.
+func (e EvaluatorConfig) EffectiveDecisionThreshold() float64 {
+	if e.DecisionThreshold == nil {
+		return DefaultEvaluatorDecisionThreshold
+	}
+	return *e.DecisionThreshold
+}
+
+// EffectiveMaxEvalRetries returns the configured consecutive evaluation error limit,
+// defaulting to 3.
+func (e EvaluatorConfig) EffectiveMaxEvalRetries() int {
+	if e.MaxEvalRetries == nil || *e.MaxEvalRetries <= 0 {
+		return DefaultEvaluatorMaxEvalRetries
+	}
+	return *e.MaxEvalRetries
 }
 
 // QuotaConfig holds Quota Gate and usage snapshot settings.
@@ -299,6 +359,19 @@ func (c *Config) Validate() error {
 	}
 	if mode := strings.TrimSpace(c.Quota.GateMode); mode != "" && mode != GateModeOff && mode != GateModeDryRun {
 		errs = append(errs, fmt.Errorf("quota.gate_mode %q is not supported (allowed: %q, %q)", mode, GateModeOff, GateModeDryRun))
+	}
+
+	if mode := strings.TrimSpace(c.Evaluator.Mode); mode != "" && mode != EvaluatorModeTypedDecision && mode != EvaluatorModeAlwaysPass {
+		errs = append(errs, fmt.Errorf("evaluator.mode %q is not supported (allowed: %q, %q)", mode, EvaluatorModeTypedDecision, EvaluatorModeAlwaysPass))
+	}
+	if c.Evaluator.DecisionThreshold != nil {
+		th := *c.Evaluator.DecisionThreshold
+		if math.IsNaN(th) || math.IsInf(th, 0) || th < 0 || th > 1 {
+			errs = append(errs, fmt.Errorf("evaluator.decision_threshold must be between 0 and 1 (got %v)", th))
+		}
+	}
+	if c.Evaluator.MaxEvalRetries != nil && *c.Evaluator.MaxEvalRetries <= 0 {
+		errs = append(errs, fmt.Errorf("evaluator.max_eval_retries must be > 0 (got %d)", *c.Evaluator.MaxEvalRetries))
 	}
 
 	return errors.Join(errs...)
