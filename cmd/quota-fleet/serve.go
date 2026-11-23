@@ -237,7 +237,7 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 	fmt.Fprintf(w, "  evaluator: %s\n", evalMode)
 	fmt.Fprintf(w, "  notifier:  %s\n", notifierSummary)
 	fmt.Fprintf(w, "  api_auth:  %s\n", apiAuthSummary)
-	fmt.Fprintf(w, "  ui_url:    %s (planned in Phase UI-1)\n", formatPlannedUIURL(listen))
+	fmt.Fprintf(w, "  ui_url:    %s\n", formatPlannedUIURL(listen))
 
 	if evalMode == config.EvaluatorModeTypedDecision && strings.TrimSpace(os.Getenv(apiKeyEnv)) == "" {
 		warnMsg := fmt.Sprintf(

@@ -17,6 +17,7 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
+	"github.com/ypsilonmeister/quota-fleet/internal/ui"
 )
 
 const (
@@ -154,7 +155,17 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("DELETE /gate/held/{id}", s.handleCancelHeldJob)
 	mux.HandleFunc("GET /gate/decisions", s.handleListGateDecisions)
 
-	s.handler = s.authMiddleware(mux)
+	apiHandler := s.authMiddleware(mux)
+	uiHandler := ui.NewHandler()
+
+	rootMux := http.NewServeMux()
+	// UI shell and static assets contain no job or config data and are served without auth.
+	rootMux.Handle("/ui", uiHandler)
+	rootMux.Handle("/ui/", uiHandler)
+	// All JSON API endpoints remain protected by authMiddleware.
+	rootMux.Handle("/", apiHandler)
+
+	s.handler = rootMux
 	return s
 }
 

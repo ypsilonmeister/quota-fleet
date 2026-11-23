@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>quota-fleet</title>
+  <link rel="stylesheet" href="/ui/assets/style.css">
+  <script defer src="/ui/assets/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/ui/" data-nav="true">quota-fleet</a>
+      <nav class="nav" aria-label="Main navigation">
+        <a class="nav-link" href="/ui/" data-nav="true" data-route="dashboard">ダッシュボード</a>
+        <a class="nav-link" href="/ui/jobs" data-nav="true" data-route="jobs">ジョブ一覧</a>
+        <a class="nav-link" href="/ui/jobs/new" data-nav="true" data-route="new-job">新規登録</a>
+        <a class="nav-link" href="/ui/gate/held" data-nav="true" data-route="held">保持中</a>
+        <a class="nav-link" href="/ui/gate/decisions" data-nav="true" data-route="decisions">ゲート判定</a>
+        <a class="nav-link" href="/ui/deliveries" data-nav="true" data-route="deliveries">納品</a>
+      </nav>
+      <div class="topbar-actions">
+        <span id="meta-badges" class="meta-badges"></span>
+        <button id="btn-refresh" type="button" class="btn btn-sm">更新</button>
+        <button id="btn-token" type="button" class="btn btn-sm btn-ghost">トークン</button>
+      </div>
+    </div>
+  </header>
+
+  <section id="auth-gate" class="auth-gate" hidden>
+    <div class="card auth-card">
+      <h1>API トークン認証</h1>
+      <p class="muted">
+        API に接続するための Bearer トークンを入力してください。トークンはこのタブの sessionStorage にのみ保持されます。
+      </p>
+      <form id="auth-form" class="form-stack">
+        <label class="field">
+          <span class="field-label">Bearer トークン</span>
+          <input id="auth-token-input" type="password" autocomplete="off" placeholder="fleet.yaml の api.token" required>
+        </label>
+        <div id="auth-error" class="alert alert-error" hidden></div>
+        <div class="btn-row">
+          <button type="submit" class="btn btn-primary">接続</button>
+          <button id="btn-connect-no-auth" type="button" class="btn btn-ghost">トークンなしで接続</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <div id="banner-area" class="container banner-area" aria-live="polite"></div>
+
+  <main id="app" class="container" aria-live="polite">
+    <noscript>
+      <div class="alert alert-error">この UI の利用には JavaScript が必要です。</div>
+    </noscript>
+  </main>
+</body>
+</html>
