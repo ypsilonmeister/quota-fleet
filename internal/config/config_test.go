@@ -246,3 +246,52 @@ unknown_top_level: 123
 		t.Errorf("Load(nonexistent) expected error, got nil")
 	}
 }
+
+func TestAPIConfigDefaultsAndFields(t *testing.T) {
+	// Default listen address when api section is omitted.
+	cfg, err := Parse([]byte(`
+instance_id: "inst-1"
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+`))
+	if err != nil {
+		t.Fatalf("Parse default api: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate default api: %v", err)
+	}
+	if got := cfg.API.ListenAddr(); got != DefaultAPIListen {
+		t.Errorf("ListenAddr() = %q, want %q", got, DefaultAPIListen)
+	}
+	if cfg.API.Token != "" || cfg.API.RequireAuth {
+		t.Errorf("unexpected default API auth: token=%q require_auth=%v", cfg.API.Token, cfg.API.RequireAuth)
+	}
+
+	// Explicit api section.
+	cfg2, err := Parse([]byte(`
+instance_id: "inst-2"
+api:
+  listen: "0.0.0.0:9000"
+  token: "secret-token-123"
+  require_auth: true
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+`))
+	if err != nil {
+		t.Fatalf("Parse explicit api: %v", err)
+	}
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("Validate explicit api: %v", err)
+	}
+	if got := cfg2.API.ListenAddr(); got != "0.0.0.0:9000" {
+		t.Errorf("ListenAddr() = %q, want 0.0.0.0:9000", got)
+	}
+	if cfg2.API.Token != "secret-token-123" {
+		t.Errorf("Token = %q, want secret-token-123", cfg2.API.Token)
+	}
+	if !cfg2.API.RequireAuth {
+		t.Errorf("RequireAuth = false, want true")
+	}
+}

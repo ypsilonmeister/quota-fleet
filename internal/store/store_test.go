@@ -949,3 +949,73 @@ func TestListJobsPaginationAndCountByStatus(t *testing.T) {
 		t.Errorf("counts = %+v, want queued=7 draft=2 done=0", counts)
 	}
 }
+
+func TestClaimByIDAndUndelivered(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	// ClaimByID on missing job returns ErrNotFound.
+	if _, _, err := st.ClaimByID(ctx, 9999, 2); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ClaimByID(9999) err = %v, want ErrNotFound", err)
+	}
+
+	j1, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "cid-1", Title: "Job 1"})
+	if err != nil {
+		t.Fatalf("CreateJob 1: %v", err)
+	}
+	j2, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "cid-2", Title: "Job 2"})
+	if err != nil {
+		t.Fatalf("CreateJob 2: %v", err)
+	}
+
+	// Claim j2 explicitly (not j1) with maxClaimed=1.
+	c2, ok, err := st.ClaimByID(ctx, j2.ID, 1)
+	if err != nil || !ok || c2.ID != j2.ID || c2.ClaimedBy == "" {
+		t.Fatalf("ClaimByID(j2) = (%+v, %v, %v)", c2, ok, err)
+	}
+
+	// Claiming j1 now hits maxClaimed=1 -> (nil, false, nil).
+	c1, ok, err := st.ClaimByID(ctx, j1.ID, 1)
+	if err != nil || ok || c1 != nil {
+		t.Fatalf("ClaimByID(j1) at cap = (%+v, %v, %v), want (nil, false, nil)", c1, ok, err)
+	}
+
+	// Claiming already-claimed j2 returns (nil, false, nil).
+	c2Again, ok, err := st.ClaimByID(ctx, j2.ID, 5)
+	if err != nil || ok || c2Again != nil {
+		t.Fatalf("ClaimByID(j2 again) = (%+v, %v, %v), want (nil, false, nil)", c2Again, ok, err)
+	}
+
+	// Fail j2, claim & complete j1 -> both appear in ListUndelivered.
+	if _, err := st.Fail(ctx, c2.ID, c2.ClaimedBy, "failed reason"); err != nil {
+		t.Fatalf("Fail j2: %v", err)
+	}
+	c1, ok, err = st.ClaimByID(ctx, j1.ID, 1)
+	if err != nil || !ok {
+		t.Fatalf("ClaimByID(j1) after fail = (%+v, %v, %v)", c1, ok, err)
+	}
+	if _, err := st.Complete(ctx, c1.ID, c1.ClaimedBy, "ok"); err != nil {
+		t.Fatalf("Complete j1: %v", err)
+	}
+
+	undel, err := st.ListUndelivered(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListUndelivered: %v", err)
+	}
+	if len(undel) != 2 {
+		t.Fatalf("ListUndelivered len = %d, want 2", len(undel))
+	}
+
+	// MarkDelivered works on failed job too and removes it from ListUndelivered.
+	delFailed, err := st.MarkDelivered(ctx, j2.ID)
+	if err != nil || delFailed.DeliveredAt == nil {
+		t.Fatalf("MarkDelivered(failed) = (%+v, %v)", delFailed, err)
+	}
+	undel, err = st.ListUndelivered(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListUndelivered after mark failed: %v", err)
+	}
+	if len(undel) != 1 || undel[0].ID != j1.ID {
+		t.Fatalf("ListUndelivered = %+v, want only j1 (%d)", undel, j1.ID)
+	}
+}

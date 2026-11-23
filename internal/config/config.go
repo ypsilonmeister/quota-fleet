@@ -10,14 +10,33 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DefaultAPIListen is the default listen address for quota-fleet serve.
+const DefaultAPIListen = "127.0.0.1:8737"
+
 // Config represents the quota-fleet configuration loaded from fleet.yaml.
 type Config struct {
 	InstanceID string                 `yaml:"instance_id"`
 	StateDir   string                 `yaml:"state_dir"`
+	API        APIConfig              `yaml:"api"`
 	Limits     LimitsConfig           `yaml:"limits"`
 	Hosts      map[string]HostConfig  `yaml:"hosts"`
 	Agents     map[string]AgentConfig `yaml:"agents"`
 	Pools      map[string]PoolConfig  `yaml:"pools"`
+}
+
+// APIConfig holds HTTP API server settings.
+type APIConfig struct {
+	Listen      string `yaml:"listen"`
+	Token       string `yaml:"token"`
+	RequireAuth bool   `yaml:"require_auth"`
+}
+
+// ListenAddr returns the configured listen address or DefaultAPIListen if empty.
+func (a APIConfig) ListenAddr() string {
+	if strings.TrimSpace(a.Listen) == "" {
+		return DefaultAPIListen
+	}
+	return strings.TrimSpace(a.Listen)
 }
 
 // LimitsConfig holds concurrency and retry limits.

@@ -95,3 +95,83 @@ pools:
 		t.Errorf("expected non-zero exit for invalid config")
 	}
 }
+
+func TestCLIJobCreateListGetCancelRequeue(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cli-jobs.db")
+
+	var out, errBuf bytes.Buffer
+
+	// 1. job create
+	code := run([]string{
+		"job", "create",
+		"--db", dbPath,
+		"--title", "Phase 1-2 CLI Test",
+		"--agent", "claude",
+		"--host", "ubuntu",
+		"--workdir", "/work/repo",
+		"--instructions", "run checks",
+		"--acceptance", "tests pass",
+		"--request-id", "cli-req-1",
+		"--target-ref", "impl/phase1-core",
+		"--model", "claude-opus",
+		"--pool", "claude",
+	}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("job create exit=%d stderr=%q", code, errBuf.String())
+	}
+	createOut := out.String()
+	for _, want := range []string{"#1", "queued", "Phase 1-2 CLI Test"} {
+		if !strings.Contains(createOut, want) {
+			t.Errorf("job create output missing %q:\n%s", want, createOut)
+		}
+	}
+
+	// 2. job list --status queued
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{"job", "list", "--db", dbPath, "--status", "queued", "--limit", "10"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("job list exit=%d stderr=%q", code, errBuf.String())
+	}
+	listOut := out.String()
+	for _, want := range []string{"#1", "queued", "Phase 1-2 CLI Test"} {
+		if !strings.Contains(listOut, want) {
+			t.Errorf("job list output missing %q:\n%s", want, listOut)
+		}
+	}
+
+	// 3. job get 1
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{"job", "get", "1", "--db", dbPath}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("job get exit=%d stderr=%q", code, errBuf.String())
+	}
+	getOut := out.String()
+	for _, want := range []string{"id:          1", "status:      queued", "title:       Phase 1-2 CLI Test", "agent:       claude", "pool:        claude"} {
+		if !strings.Contains(getOut, want) {
+			t.Errorf("job get output missing %q:\n%s", want, getOut)
+		}
+	}
+
+	// 4. job cancel 1 -> job requeue 1
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{"job", "cancel", "1", "--db", dbPath, "--reason", "operator pause"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("job cancel exit=%d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "cancelled") {
+		t.Errorf("job cancel output = %q, want cancelled", out.String())
+	}
+
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{"job", "requeue", "--db", dbPath, "1"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("job requeue exit=%d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "queued") {
+		t.Errorf("job requeue output = %q, want queued", out.String())
+	}
+}

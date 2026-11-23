@@ -443,6 +443,83 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 	return claimed, true, nil
 }
 
+// ClaimByID atomically checks that jobID is queued and claimed count < maxClaimed,
+// then claims jobID inside a single BEGIN IMMEDIATE transaction.
+// Returns ErrNotFound if jobID does not exist, or (nil, false, nil) if at capacity
+// or the job is no longer queued.
+func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Job, bool, error) {
+	var claimed *Job
+
+	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		var statusStr string
+		err := conn.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, jobID).Scan(&statusStr)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: job %d", ErrNotFound, jobID)
+		}
+		if err != nil {
+			return err
+		}
+		if Status(statusStr) != StatusQueued {
+			claimed = nil
+			return nil
+		}
+		if maxClaimed <= 0 {
+			claimed = nil
+			return nil
+		}
+
+		var currentClaimed int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE status = 'claimed'`).Scan(&currentClaimed); err != nil {
+			return err
+		}
+		if currentClaimed >= maxClaimed {
+			claimed = nil
+			return nil
+		}
+
+		token, err := randomHex(16)
+		if err != nil {
+			return fmt.Errorf("generate claim token: %w", err)
+		}
+		nowStr := formatTime(time.Now().UTC())
+
+		res, err := conn.ExecContext(ctx, `
+			UPDATE jobs
+			SET status = 'claimed',
+				claimed_by = ?,
+				claimed_at = ?,
+				attempts = attempts + 1,
+				updated_at = ?
+			WHERE id = ? AND status = 'queued'
+		`, token, nowStr, nowStr, jobID)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			claimed = nil
+			return nil
+		}
+
+		job, err := queryJobByID(ctx, conn, jobID)
+		if err != nil {
+			return err
+		}
+		claimed = job
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if claimed == nil {
+		return nil, false, nil
+	}
+	return claimed, true, nil
+}
+
 // Complete marks a claimed job as done (verifying claimToken) and promotes its direct
 // waiting children to queued (recording signal_outbox rows) in the same transaction.
 func (s *Store) Complete(ctx context.Context, jobID int64, claimToken, resultText string) (*CompleteResult, error) {
@@ -870,7 +947,7 @@ func (s *Store) ListJobs(ctx context.Context, filter ListJobsFilter) (*ListJobsP
 	return page, nil
 }
 
-// MarkDelivered records delivered_at on a done job. It is idempotent for already-delivered done jobs.
+// MarkDelivered records delivered_at on a done or failed job. It is idempotent for already-delivered jobs.
 func (s *Store) MarkDelivered(ctx context.Context, jobID int64) (*Job, error) {
 	var job *Job
 
@@ -881,7 +958,7 @@ func (s *Store) MarkDelivered(ctx context.Context, jobID int64) (*Job, error) {
 			UPDATE jobs
 			SET delivered_at = COALESCE(delivered_at, ?),
 				updated_at = CASE WHEN delivered_at IS NULL THEN ? ELSE updated_at END
-			WHERE id = ? AND status = 'done'
+			WHERE id = ? AND status IN ('done', 'failed')
 		`, nowStr, nowStr, jobID)
 		if err != nil {
 			return err
@@ -891,7 +968,7 @@ func (s *Store) MarkDelivered(ctx context.Context, jobID int64) (*Job, error) {
 			return err
 		}
 		if affected == 0 {
-			return classifyStatusConflict(ctx, conn, jobID, "done")
+			return classifyStatusConflict(ctx, conn, jobID, "done|failed")
 		}
 
 		j, err := queryJobByID(ctx, conn, jobID)
@@ -905,6 +982,41 @@ func (s *Store) MarkDelivered(ctx context.Context, jobID int64) (*Job, error) {
 		return nil, err
 	}
 	return job, nil
+}
+
+// ListUndelivered returns done and failed jobs whose delivered_at is NULL, ordered by updated_at ASC, id ASC.
+func (s *Store) ListUndelivered(ctx context.Context, limit int) ([]*Job, error) {
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	if limit > MaxListLimit {
+		limit = MaxListLimit
+	}
+
+	rows, err := s.readDB.QueryContext(ctx, `
+		SELECT `+jobColumns+`
+		FROM jobs
+		WHERE status IN ('done', 'failed') AND delivered_at IS NULL
+		ORDER BY updated_at ASC, id ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []*Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return jobs, nil
 }
 
 // CountByStatus returns a map containing the count for every defined job status.
