@@ -253,6 +253,7 @@
       let cursor = 0;
       let pages = 0;
       let truncated = false;
+      let error = null;
 
       while (pages < maxPages) {
         pages += 1;
@@ -262,8 +263,32 @@
         if (cursor > 0) {
           path += "&cursor=" + encodeURIComponent(String(cursor));
         }
-        const cr = await fetcher(path);
+        let cr;
+        try {
+          cr = await fetcher(path);
+        } catch (err) {
+          if (err && err.status === 401) {
+            throw err;
+          }
+          error = {
+            parentId: parentID,
+            status: st,
+            httpStatus: (err && typeof err.status === "number") ? err.status : 0,
+            message: (err && err.message) ? String(err.message) : String(err || "通信エラー")
+          };
+          break;
+        }
         if (!cr || !cr.ok || !cr.data || !Array.isArray(cr.data.jobs)) {
+          error = {
+            parentId: parentID,
+            status: st,
+            httpStatus: (cr && typeof cr.status === "number") ? cr.status : 0,
+            message: (cr && cr.data && cr.data.error)
+              ? String(cr.data.error)
+              : (cr && !cr.ok
+                ? ("HTTP " + (typeof cr.status === "number" ? cr.status : "?"))
+                : "不正なレスポンス形式")
+          };
           break;
         }
         for (const cj of cr.data.jobs) {
@@ -284,15 +309,19 @@
         }
       }
 
-      return { jobs: jobs, truncated: truncated };
+      return { jobs: jobs, truncated: truncated, error: error };
     }));
 
     const seen = new Set();
     const children = [];
+    const errors = [];
     let truncated = false;
     for (const sr of statusResults) {
       if (sr.truncated) {
         truncated = true;
+      }
+      if (sr.error) {
+        errors.push(sr.error);
       }
       for (const cj of sr.jobs) {
         if (!cj || typeof cj.id !== "number" || seen.has(cj.id)) {
@@ -302,7 +331,12 @@
         children.push(cj);
       }
     }
-    return { jobs: children, truncated: truncated };
+    return {
+      jobs: children,
+      truncated: truncated,
+      errors: errors,
+      hasErrors: errors.length > 0
+    };
   }
 
   async function fetchFullJobChain(job, fetcher, options) {
@@ -343,6 +377,8 @@
     const expanded = new Set();
     let pagesTruncated = false;
     let currentJobChildrenTruncated = false;
+    const fetchErrors = [];
+    const currentJobChildrenErrors = [];
 
     const priorityQueue = [];
     const priorityQueued = new Set();
@@ -374,6 +410,14 @@
           pagesTruncated = true;
           if (item.id === job.id) {
             currentJobChildrenTruncated = true;
+          }
+        }
+        if (Array.isArray(item.res.errors) && item.res.errors.length > 0) {
+          for (const errItem of item.res.errors) {
+            fetchErrors.push(errItem);
+            if (item.id === job.id) {
+              currentJobChildrenErrors.push(errItem);
+            }
           }
         }
         for (const cj of item.res.jobs) {
@@ -467,6 +511,9 @@
 
     const expandTruncated = unexpandedIDs.size > 0;
     const truncated = upTruncated || pagesTruncated || expandTruncated;
+    const hasFetchErrors = fetchErrors.length > 0;
+    const currentJobChildrenFailed = currentJobChildrenErrors.length > 0;
+    const currentJobChildrenComplete = !currentJobChildrenTruncated && !currentJobChildrenFailed;
 
     return {
       jobs: Array.from(knownJobs.values()),
@@ -475,8 +522,90 @@
       pagesTruncated: pagesTruncated,
       currentJobChildrenTruncated: currentJobChildrenTruncated,
       expandTruncated: expandTruncated,
-      unexpandedCount: unexpandedIDs.size
+      unexpandedCount: unexpandedIDs.size,
+      fetchErrors: fetchErrors,
+      hasFetchErrors: hasFetchErrors,
+      currentJobChildrenErrors: currentJobChildrenErrors,
+      currentJobChildrenFailed: currentJobChildrenFailed,
+      currentJobChildrenComplete: currentJobChildrenComplete
     };
+  }
+
+  function formatFetchErrorDetail(errItem) {
+    if (!errItem) {
+      return "取得エラー";
+    }
+    const httpStatus = Number(errItem.httpStatus || 0);
+    const msg = errItem.message ? String(errItem.message) : "";
+    if (httpStatus > 0) {
+      if (msg && msg.indexOf("HTTP " + httpStatus) === 0) {
+        return msg;
+      }
+      return msg ? ("HTTP " + httpStatus + " " + msg) : ("HTTP " + httpStatus);
+    }
+    return msg || "取得エラー";
+  }
+
+  function formatChainFetchErrorNotice(chainMeta) {
+    if (!chainMeta || !Array.isArray(chainMeta.fetchErrors) || chainMeta.fetchErrors.length === 0) {
+      return null;
+    }
+    const maxItems = 6;
+    const items = chainMeta.fetchErrors.slice(0, maxItems).map(function (errItem) {
+      const parentLabel = (errItem && errItem.parentId !== undefined && errItem.parentId !== null)
+        ? ("#" + errItem.parentId)
+        : "不明な親";
+      const statusLabel = (errItem && errItem.status) ? String(errItem.status) : "不明な状態";
+      return parentLabel + " [" + statusLabel + ": " + formatFetchErrorDetail(errItem) + "]";
+    });
+    const extra = chainMeta.fetchErrors.length > maxItems
+      ? (" 他 " + (chainMeta.fetchErrors.length - maxItems) + " 件")
+      : "";
+    return "一部の子ジョブ取得に失敗したため、チェーン構成に欠落がある可能性があります（失敗: " +
+      items.join("、") + extra + "）。取得できた分のみ表示しています。";
+  }
+
+  function formatDirectChildrenFetchErrorNotice(chainMeta, currentJobID) {
+    if (!chainMeta || !Array.isArray(chainMeta.currentJobChildrenErrors) || chainMeta.currentJobChildrenErrors.length === 0) {
+      return null;
+    }
+    const items = chainMeta.currentJobChildrenErrors.map(function (errItem) {
+      const statusLabel = (errItem && errItem.status) ? String(errItem.status) : "不明な状態";
+      return statusLabel + " [" + formatFetchErrorDetail(errItem) + "]";
+    });
+    const targetLabel = (currentJobID !== undefined && currentJobID !== null)
+      ? ("ジョブ #" + currentJobID)
+      : "表示中ジョブ";
+    return targetLabel + " の直下の子ジョブ取得が一部失敗したため、一覧に欠落がある可能性があります（失敗状態: " +
+      items.join("、") + "）。取得できた分のみ表示しています。";
+  }
+
+  function formatChainTruncationNotice(chainMeta) {
+    if (!chainMeta || !chainMeta.truncated) {
+      return null;
+    }
+    const reasons = [];
+    if (chainMeta.expandTruncated) {
+      reasons.push("他 " + chainMeta.unexpandedCount + " 件のノード配下の探索を上限で打ち切りました");
+    }
+    if (chainMeta.upTruncated) {
+      reasons.push("祖先の探索を上限で打ち切りました");
+    }
+    if (chainMeta.pagesTruncated) {
+      reasons.push("一部の子ジョブ一覧がページ取得上限に達しました");
+    }
+    const hasErrors = Boolean(
+      chainMeta.hasFetchErrors ||
+      chainMeta.currentJobChildrenFailed ||
+      (Array.isArray(chainMeta.fetchErrors) && chainMeta.fetchErrors.length > 0) ||
+      (Array.isArray(chainMeta.currentJobChildrenErrors) && chainMeta.currentJobChildrenErrors.length > 0)
+    );
+    const directNote = (chainMeta.currentJobChildrenTruncated || hasErrors)
+      ? ""
+      : "表示中ジョブの直下の子ジョブは全件取得済みです。";
+    return "チェーンが大きいため一部省略されています（" +
+      (reasons.length > 0 ? reasons.join("・") : "探索上限に到達") +
+      "）。" + directNote;
   }
 
   if (typeof module !== "undefined" && module.exports) {
@@ -487,7 +616,10 @@
       flattenChainTree: flattenChainTree,
       treeContainsStatus: treeContainsStatus,
       fetchChildrenAcrossStatuses: fetchChildrenAcrossStatuses,
-      fetchFullJobChain: fetchFullJobChain
+      fetchFullJobChain: fetchFullJobChain,
+      formatChainFetchErrorNotice: formatChainFetchErrorNotice,
+      formatDirectChildrenFetchErrorNotice: formatDirectChildrenFetchErrorNotice,
+      formatChainTruncationNotice: formatChainTruncationNotice
     };
   }
 
@@ -1503,25 +1635,17 @@
       ])
     ];
 
-    if (chainMeta && chainMeta.truncated) {
-      const reasons = [];
-      if (chainMeta.expandTruncated) {
-        reasons.push("他 " + chainMeta.unexpandedCount + " 件のノード配下の探索を上限で打ち切りました");
-      }
-      if (chainMeta.upTruncated) {
-        reasons.push("祖先の探索を上限で打ち切りました");
-      }
-      if (chainMeta.pagesTruncated) {
-        reasons.push("一部の子ジョブ一覧がページ取得上限に達しました");
-      }
-      const directNote = chainMeta.currentJobChildrenTruncated
-        ? ""
-        : "表示中ジョブの直下の子ジョブは全件取得済みです。";
-      const noticeText = "チェーンが大きいため一部省略されています（" +
-        (reasons.length > 0 ? reasons.join("・") : "探索上限に到達") +
-        "）。" + directNote;
+    const fetchErrorNotice = formatChainFetchErrorNotice(chainMeta);
+    if (fetchErrorNotice) {
       sectionChildren.push(
-        el("div", { className: "alert alert-info small", text: noticeText })
+        el("div", { className: "alert alert-error small", role: "alert", text: fetchErrorNotice })
+      );
+    }
+
+    const truncationNotice = formatChainTruncationNotice(chainMeta);
+    if (truncationNotice) {
+      sectionChildren.push(
+        el("div", { className: "alert alert-info small", text: truncationNotice })
       );
     }
 
@@ -1697,6 +1821,22 @@
     })();
 
     const miniChainSection = buildMiniChainSection(chainJobs, job.id, chainResult);
+    const directChildrenErrorNotice = formatDirectChildrenFetchErrorNotice(chainResult, job.id);
+    const childrenSectionHeading = directChildrenErrorNotice
+      ? ("子ジョブ一覧 (" + children.length + "件取得・一部取得失敗)")
+      : ("子ジョブ一覧 (" + children.length + ")");
+    const childrenEmptyText = directChildrenErrorNotice
+      ? "取得できた子ジョブはありません（一部取得に失敗しているため、未表示の子ジョブがある可能性があります）。"
+      : "子ジョブはありません。";
+    const childrenSectionNodes = [
+      el("h2", { className: "section-title", text: childrenSectionHeading })
+    ];
+    if (directChildrenErrorNotice) {
+      childrenSectionNodes.push(
+        el("div", { className: "alert alert-error small", role: "alert", text: directChildrenErrorNotice })
+      );
+    }
+    childrenSectionNodes.push(buildJobsTable(children, childrenEmptyText));
 
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [
@@ -1724,10 +1864,7 @@
         el("h2", { className: "section-title", text: "エラー (last_error)" }),
         el("pre", { text: job.last_error || "(なし)" })
       ]),
-      el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "子ジョブ一覧 (" + children.length + ")" }),
-        buildJobsTable(children, "子ジョブはありません。")
-      ]),
+      el("section", { className: "section" }, childrenSectionNodes),
       el("section", { className: "section" }, [
         el("h2", { className: "section-title", text: "ゲート判定履歴 (" + decisions.length + ")" }),
         buildGateDecisionsTable(decisions)

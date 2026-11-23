@@ -409,6 +409,13 @@ function makeMockFetcher(allJobs, serverMaxLimit) {
     assert.strictEqual(res.expandTruncated, true);
     assert.ok(res.unexpandedCount > 0);
     assert.strictEqual(res.currentJobChildrenTruncated, false);
+    assert.strictEqual(res.hasFetchErrors, false);
+    assert.strictEqual(res.currentJobChildrenFailed, false);
+    assert.strictEqual(res.currentJobChildrenComplete, true);
+    assert.strictEqual(chain.formatChainFetchErrorNotice(res), null);
+    assert.strictEqual(chain.formatDirectChildrenFetchErrorNotice(res, 52), null);
+    const truncMsg = chain.formatChainTruncationNotice(res);
+    assert.ok(truncMsg && truncMsg.includes("表示中ジョブの直下の子ジョブは全件取得済みです。"), "complete direct children without errors should show full-fetch note");
   }
 
   // 6. Cursor pagination case: >200 children under both root and current job
@@ -478,7 +485,147 @@ function makeMockFetcher(allJobs, serverMaxLimit) {
     };
     const res = await chain.fetchChildrenAcrossStatuses(1, badFetcher, { maxPagesPerStatus: 5 });
     assert.strictEqual(res.truncated, true);
+    assert.strictEqual(res.hasErrors, false);
     assert.deepStrictEqual(res.jobs.map(j => j.id), [2]);
+  }
+
+  // 10. Regression (review-qf33 P2): HTTP 500 on one status of current job's children
+  //     must surface fetch failure, keep fetched children, and NOT claim "全件取得済み"
+  {
+    const jobs = [{ id: 100, title: "Root", status: "done", parent_id: null }];
+    for (let i = 101; i <= 151; i += 1) {
+      jobs.push({ id: i, title: "Child " + i, status: "done", parent_id: 100 });
+    }
+    jobs.push({ id: 152, title: "Direct Waiting", status: "waiting", parent_id: 151 });
+    jobs.push({ id: 153, title: "Direct Queued", status: "queued", parent_id: 151 });
+
+    const baseFetcher = makeMockFetcher(jobs, 200);
+    const flakyFetcher = async function (path) {
+      const u = new URL("http://localhost" + path);
+      if (u.pathname === "/jobs" && u.searchParams.get("status") === "waiting" && u.searchParams.get("parent_id") === "151") {
+        return { ok: false, status: 500, data: { error: "internal server error" } };
+      }
+      return baseFetcher(path);
+    };
+
+    const currentJob = jobs.find(j => j.id === 151);
+    const res = await chain.fetchFullJobChain(currentJob, flakyFetcher);
+
+    // Partial display continues: #153 (queued) is still present even though #152 (waiting) failed
+    const directChildren = res.jobs.filter(j => j.parent_id === 151).map(j => j.id);
+    assert.deepStrictEqual(directChildren, [153], "successfully fetched children must still be returned");
+
+    // Failure metadata is recorded accurately
+    assert.strictEqual(res.hasFetchErrors, true);
+    assert.strictEqual(res.currentJobChildrenFailed, true);
+    assert.strictEqual(res.currentJobChildrenComplete, false);
+    assert.strictEqual(res.fetchErrors.length, 1);
+    assert.strictEqual(res.fetchErrors[0].parentId, 151);
+    assert.strictEqual(res.fetchErrors[0].status, "waiting");
+    assert.strictEqual(res.fetchErrors[0].httpStatus, 500);
+    assert.strictEqual(res.currentJobChildrenErrors.length, 1);
+
+    // Failure notices clearly identify target, status, and HTTP 500
+    const chainErrNotice = chain.formatChainFetchErrorNotice(res);
+    assert.ok(chainErrNotice && chainErrNotice.includes("#151") && chainErrNotice.includes("waiting") && chainErrNotice.includes("HTTP 500"),
+      "chain error notice must describe failed parent, status, and HTTP code: " + chainErrNotice);
+    const directErrNotice = chain.formatDirectChildrenFetchErrorNotice(res, 151);
+    assert.ok(directErrNotice && directErrNotice.includes("#151") && directErrNotice.includes("waiting") && directErrNotice.includes("HTTP 500"),
+      "direct children error notice must describe failed job, status, and HTTP code: " + directErrNotice);
+
+    // Truncation notice must NOT claim "全件取得済み" when any fetch error occurred
+    assert.strictEqual(res.truncated, true);
+    const truncNotice = chain.formatChainTruncationNotice(res);
+    assert.ok(truncNotice, "truncation notice should still be shown for expansion limit");
+    assert.strictEqual(truncNotice.includes("全件取得済み"), false,
+      "truncation notice must NOT claim 全件取得済み on partial fetch error: " + truncNotice);
+  }
+
+  // 11. Small chain (no truncation) with partial HTTP 500 still surfaces failure notices
+  {
+    const jobs = [
+      { id: 1, title: "Root", status: "done", parent_id: null },
+      { id: 2, title: "Current", status: "claimed", parent_id: 1 },
+      { id: 3, title: "Failed Child", status: "waiting", parent_id: 2 },
+      { id: 4, title: "OK Child", status: "queued", parent_id: 2 }
+    ];
+    const baseFetcher = makeMockFetcher(jobs, 200);
+    const flakyFetcher = async function (path) {
+      const u = new URL("http://localhost" + path);
+      if (u.pathname === "/jobs" && u.searchParams.get("status") === "waiting" && u.searchParams.get("parent_id") === "2") {
+        return { ok: false, status: 500, data: null };
+      }
+      return baseFetcher(path);
+    };
+    const res = await chain.fetchFullJobChain(jobs[1], flakyFetcher);
+    assert.strictEqual(res.truncated, false);
+    assert.strictEqual(res.hasFetchErrors, true);
+    assert.strictEqual(res.currentJobChildrenFailed, true);
+    assert.strictEqual(chain.formatChainTruncationNotice(res), null);
+    const chainErrNotice = chain.formatChainFetchErrorNotice(res);
+    assert.ok(chainErrNotice && chainErrNotice.includes("#2") && chainErrNotice.includes("waiting") && chainErrNotice.includes("HTTP 500"));
+    const directErrNotice = chain.formatDirectChildrenFetchErrorNotice(res, 2);
+    assert.ok(directErrNotice && directErrNotice.includes("#2") && directErrNotice.includes("waiting") && directErrNotice.includes("HTTP 500"));
+    assert.deepStrictEqual(res.jobs.filter(j => j.parent_id === 2).map(j => j.id), [4]);
+  }
+
+  // 12. Error on a non-current node in a truncated chain also suppresses "全件取得済み"
+  {
+    const jobs = [{ id: 100, title: "Root", status: "done", parent_id: null }];
+    for (let i = 101; i <= 151; i += 1) {
+      jobs.push({ id: i, title: "Child " + i, status: "done", parent_id: 100 });
+    }
+    jobs.push({ id: 152, title: "Direct Child", status: "queued", parent_id: 151 });
+    const baseFetcher = makeMockFetcher(jobs, 200);
+    const flakyFetcher = async function (path) {
+      const u = new URL("http://localhost" + path);
+      if (u.pathname === "/jobs" && u.searchParams.get("status") === "failed" && u.searchParams.get("parent_id") === "100") {
+        return { ok: false, status: 503, data: { error: "unavailable" } };
+      }
+      return baseFetcher(path);
+    };
+    const res = await chain.fetchFullJobChain(jobs.find(j => j.id === 151), flakyFetcher);
+    assert.strictEqual(res.hasFetchErrors, true);
+    assert.strictEqual(res.currentJobChildrenFailed, false);
+    assert.strictEqual(chain.formatDirectChildrenFetchErrorNotice(res, 151), null);
+    const chainErrNotice = chain.formatChainFetchErrorNotice(res);
+    assert.ok(chainErrNotice && chainErrNotice.includes("#100") && chainErrNotice.includes("failed") && chainErrNotice.includes("HTTP 503"));
+    const truncNotice = chain.formatChainTruncationNotice(res);
+    assert.ok(truncNotice && !truncNotice.includes("全件取得済み"), "any chain fetch error must suppress 全件取得済み");
+  }
+
+  // 13. Mid-pagination failure keeps page 1 jobs and records error; 401 still rethrows
+  {
+    const jobs = [{ id: 1, title: "Parent", status: "done", parent_id: null }];
+    for (let i = 2; i <= 15; i += 1) {
+      jobs.push({ id: i, title: "C" + i, status: "queued", parent_id: 1 });
+    }
+    const baseFetcher = makeMockFetcher(jobs, 5);
+    const midFailFetcher = async function (path) {
+      const u = new URL("http://localhost" + path);
+      if (u.pathname === "/jobs" && u.searchParams.get("status") === "queued" && Number(u.searchParams.get("cursor") || 0) > 0) {
+        return { ok: false, status: 500, data: { error: "db timeout" } };
+      }
+      return baseFetcher(path);
+    };
+    const res = await chain.fetchChildrenAcrossStatuses(1, midFailFetcher, { pageLimit: 5 });
+    assert.strictEqual(res.hasErrors, true);
+    assert.strictEqual(res.errors.length, 1);
+    assert.strictEqual(res.errors[0].status, "queued");
+    assert.strictEqual(res.errors[0].httpStatus, 500);
+    assert.deepStrictEqual(res.jobs.map(j => j.id), [2, 3, 4, 5, 6], "page 1 jobs must be preserved on page 2 failure");
+
+    let caught401 = false;
+    try {
+      await chain.fetchChildrenAcrossStatuses(1, async function () {
+        const e = new Error("unauthorized");
+        e.status = 401;
+        throw e;
+      });
+    } catch (err) {
+      caught401 = Boolean(err && err.status === 401);
+    }
+    assert.strictEqual(caught401, true, "401 error must propagate to trigger auth gate");
   }
 
   console.log("ALL_CHAIN_JS_TESTS_PASSED");
