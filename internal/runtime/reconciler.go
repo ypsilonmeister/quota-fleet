@@ -1,0 +1,258 @@
+package runtime
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
+	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/store"
+)
+
+// ReconcilerOptions configures a Reconciler.
+type ReconcilerOptions struct {
+	Store             *store.Store
+	Adapter           adapter.Adapter
+	Notifier          Notifier
+	Interval          time.Duration
+	StaleClaimedAfter time.Duration
+	AttemptsCap       int
+	Now               func() time.Time
+	Logger            *log.Logger
+}
+
+// Reconciler periodically checks for:
+//  (a) undelivered done/failed jobs and delivers them via Notifier,
+//  (b) claimed jobs older than StaleClaimedAfter whose Adapter.Status is Missing (resetting them to queued),
+//  (c) waiting jobs whose parent is already in a terminal state (reporting once per dedup key).
+type Reconciler struct {
+	store             *store.Store
+	adapter           adapter.Adapter
+	notifier          Notifier
+	interval          time.Duration
+	staleClaimedAfter time.Duration
+	attemptsCap       int
+	now               func() time.Time
+	logger            *log.Logger
+}
+
+// NewReconciler constructs a Reconciler.
+func NewReconciler(opts ReconcilerOptions) *Reconciler {
+	interval := opts.Interval
+	if interval <= 0 {
+		interval = config.DefaultReconcileInterval
+	}
+	staleAfter := opts.StaleClaimedAfter
+	if staleAfter <= 0 {
+		staleAfter = config.DefaultStaleClaimedAfter
+	}
+	nowFn := opts.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = log.Default()
+	}
+	return &Reconciler{
+		store:             opts.Store,
+		adapter:           opts.Adapter,
+		notifier:          opts.Notifier,
+		interval:          interval,
+		staleClaimedAfter: staleAfter,
+		attemptsCap:       opts.AttemptsCap,
+		now:               nowFn,
+		logger:            logger,
+	}
+}
+
+// Run periodically executes ReconcileOnce until ctx is cancelled.
+func (r *Reconciler) Run(ctx context.Context) error {
+	ticker := time.NewTicker(r.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := r.ReconcileOnce(ctx); err != nil && ctx.Err() == nil {
+				r.logger.Printf("reconciler error: %v", err)
+			}
+		}
+	}
+}
+
+// ReconcileOnce performs one reconciliation pass. When all active Store counts
+// (claimed, queued, waiting, undelivered done/failed) are zero, detailed checks are skipped.
+func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
+	counts, hasUndel, err := checkActiveWork(ctx, r.store)
+	if err != nil {
+		return err
+	}
+	if !hasAnyActive(counts, hasUndel) {
+		return nil
+	}
+
+	if hasUndel {
+		if err := r.reconcileUndelivered(ctx); err != nil {
+			return err
+		}
+	}
+	if counts[store.StatusClaimed] > 0 {
+		if err := r.reconcileStaleClaimed(ctx); err != nil {
+			return err
+		}
+	}
+	if counts[store.StatusWaiting] > 0 {
+		if err := r.reconcileOrphanWaiting(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) reconcileUndelivered(ctx context.Context) error {
+	jobs, err := r.store.ListUndelivered(ctx, store.MaxListLimit)
+	if err != nil {
+		return fmt.Errorf("list undelivered: %w", err)
+	}
+	for _, job := range jobs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := deliverAndMark(ctx, r.store, r.notifier, job); err != nil && ctx.Err() == nil {
+			r.logger.Printf("reconciler deliver job #%d error: %v", job.ID, err)
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) reconcileStaleClaimed(ctx context.Context) error {
+	claimedJobs, err := listAllByStatus(ctx, r.store, store.StatusClaimed)
+	if err != nil {
+		return fmt.Errorf("list claimed jobs: %w", err)
+	}
+	now := r.now().UTC()
+
+	for _, job := range claimedJobs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if job.ClaimedAt == nil {
+			continue
+		}
+		if now.Sub(*job.ClaimedAt) < r.staleClaimedAfter {
+			continue
+		}
+
+		state, err := r.adapter.Status(ctx, job)
+		if err != nil {
+			if ctx.Err() == nil {
+				r.logger.Printf("reconciler status check error for job #%d: %v", job.ID, err)
+			}
+			continue
+		}
+		if state.State != adapter.StateMissing {
+			continue
+		}
+
+		if r.attemptsCap > 0 && job.Attempts >= r.attemptsCap {
+			dedupKey := fmt.Sprintf("stale-claimed-attempts-cap:%d:%d", job.ID, job.Attempts)
+			r.reportOnce(ctx, Report{
+				DedupKey:  dedupKey,
+				Kind:      "stale_claimed_attempts_cap",
+				JobID:     job.ID,
+				Message:   fmt.Sprintf("job #%d (%q) missing on worker and reached attempts_cap (%d/%d); skipping auto-reset", job.ID, job.Title, job.Attempts, r.attemptsCap),
+				Timestamp: now,
+			})
+			continue
+		}
+
+		if _, err := r.store.Reset(ctx, job.ID); err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				continue
+			}
+			r.logger.Printf("reconciler reset job #%d error: %v", job.ID, err)
+			continue
+		}
+		r.logger.Printf("reconciler reset missing claimed job #%d back to queued (attempts=%d)", job.ID, job.Attempts)
+		dedupKey := fmt.Sprintf("stale-claimed-reset:%d:%d", job.ID, job.Attempts)
+		r.reportOnce(ctx, Report{
+			DedupKey:  dedupKey,
+			Kind:      "stale_claimed_reset",
+			JobID:     job.ID,
+			Message:   fmt.Sprintf("job #%d (%q) missing on worker after %s; reset to queued (attempts=%d)", job.ID, job.Title, r.staleClaimedAfter, job.Attempts),
+			Timestamp: now,
+		})
+	}
+	return nil
+}
+
+func (r *Reconciler) reconcileOrphanWaiting(ctx context.Context) error {
+	waitingJobs, err := listAllByStatus(ctx, r.store, store.StatusWaiting)
+	if err != nil {
+		return fmt.Errorf("list waiting jobs: %w", err)
+	}
+	now := r.now().UTC()
+
+	for _, job := range waitingJobs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if job.ParentID == nil {
+			continue
+		}
+		parent, err := r.store.GetJob(ctx, *job.ParentID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				dedupKey := fmt.Sprintf("orphan-waiting:%d:parent-%d-missing", job.ID, *job.ParentID)
+				r.reportOnce(ctx, Report{
+					DedupKey:  dedupKey,
+					Kind:      "orphan_waiting",
+					JobID:     job.ID,
+					ParentID:  job.ParentID,
+					Message:   fmt.Sprintf("waiting job #%d (%q) references missing parent #%d", job.ID, job.Title, *job.ParentID),
+					Timestamp: now,
+				})
+				continue
+			}
+			r.logger.Printf("reconciler get parent #%d for waiting job #%d error: %v", *job.ParentID, job.ID, err)
+			continue
+		}
+
+		if parent.Status == store.StatusDone || parent.Status == store.StatusFailed || parent.Status == store.StatusCancelled {
+			dedupKey := fmt.Sprintf("orphan-waiting:%d:parent-%d-%s", job.ID, parent.ID, parent.Status)
+			r.reportOnce(ctx, Report{
+				DedupKey:  dedupKey,
+				Kind:      "orphan_waiting",
+				JobID:     job.ID,
+				ParentID:  job.ParentID,
+				Message:   fmt.Sprintf("waiting job #%d (%q) has terminal parent #%d in status %s", job.ID, job.Title, parent.ID, parent.Status),
+				Timestamp: now,
+			})
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) reportOnce(ctx context.Context, rep Report) {
+	isNew, err := r.store.RecordReconcilerDedup(ctx, rep.DedupKey)
+	if err != nil {
+		if ctx.Err() == nil {
+			r.logger.Printf("reconciler dedup record error for %q: %v", rep.DedupKey, err)
+		}
+		return
+	}
+	if !isNew {
+		return
+	}
+	if r.notifier != nil {
+		if err := r.notifier.Report(ctx, rep); err != nil && ctx.Err() == nil {
+			r.logger.Printf("reconciler report error for %q: %v", rep.DedupKey, err)
+		}
+	}
+}

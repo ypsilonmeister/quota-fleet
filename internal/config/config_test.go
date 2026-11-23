@@ -295,3 +295,129 @@ limits:
 		t.Errorf("RequireAuth = false, want true")
 	}
 }
+
+func TestRuntimeConfigDefaultsAndValidation(t *testing.T) {
+	cfg, err := Parse([]byte(`
+instance_id: "inst-rt"
+state_dir: "/var/lib/qf"
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+`))
+	if err != nil {
+		t.Fatalf("Parse default runtime: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate default runtime: %v", err)
+	}
+	if got := cfg.Runtime.EffectiveAdapter(); got != DefaultRuntimeAdapter {
+		t.Errorf("EffectiveAdapter() = %q, want %q", got, DefaultRuntimeAdapter)
+	}
+	if got := cfg.Runtime.EffectiveDispatchInterval(); got != DefaultDispatchInterval {
+		t.Errorf("EffectiveDispatchInterval() = %v, want %v", got, DefaultDispatchInterval)
+	}
+	if got := cfg.Runtime.EffectiveShepherdInterval(); got != DefaultShepherdInterval {
+		t.Errorf("EffectiveShepherdInterval() = %v, want %v", got, DefaultShepherdInterval)
+	}
+	if got := cfg.Runtime.EffectiveReconcileInterval(); got != DefaultReconcileInterval {
+		t.Errorf("EffectiveReconcileInterval() = %v, want %v", got, DefaultReconcileInterval)
+	}
+	if got := cfg.Runtime.EffectiveStaleClaimedAfter(); got != DefaultStaleClaimedAfter {
+		t.Errorf("EffectiveStaleClaimedAfter() = %v, want %v", got, DefaultStaleClaimedAfter)
+	}
+	if got := cfg.Runtime.EffectiveSignalMaxBytes(); got != DefaultSignalMaxBytes {
+		t.Errorf("EffectiveSignalMaxBytes() = %d, want %d", got, DefaultSignalMaxBytes)
+	}
+	if got := cfg.Runtime.EffectiveDeliveriesDir(cfg.StateDir); got != filepath.Join("/var/lib/qf", "deliveries") {
+		t.Errorf("EffectiveDeliveriesDir() = %q", got)
+	}
+
+	// Explicit valid runtime section.
+	cfg2, err := Parse([]byte(`
+instance_id: "inst-rt-2"
+state_dir: "/var/lib/qf"
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+runtime:
+  adapter: "mock"
+  dispatch_interval: "200ms"
+  shepherd_interval: "1s"
+  reconcile_interval: "5s"
+  stale_claimed_after: "2m"
+  signal_max_bytes: 4096
+  deliveries_dir: "out/deliveries"
+`))
+	if err != nil {
+		t.Fatalf("Parse explicit runtime: %v", err)
+	}
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("Validate explicit runtime: %v", err)
+	}
+	if got := cfg2.Runtime.EffectiveDeliveriesDir(cfg2.StateDir); got != filepath.Join("/var/lib/qf", "out/deliveries") {
+		t.Errorf("EffectiveDeliveriesDir(relative) = %q", got)
+	}
+	if got := cfg2.Runtime.EffectiveSignalMaxBytes(); got != 4096 {
+		t.Errorf("EffectiveSignalMaxBytes() = %d, want 4096", got)
+	}
+
+	// Invalid runtime configs.
+	invalidCases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "unsupported adapter",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+runtime:
+  adapter: "ssh"
+`,
+			wantErr: "Phase 2",
+		},
+		{
+			name: "bad duration",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+runtime:
+  shepherd_interval: "notaduration"
+`,
+			wantErr: "shepherd_interval",
+		},
+		{
+			name: "non-positive duration",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+runtime:
+  stale_claimed_after: "0s"
+`,
+			wantErr: "stale_claimed_after",
+		},
+		{
+			name: "negative signal_max_bytes",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+runtime:
+  signal_max_bytes: -10
+`,
+			wantErr: "signal_max_bytes",
+		},
+	}
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}

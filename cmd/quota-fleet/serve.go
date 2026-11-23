@@ -10,15 +10,25 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/api"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
+	"github.com/ypsilonmeister/quota-fleet/internal/runtime"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
 func runServe(args []string, stdout, stderr io.Writer) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runServeContext(ctx, args, stdout, stderr)
+}
+
+func runServeContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
@@ -46,8 +56,20 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		listen = cfg.API.ListenAddr()
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	stateDir := cfg.StateDir
+	if stateDir == "" {
+		stateDir = filepath.Dir(dbPath)
+	}
+	deliveriesDir := cfg.Runtime.EffectiveDeliveriesDir(stateDir)
+
+	var execAdapter adapter.Adapter
+	switch cfg.Runtime.EffectiveAdapter() {
+	case config.DefaultRuntimeAdapter:
+		execAdapter = adapter.NewMock(adapter.MockOptions{})
+	default:
+		fmt.Fprintf(stderr, "serve failed: unsupported runtime.adapter %q (real host adapters are planned for Phase 2)\n", cfg.Runtime.Adapter)
+		return 1
+	}
 
 	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: cfg.InstanceID})
 	if err != nil {
@@ -62,6 +84,34 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 
 	logger := log.New(stderr, "quota-fleet: ", log.LstdFlags)
+
+	rt, err := runtime.New(runtime.Options{
+		Store:             st,
+		Adapter:           execAdapter,
+		Evaluator:         evaluator.NewAlwaysPass(),
+		InstanceID:        cfg.InstanceID,
+		StateDir:          stateDir,
+		DeliveriesDir:     deliveriesDir,
+		MaxClaimed:        cfg.Limits.MaxClaimed,
+		AttemptsCap:       cfg.Limits.AttemptsCap,
+		DispatchInterval:  cfg.Runtime.EffectiveDispatchInterval(),
+		ShepherdInterval:  cfg.Runtime.EffectiveShepherdInterval(),
+		ReconcileInterval: cfg.Runtime.EffectiveReconcileInterval(),
+		StaleClaimedAfter: cfg.Runtime.EffectiveStaleClaimedAfter(),
+		SignalMaxBytes:    cfg.Runtime.EffectiveSignalMaxBytes(),
+		Logger:            logger,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "init runtime failed: %v\n", err)
+		return 1
+	}
+
+	if err := rt.Start(ctx); err != nil {
+		fmt.Fprintf(stderr, "start runtime failed: %v\n", err)
+		return 1
+	}
+	defer rt.Stop()
+
 	apiSrv := api.NewServer(st, api.Options{
 		InstanceID:  cfg.InstanceID,
 		MaxClaimed:  cfg.Limits.MaxClaimed,
@@ -78,7 +128,8 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 
 	errCh := make(chan error, 1)
 	go func() {
-		fmt.Fprintf(stdout, "quota-fleet API listening on %s (instance_id=%s, db=%s)\n", listen, cfg.InstanceID, dbPath)
+		fmt.Fprintf(stdout, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s)\n",
+			listen, cfg.InstanceID, dbPath, cfg.Runtime.EffectiveAdapter())
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
@@ -87,8 +138,10 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shutCtx)
+		rt.Stop()
 		return 0
 	case err := <-errCh:
+		rt.Stop()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(stderr, "serve error: %v\n", err)
 			return 1

@@ -3,10 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
@@ -173,5 +178,117 @@ func TestCLIJobCreateListGetCancelRequeue(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "queued") {
 		t.Errorf("job requeue output = %q, want queued", out.String())
+	}
+}
+
+func TestServeRunsAPIAndRuntimeWithGracefulShutdown(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	cfgPath := filepath.Join(dir, "fleet.yaml")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cfgYAML := fmt.Sprintf(`
+instance_id: "serve-e2e-inst"
+state_dir: "%s"
+api:
+  listen: "%s"
+runtime:
+  adapter: "mock"
+  dispatch_interval: "15ms"
+  shepherd_interval: "15ms"
+  reconcile_interval: "30ms"
+  stale_claimed_after: "5s"
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+`, filepath.ToSlash(stateDir), addr)
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var out, errBuf bytes.Buffer
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runServeContext(ctx, []string{"--config", cfgPath}, &out, &errBuf)
+	}()
+
+	baseURL := "http://" + addr
+	// Wait for HTTP API to come up.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := http.Get(baseURL + "/status")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("serve did not become ready on %s; stderr=%s", addr, errBuf.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// Create a job via HTTP API and verify the resident runtime completes and delivers it.
+	reqBody := `{"request_id":"serve-req-1","title":"Serve E2E Job","acceptance_criteria":"build ok"}`
+	resp, err := http.Post(baseURL+"/jobs", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		cancel()
+		t.Fatalf("POST /jobs: %v", err)
+	}
+	var createResp struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
+		_ = resp.Body.Close()
+		cancel()
+		t.Fatalf("decode create response: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated || createResp.Job.ID == 0 {
+		cancel()
+		t.Fatalf("POST /jobs status=%d id=%d", resp.StatusCode, createResp.Job.ID)
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		gresp, err := http.Get(fmt.Sprintf("%s/jobs/%d", baseURL, createResp.Job.ID))
+		if err == nil {
+			var jobResp struct {
+				Status      string  `json:"status"`
+				DeliveredAt *string `json:"delivered_at"`
+			}
+			_ = json.NewDecoder(gresp.Body).Decode(&jobResp)
+			_ = gresp.Body.Close()
+			if jobResp.Status == "done" && jobResp.DeliveredAt != nil {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("job #%d did not complete and deliver in time", createResp.Job.ID)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// Trigger graceful shutdown and ensure serve exits cleanly with code 0.
+	cancel()
+	select {
+	case code := <-doneCh:
+		if code != 0 {
+			t.Fatalf("serve exit code = %d, want 0; stderr=%s", code, errBuf.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("serve did not shut down gracefully within timeout")
 	}
 }

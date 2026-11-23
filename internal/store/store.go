@@ -593,6 +593,13 @@ func (s *Store) Complete(ctx context.Context, jobID int64, claimToken, resultTex
 // Fail marks a claimed job as failed (verifying claimToken) and recursively cancels
 // all waiting descendants with the parent's failure reason in last_error.
 func (s *Store) Fail(ctx context.Context, jobID int64, claimToken, reason string) (*FailResult, error) {
+	return s.FailWithResult(ctx, jobID, claimToken, reason, "")
+}
+
+// FailWithResult marks a claimed job as failed (verifying claimToken), recording both
+// last_error and result_text (for example, per-criterion evaluation details), and
+// recursively cancels all waiting descendants.
+func (s *Store) FailWithResult(ctx context.Context, jobID int64, claimToken, reason, resultText string) (*FailResult, error) {
 	var out FailResult
 
 	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
@@ -602,9 +609,10 @@ func (s *Store) Fail(ctx context.Context, jobID int64, claimToken, reason string
 			UPDATE jobs
 			SET status = 'failed',
 				last_error = ?,
+				result_text = ?,
 				updated_at = ?
 			WHERE id = ? AND status = 'claimed' AND claimed_by = ?
-		`, reason, nowStr, jobID, claimToken)
+		`, reason, resultText, nowStr, jobID, claimToken)
 		if err != nil {
 			return err
 		}
@@ -1092,6 +1100,58 @@ func (s *Store) ListPendingOutbox(ctx context.Context, limit int) ([]OutboxEvent
 		events = append(events, ev)
 	}
 	return events, rows.Err()
+}
+
+// MarkOutboxDispatched sets dispatched_at on an outbox row if it has not been dispatched yet.
+func (s *Store) MarkOutboxDispatched(ctx context.Context, id int64) error {
+	nowStr := formatTime(time.Now().UTC())
+	return s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		_, err := conn.ExecContext(ctx, `
+			UPDATE signal_outbox
+			SET dispatched_at = COALESCE(dispatched_at, ?)
+			WHERE id = ?
+		`, nowStr, id)
+		return err
+	})
+}
+
+// RecordReconcilerDedup atomically records dedupKey in reconciler_dedup.
+// It returns isNew=true on the first sighting (caller should emit the report)
+// and isNew=false on subsequent sightings (caller should suppress duplicate reports).
+func (s *Store) RecordReconcilerDedup(ctx context.Context, dedupKey string) (bool, error) {
+	if strings.TrimSpace(dedupKey) == "" {
+		return false, fmt.Errorf("%w: dedup_key must not be empty", ErrInvalidInput)
+	}
+	var isNew bool
+	nowStr := formatTime(time.Now().UTC())
+	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		res, err := conn.ExecContext(ctx, `
+			INSERT OR IGNORE INTO reconciler_dedup (dedup_key, first_seen_at, last_reported_at, count)
+			VALUES (?, ?, ?, 1)
+		`, dedupKey, nowStr, nowStr)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected > 0 {
+			isNew = true
+			return nil
+		}
+		_, err = conn.ExecContext(ctx, `
+			UPDATE reconciler_dedup
+			SET last_reported_at = ?, count = count + 1
+			WHERE dedup_key = ?
+		`, nowStr, dedupKey)
+		isNew = false
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return isNew, nil
 }
 
 // --- internal helpers ---

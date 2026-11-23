@@ -6,22 +6,113 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// DefaultAPIListen is the default listen address for quota-fleet serve.
-const DefaultAPIListen = "127.0.0.1:8737"
+const (
+	// DefaultAPIListen is the default listen address for quota-fleet serve.
+	DefaultAPIListen = "127.0.0.1:8737"
+	// DefaultRuntimeAdapter is the default adapter for Phase 1. Real SSH/local adapters are planned for Phase 2.
+	DefaultRuntimeAdapter    = "mock"
+	DefaultDispatchInterval  = 1 * time.Second
+	DefaultShepherdInterval  = 5 * time.Second
+	DefaultReconcileInterval = 30 * time.Second
+	DefaultStaleClaimedAfter = 15 * time.Minute
+	DefaultSignalMaxBytes    = int64(1 << 20) // 1 MiB
+)
 
 // Config represents the quota-fleet configuration loaded from fleet.yaml.
 type Config struct {
 	InstanceID string                 `yaml:"instance_id"`
 	StateDir   string                 `yaml:"state_dir"`
 	API        APIConfig              `yaml:"api"`
+	Runtime    RuntimeConfig          `yaml:"runtime"`
 	Limits     LimitsConfig           `yaml:"limits"`
 	Hosts      map[string]HostConfig  `yaml:"hosts"`
 	Agents     map[string]AgentConfig `yaml:"agents"`
 	Pools      map[string]PoolConfig  `yaml:"pools"`
+}
+
+// RuntimeConfig holds settings for resident runtime components (Dispatcher,
+// Launcher, Shepherd, Reconciler).
+type RuntimeConfig struct {
+	// Adapter selects the host/agent adapter. Currently only "mock" is valid;
+	// real SSH/local adapters will be implemented in Phase 2.
+	Adapter           string `yaml:"adapter"`
+	DispatchInterval  string `yaml:"dispatch_interval"`
+	ShepherdInterval  string `yaml:"shepherd_interval"`
+	ReconcileInterval string `yaml:"reconcile_interval"`
+	StaleClaimedAfter string `yaml:"stale_claimed_after"`
+	SignalMaxBytes    int64  `yaml:"signal_max_bytes"`
+	DeliveriesDir     string `yaml:"deliveries_dir"`
+}
+
+// EffectiveAdapter returns the configured adapter name, defaulting to "mock".
+func (r RuntimeConfig) EffectiveAdapter() string {
+	v := strings.TrimSpace(r.Adapter)
+	if v == "" {
+		return DefaultRuntimeAdapter
+	}
+	return v
+}
+
+// EffectiveDispatchInterval returns the Dispatcher poll interval or DefaultDispatchInterval.
+func (r RuntimeConfig) EffectiveDispatchInterval() time.Duration {
+	return parseDurationOrDefault(r.DispatchInterval, DefaultDispatchInterval)
+}
+
+// EffectiveShepherdInterval returns the Shepherd poll interval or DefaultShepherdInterval.
+func (r RuntimeConfig) EffectiveShepherdInterval() time.Duration {
+	return parseDurationOrDefault(r.ShepherdInterval, DefaultShepherdInterval)
+}
+
+// EffectiveReconcileInterval returns the Reconciler poll interval or DefaultReconcileInterval.
+func (r RuntimeConfig) EffectiveReconcileInterval() time.Duration {
+	return parseDurationOrDefault(r.ReconcileInterval, DefaultReconcileInterval)
+}
+
+// EffectiveStaleClaimedAfter returns the Reconciler stale claimed threshold or DefaultStaleClaimedAfter.
+func (r RuntimeConfig) EffectiveStaleClaimedAfter() time.Duration {
+	return parseDurationOrDefault(r.StaleClaimedAfter, DefaultStaleClaimedAfter)
+}
+
+// EffectiveSignalMaxBytes returns the signal.jsonl rotation threshold or DefaultSignalMaxBytes.
+func (r RuntimeConfig) EffectiveSignalMaxBytes() int64 {
+	if r.SignalMaxBytes <= 0 {
+		return DefaultSignalMaxBytes
+	}
+	return r.SignalMaxBytes
+}
+
+// EffectiveDeliveriesDir returns the directory for file-based delivery outputs,
+// resolved relative to stateDir when DeliveriesDir is empty or relative.
+func (r RuntimeConfig) EffectiveDeliveriesDir(stateDir string) string {
+	dir := strings.TrimSpace(r.DeliveriesDir)
+	sd := strings.TrimSpace(stateDir)
+	if dir == "" {
+		if sd == "" {
+			return "deliveries"
+		}
+		return filepath.Join(sd, "deliveries")
+	}
+	if filepath.IsAbs(dir) || sd == "" {
+		return dir
+	}
+	return filepath.Join(sd, dir)
+}
+
+func parseDurationOrDefault(raw string, def time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
 }
 
 // APIConfig holds HTTP API server settings.
@@ -138,7 +229,41 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if adapter := strings.TrimSpace(c.Runtime.Adapter); adapter != "" && adapter != DefaultRuntimeAdapter {
+		errs = append(errs, fmt.Errorf("runtime.adapter %q is not supported yet (only %q is available; real host adapters are planned for Phase 2)", adapter, DefaultRuntimeAdapter))
+	}
+	if err := validatePositiveDuration("runtime.dispatch_interval", c.Runtime.DispatchInterval); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validatePositiveDuration("runtime.shepherd_interval", c.Runtime.ShepherdInterval); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validatePositiveDuration("runtime.reconcile_interval", c.Runtime.ReconcileInterval); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validatePositiveDuration("runtime.stale_claimed_after", c.Runtime.StaleClaimedAfter); err != nil {
+		errs = append(errs, err)
+	}
+	if c.Runtime.SignalMaxBytes < 0 {
+		errs = append(errs, fmt.Errorf("runtime.signal_max_bytes must be >= 0 (got %d)", c.Runtime.SignalMaxBytes))
+	}
+
 	return errors.Join(errs...)
+}
+
+func validatePositiveDuration(field, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid duration (%q): %w", field, raw, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("%s must be > 0 (got %q)", field, raw)
+	}
+	return nil
 }
 
 // DBPath returns the SQLite database file path derived from StateDir.

@@ -1019,3 +1019,67 @@ func TestClaimByIDAndUndelivered(t *testing.T) {
 		t.Fatalf("ListUndelivered = %+v, want only j1 (%d)", undel, j1.ID)
 	}
 }
+
+func TestMarkOutboxDispatchedAndReconcilerDedupAndFailWithResult(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	job, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "rt-1", Title: "Outbox & FailWithResult"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	pending, err := st.ListPendingOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPendingOutbox: %v", err)
+	}
+	if len(pending) != 1 || pending[0].JobID != job.ID {
+		t.Fatalf("pending outbox = %+v, want 1 event for job %d", pending, job.ID)
+	}
+
+	if err := st.MarkOutboxDispatched(ctx, pending[0].ID); err != nil {
+		t.Fatalf("MarkOutboxDispatched: %v", err)
+	}
+	// Idempotent second call.
+	if err := st.MarkOutboxDispatched(ctx, pending[0].ID); err != nil {
+		t.Fatalf("MarkOutboxDispatched second call: %v", err)
+	}
+
+	pendingAfter, err := st.ListPendingOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPendingOutbox after: %v", err)
+	}
+	if len(pendingAfter) != 0 {
+		t.Fatalf("pending outbox after dispatch = %d, want 0", len(pendingAfter))
+	}
+
+	// Reconciler dedup: first call returns isNew=true, subsequent calls return isNew=false.
+	if _, err := st.RecordReconcilerDedup(ctx, "   "); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("RecordReconcilerDedup empty key err = %v, want ErrInvalidInput", err)
+	}
+	isNew, err := st.RecordReconcilerDedup(ctx, "orphan-waiting:10:parent-1-failed")
+	if err != nil || !isNew {
+		t.Fatalf("first RecordReconcilerDedup = (%v, %v), want (true, nil)", isNew, err)
+	}
+	isNew2, err := st.RecordReconcilerDedup(ctx, "orphan-waiting:10:parent-1-failed")
+	if err != nil || isNew2 {
+		t.Fatalf("second RecordReconcilerDedup = (%v, %v), want (false, nil)", isNew2, err)
+	}
+	isNewOther, err := st.RecordReconcilerDedup(ctx, "orphan-waiting:11:parent-1-failed")
+	if err != nil || !isNewOther {
+		t.Fatalf("different key RecordReconcilerDedup = (%v, %v), want (true, nil)", isNewOther, err)
+	}
+
+	// FailWithResult records both last_error and result_text.
+	claimed, ok, err := st.Claim(ctx, 1)
+	if err != nil || !ok {
+		t.Fatalf("Claim: ok=%v err=%v", ok, err)
+	}
+	failRes, err := st.FailWithResult(ctx, claimed.ID, claimed.ClaimedBy, "evaluation failed", "overall: FAIL\n- [FAIL] tests pass")
+	if err != nil {
+		t.Fatalf("FailWithResult: %v", err)
+	}
+	if failRes.Job.Status != StatusFailed || failRes.Job.LastError != "evaluation failed" || failRes.Job.ResultText != "overall: FAIL\n- [FAIL] tests pass" {
+		t.Fatalf("FailWithResult job = %+v", failRes.Job)
+	}
+}

@@ -1,0 +1,780 @@
+package runtime
+
+import (
+	"bufio"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
+	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
+	"github.com/ypsilonmeister/quota-fleet/internal/store"
+	_ "modernc.org/sqlite"
+)
+
+func openTestStore(t *testing.T, instanceID string) (*store.Store, string) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "fleet.db")
+	st, err := store.Open(context.Background(), dbPath, store.Options{InstanceID: instanceID})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.InitInstanceID(context.Background(), instanceID); err != nil {
+		t.Fatalf("InitInstanceID: %v", err)
+	}
+	return st, dir
+}
+
+func discardLogger() *log.Logger {
+	return log.New(io.Discard, "", 0)
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for: %s", timeout, desc)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+type recordingNotifier struct {
+	mu         sync.Mutex
+	deliveries []*store.Job
+	reports    []Report
+}
+
+func (n *recordingNotifier) Deliver(ctx context.Context, job *store.Job) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cp := *job
+	n.deliveries = append(n.deliveries, &cp)
+	return nil
+}
+
+func (n *recordingNotifier) Report(ctx context.Context, report Report) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.reports = append(n.reports, report)
+	return nil
+}
+
+func (n *recordingNotifier) Reports() []Report {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make([]Report, len(n.reports))
+	copy(out, n.reports)
+	return out
+}
+
+func (n *recordingNotifier) Deliveries() []*store.Job {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make([]*store.Job, len(n.deliveries))
+	copy(out, n.deliveries)
+	return out
+}
+
+func TestE2ESingleJobLifecycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, stateDir := openTestStore(t, "e2e-single")
+	mockAdapter := adapter.NewMock(adapter.MockOptions{
+		Default: adapter.MockBehavior{
+			ExitAfterPolls: 2,
+			ExitCode:       0,
+		},
+	})
+
+	rt, err := New(Options{
+		Store:             st,
+		Adapter:           mockAdapter,
+		Evaluator:         evaluator.NewAlwaysPass(),
+		InstanceID:        "e2e-single",
+		StateDir:          stateDir,
+		MaxClaimed:        2,
+		AttemptsCap:       3,
+		DispatchInterval:  10 * time.Millisecond,
+		ShepherdInterval:  10 * time.Millisecond,
+		ReconcileInterval: 20 * time.Millisecond,
+		StaleClaimedAfter: 5 * time.Second,
+		Logger:            discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("runtime.New: %v", err)
+	}
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("runtime.Start: %v", err)
+	}
+	defer rt.Stop()
+
+	job, created, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "e2e-single-1",
+		Title:              "Single E2E job",
+		Agent:              "claude",
+		Host:               "ubuntu",
+		Workdir:            "/work/demo",
+		AcceptanceCriteria: "build succeeds\ntests pass",
+	})
+	if err != nil || !created {
+		t.Fatalf("CreateJob: created=%v err=%v", created, err)
+	}
+
+	waitUntil(t, 3*time.Second, "single job done and delivered", func() bool {
+		j, err := st.GetJob(ctx, job.ID)
+		return err == nil && j.Status == store.StatusDone && j.DeliveredAt != nil
+	})
+
+	got, err := st.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Attempts != 1 {
+		t.Errorf("Attempts = %d, want 1", got.Attempts)
+	}
+	if !strings.Contains(got.ResultText, "overall: PASS") || !strings.Contains(got.ResultText, "[PASS] tests pass") {
+		t.Errorf("unexpected ResultText:\n%s", got.ResultText)
+	}
+	if mockAdapter.PrepareCalls(job.ID) != 1 || mockAdapter.LaunchCalls(job.ID) != 1 || mockAdapter.CollectCalls(job.ID) != 1 {
+		t.Errorf("adapter calls: prepare=%d launch=%d collect=%d",
+			mockAdapter.PrepareCalls(job.ID), mockAdapter.LaunchCalls(job.ID), mockAdapter.CollectCalls(job.ID))
+	}
+
+	// Verify delivery file exists and is valid JSON.
+	deliveryPath := filepath.Join(stateDir, "deliveries", fmt.Sprintf("job-%d.json", job.ID))
+	data, err := os.ReadFile(deliveryPath)
+	if err != nil {
+		t.Fatalf("read delivery file %q: %v", deliveryPath, err)
+	}
+	var payload DeliveryPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal delivery file: %v", err)
+	}
+	if payload.JobID != job.ID || payload.Status != "done" || payload.Title != "Single E2E job" {
+		t.Errorf("unexpected delivery payload: %+v", payload)
+	}
+
+	// Verify signal.jsonl contains an 8-field record for this job.
+	sigPath := filepath.Join(stateDir, "signal.jsonl")
+	sigData, err := os.ReadFile(sigPath)
+	if err != nil {
+		t.Fatalf("read signal.jsonl: %v", err)
+	}
+	if !strings.Contains(string(sigData), fmt.Sprintf(`"job_id":%d`, job.ID)) {
+		t.Errorf("signal.jsonl missing job_id=%d:\n%s", job.ID, string(sigData))
+	}
+}
+
+func TestE2EChainParentToChildPromotion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, stateDir := openTestStore(t, "e2e-chain")
+	mockAdapter := adapter.NewMock(adapter.MockOptions{
+		Default: adapter.MockBehavior{
+			ExitAfterPolls: 1,
+		},
+	})
+
+	rt, err := New(Options{
+		Store:             st,
+		Adapter:           mockAdapter,
+		Evaluator:         evaluator.NewAlwaysPass(),
+		InstanceID:        "e2e-chain",
+		StateDir:          stateDir,
+		MaxClaimed:        2,
+		AttemptsCap:       3,
+		DispatchInterval:  10 * time.Millisecond,
+		ShepherdInterval:  10 * time.Millisecond,
+		ReconcileInterval: 25 * time.Millisecond,
+		StaleClaimedAfter: 5 * time.Second,
+		Logger:            discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("runtime.New: %v", err)
+	}
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("runtime.Start: %v", err)
+	}
+	defer rt.Stop()
+
+	parent, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "chain-parent",
+		Title:              "Parent implementation",
+		AcceptanceCriteria: "implementation compiles",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob parent: %v", err)
+	}
+
+	parentID := parent.ID
+	child, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "chain-child",
+		Title:              "Child review",
+		ParentID:           &parentID,
+		AcceptanceCriteria: "review completed",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob child: %v", err)
+	}
+	if child.Status != store.StatusWaiting && child.Status != store.StatusQueued {
+		t.Fatalf("initial child status = %s, want waiting (or queued if parent already finished)", child.Status)
+	}
+
+	waitUntil(t, 3*time.Second, "parent and child both done and delivered", func() bool {
+		p, err1 := st.GetJob(ctx, parent.ID)
+		c, err2 := st.GetJob(ctx, child.ID)
+		return err1 == nil && err2 == nil &&
+			p.Status == store.StatusDone && p.DeliveredAt != nil &&
+			c.Status == store.StatusDone && c.DeliveredAt != nil
+	})
+
+	if mockAdapter.LaunchCalls(parent.ID) != 1 || mockAdapter.LaunchCalls(child.ID) != 1 {
+		t.Errorf("launch calls: parent=%d child=%d, want 1 each",
+			mockAdapter.LaunchCalls(parent.ID), mockAdapter.LaunchCalls(child.ID))
+	}
+}
+
+func TestE2EParentFailureCancelsChild(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, stateDir := openTestStore(t, "e2e-fail-cascade")
+	mockAdapter := adapter.NewMock(adapter.MockOptions{
+		Default: adapter.MockBehavior{
+			ExitAfterPolls: 1,
+		},
+	})
+	eval := evaluator.NewSelectiveFail(evaluator.SelectiveFailOptions{
+		FailSubstrings: []string{"unit tests"},
+		FailReason:     "test suite returned non-zero",
+	})
+
+	rt, err := New(Options{
+		Store:             st,
+		Adapter:           mockAdapter,
+		Evaluator:         eval,
+		InstanceID:        "e2e-fail-cascade",
+		StateDir:          stateDir,
+		MaxClaimed:        2,
+		AttemptsCap:       3,
+		DispatchInterval:  10 * time.Millisecond,
+		ShepherdInterval:  10 * time.Millisecond,
+		ReconcileInterval: 25 * time.Millisecond,
+		StaleClaimedAfter: 5 * time.Second,
+		Logger:            discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("runtime.New: %v", err)
+	}
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("runtime.Start: %v", err)
+	}
+	defer rt.Stop()
+
+	parent, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "fail-parent",
+		Title:              "Failing parent",
+		AcceptanceCriteria: "build succeeds\nunit tests pass",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob parent: %v", err)
+	}
+	parentID := parent.ID
+	child, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "fail-child",
+		Title:              "Dependent child",
+		ParentID:           &parentID,
+		AcceptanceCriteria: "review passes",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob child: %v", err)
+	}
+
+	waitUntil(t, 3*time.Second, "parent failed+delivered and child cancelled", func() bool {
+		p, err1 := st.GetJob(ctx, parent.ID)
+		c, err2 := st.GetJob(ctx, child.ID)
+		return err1 == nil && err2 == nil &&
+			p.Status == store.StatusFailed && p.DeliveredAt != nil &&
+			c.Status == store.StatusCancelled
+	})
+
+	gotParent, err := st.GetJob(ctx, parent.ID)
+	if err != nil {
+		t.Fatalf("GetJob parent: %v", err)
+	}
+	if !strings.Contains(gotParent.ResultText, "[PASS] build succeeds") ||
+		!strings.Contains(gotParent.ResultText, "[FAIL] unit tests pass (test suite returned non-zero)") {
+		t.Errorf("parent ResultText missing per-criterion details:\n%s", gotParent.ResultText)
+	}
+	if mockAdapter.LaunchCalls(child.ID) != 0 {
+		t.Errorf("cancelled child should never be launched, got %d calls", mockAdapter.LaunchCalls(child.ID))
+	}
+}
+
+func TestE2EMaxClaimedConcurrencyLimit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st, stateDir := openTestStore(t, "e2e-max-claimed")
+	mockAdapter := adapter.NewMock(adapter.MockOptions{
+		Default: adapter.MockBehavior{
+			StayRunning: true,
+		},
+	})
+
+	rt, err := New(Options{
+		Store:             st,
+		Adapter:           mockAdapter,
+		Evaluator:         evaluator.NewAlwaysPass(),
+		InstanceID:        "e2e-max-claimed",
+		StateDir:          stateDir,
+		MaxClaimed:        1,
+		AttemptsCap:       3,
+		DispatchInterval:  10 * time.Millisecond,
+		ShepherdInterval:  10 * time.Millisecond,
+		ReconcileInterval: 30 * time.Millisecond,
+		StaleClaimedAfter: 5 * time.Second,
+		Logger:            discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("runtime.New: %v", err)
+	}
+	if err := rt.Start(ctx); err != nil {
+		t.Fatalf("runtime.Start: %v", err)
+	}
+	defer rt.Stop()
+
+	j1, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "cap-1",
+		Title:              "Job 1",
+		AcceptanceCriteria: "done",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob 1: %v", err)
+	}
+	j2, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "cap-2",
+		Title:              "Job 2",
+		AcceptanceCriteria: "done",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob 2: %v", err)
+	}
+
+	// Wait until job 1 is launched while job 2 remains queued.
+	waitUntil(t, 3*time.Second, "job 1 claimed and launched", func() bool {
+		g1, err := st.GetJob(ctx, j1.ID)
+		return err == nil && g1.Status == store.StatusClaimed && mockAdapter.LaunchCalls(j1.ID) == 1
+	})
+
+	// Give dispatcher/launcher a couple ticks to confirm job 2 is NOT claimed while job 1 is active.
+	time.Sleep(40 * time.Millisecond)
+
+	counts, err := st.CountByStatus(ctx)
+	if err != nil {
+		t.Fatalf("CountByStatus: %v", err)
+	}
+	if counts[store.StatusClaimed] != 1 || counts[store.StatusQueued] != 1 {
+		t.Fatalf("while job 1 running: claimed=%d queued=%d, want 1 and 1",
+			counts[store.StatusClaimed], counts[store.StatusQueued])
+	}
+	if mockAdapter.MaxConcurrentRunning() > 1 {
+		t.Fatalf("MaxConcurrentRunning = %d, want <= 1", mockAdapter.MaxConcurrentRunning())
+	}
+
+	// Finish job 1; Shepherd completes it and wakes Launcher so job 2 is claimed next.
+	mockAdapter.FinishJob(j1.ID, 0)
+
+	waitUntil(t, 3*time.Second, "job 1 done and job 2 claimed+launched", func() bool {
+		g1, err1 := st.GetJob(ctx, j1.ID)
+		g2, err2 := st.GetJob(ctx, j2.ID)
+		return err1 == nil && err2 == nil &&
+			g1.Status == store.StatusDone && g1.DeliveredAt != nil &&
+			g2.Status == store.StatusClaimed && mockAdapter.LaunchCalls(j2.ID) == 1
+	})
+
+	// Finish job 2 and verify both finish without ever exceeding concurrency 1.
+	mockAdapter.FinishJob(j2.ID, 0)
+
+	waitUntil(t, 3*time.Second, "job 2 done and delivered", func() bool {
+		g2, err := st.GetJob(ctx, j2.ID)
+		return err == nil && g2.Status == store.StatusDone && g2.DeliveredAt != nil
+	})
+
+	if mockAdapter.MaxConcurrentRunning() != 1 {
+		t.Errorf("MaxConcurrentRunning = %d, want 1", mockAdapter.MaxConcurrentRunning())
+	}
+}
+
+func TestE2EReconcilerResetsMissingClaimedJob(t *testing.T) {
+	ctx := context.Background()
+
+	// Part 1: Direct Reconciler verification that a Missing claimed job is reset back to queued.
+	st, _ := openTestStore(t, "e2e-reconcile-reset")
+	mockAdapter := adapter.NewMock(adapter.MockOptions{
+		Default: adapter.MockBehavior{
+			ForceMissing: true,
+		},
+	})
+	recNotifier := &recordingNotifier{}
+
+	job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID: "missing-1",
+		Title:     "Missing worker job",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	claimed, ok, err := st.Claim(ctx, 1)
+	if err != nil || !ok || claimed.ID != job.ID {
+		t.Fatalf("Claim: ok=%v err=%v", ok, err)
+	}
+
+	// Advance clock beyond StaleClaimedAfter.
+	fakeNow := time.Now().UTC().Add(30 * time.Minute)
+	reconciler := NewReconciler(ReconcilerOptions{
+		Store:             st,
+		Adapter:           mockAdapter,
+		Notifier:          recNotifier,
+		StaleClaimedAfter: 10 * time.Minute,
+		AttemptsCap:       3,
+		Now:               func() time.Time { return fakeNow },
+		Logger:            discardLogger(),
+	})
+
+	if err := reconciler.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+
+	afterReset, err := st.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob after reset: %v", err)
+	}
+	if afterReset.Status != store.StatusQueued {
+		t.Fatalf("Status after reset = %s, want queued", afterReset.Status)
+	}
+	if afterReset.ClaimedBy != "" || afterReset.ClaimedAt != nil {
+		t.Errorf("claim fields not cleared: claimed_by=%q claimed_at=%v", afterReset.ClaimedBy, afterReset.ClaimedAt)
+	}
+	if afterReset.Attempts != 1 {
+		t.Errorf("Attempts after reset = %d, want 1 (reset must preserve attempts)", afterReset.Attempts)
+	}
+
+	// Part 2: Full Runtime self-recovery: job is launched, dropped from adapter (Missing),
+	// Reconciler resets it to queued, Dispatcher+Launcher re-claim it (attempts=2), and it finishes.
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st2, stateDir2 := openTestStore(t, "e2e-reconcile-recover")
+	mockAdapter2 := adapter.NewMock(adapter.MockOptions{
+		Default: adapter.MockBehavior{
+			StayRunning: true,
+		},
+	})
+
+	rt, err := New(Options{
+		Store:             st2,
+		Adapter:           mockAdapter2,
+		Evaluator:         evaluator.NewAlwaysPass(),
+		InstanceID:        "e2e-reconcile-recover",
+		StateDir:          stateDir2,
+		MaxClaimed:        1,
+		AttemptsCap:       3,
+		DispatchInterval:  10 * time.Millisecond,
+		ShepherdInterval:  10 * time.Millisecond,
+		ReconcileInterval: 10 * time.Millisecond,
+		StaleClaimedAfter: 15 * time.Millisecond,
+		Logger:            discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("runtime.New: %v", err)
+	}
+	if err := rt.Start(runCtx); err != nil {
+		t.Fatalf("runtime.Start: %v", err)
+	}
+	defer rt.Stop()
+
+	j, _, err := st2.CreateJob(runCtx, store.CreateJobParams{
+		RequestID:          "recover-1",
+		Title:              "Vanished then recovered",
+		AcceptanceCriteria: "succeeds on retry",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob recover: %v", err)
+	}
+
+	waitUntil(t, 3*time.Second, "first launch observed", func() bool {
+		return mockAdapter2.LaunchCalls(j.ID) == 1
+	})
+
+	// Simulate worker disappearance; next launch should exit cleanly.
+	mockAdapter2.SetJobBehavior(j.ID, adapter.MockBehavior{ExitAfterPolls: 1})
+	mockAdapter2.DropJob(j.ID)
+
+	waitUntil(t, 3*time.Second, "recovered job done on attempt 2", func() bool {
+		got, err := st2.GetJob(runCtx, j.ID)
+		return err == nil && got.Status == store.StatusDone && got.DeliveredAt != nil && got.Attempts == 2
+	})
+}
+
+func TestReconcilerUndeliveredOrphanDedupAndIdleSkip(t *testing.T) {
+	ctx := context.Background()
+	st, stateDir := openTestStore(t, "rec-unit")
+	dbPath := filepath.Join(stateDir, "fleet.db")
+	mockAdapter := adapter.NewMock(adapter.MockOptions{})
+	recNotifier := &recordingNotifier{}
+
+	reconciler := NewReconciler(ReconcilerOptions{
+		Store:             st,
+		Adapter:           mockAdapter,
+		Notifier:          recNotifier,
+		StaleClaimedAfter: 10 * time.Minute,
+		AttemptsCap:       3,
+		Logger:            discardLogger(),
+	})
+	shepherd := NewShepherd(ShepherdOptions{
+		Store:     st,
+		Adapter:   mockAdapter,
+		Evaluator: evaluator.NewAlwaysPass(),
+		Notifier:  recNotifier,
+		Logger:    discardLogger(),
+	})
+
+	// 1. Idle skip: with zero active jobs, Shepherd and Reconciler skip adapter inspection.
+	if err := shepherd.SweepOnce(ctx); err != nil {
+		t.Fatalf("idle SweepOnce: %v", err)
+	}
+	if err := reconciler.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("idle ReconcileOnce: %v", err)
+	}
+	if mockAdapter.TotalStatusCalls() != 0 {
+		t.Fatalf("idle TotalStatusCalls = %d, want 0", mockAdapter.TotalStatusCalls())
+	}
+
+	// 2. Undelivered done job is collected and delivered by Reconciler.
+	jDone, _, err := st.CreateJob(ctx, store.CreateJobParams{RequestID: "undel-1", Title: "Undelivered done"})
+	if err != nil {
+		t.Fatalf("CreateJob undel: %v", err)
+	}
+	cDone, ok, err := st.Claim(ctx, 1)
+	if err != nil || !ok {
+		t.Fatalf("Claim undel: ok=%v err=%v", ok, err)
+	}
+	if _, err := st.Complete(ctx, cDone.ID, cDone.ClaimedBy, "ok"); err != nil {
+		t.Fatalf("Complete undel: %v", err)
+	}
+
+	if err := reconciler.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce undelivered: %v", err)
+	}
+	gotDone, err := st.GetJob(ctx, jDone.ID)
+	if err != nil {
+		t.Fatalf("GetJob undel: %v", err)
+	}
+	if gotDone.DeliveredAt == nil {
+		t.Fatalf("expected Reconciler to mark done job delivered")
+	}
+	if len(recNotifier.Deliveries()) != 1 {
+		t.Fatalf("Deliveries len = %d, want 1", len(recNotifier.Deliveries()))
+	}
+
+	// 3. Orphan waiting job (parent terminal, child stuck in waiting) is reported ONCE (deduped).
+	parent, _, err := st.CreateJob(ctx, store.CreateJobParams{RequestID: "orp-p", Title: "Orphan parent"})
+	if err != nil {
+		t.Fatalf("CreateJob parent: %v", err)
+	}
+	pid := parent.ID
+	child, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID: "orp-c",
+		Title:     "Orphan child",
+		ParentID:  &pid,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob child: %v", err)
+	}
+	// Cancel parent (which cascades child to cancelled), then force child back to waiting directly
+	// in SQLite to simulate a stuck/corrupted orphan waiting row.
+	if _, err := st.Cancel(ctx, parent.ID, "operator cancel"); err != nil {
+		t.Fatalf("Cancel parent: %v", err)
+	}
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("raw sql.Open: %v", err)
+	}
+	defer rawDB.Close()
+	if _, err := rawDB.ExecContext(ctx, `UPDATE jobs SET status = 'waiting' WHERE id = ?`, child.ID); err != nil {
+		t.Fatalf("force child waiting: %v", err)
+	}
+
+	if err := reconciler.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce orphan pass 1: %v", err)
+	}
+	if err := reconciler.ReconcileOnce(ctx); err != nil {
+		t.Fatalf("ReconcileOnce orphan pass 2: %v", err)
+	}
+
+	reports := recNotifier.Reports()
+	if len(reports) != 1 {
+		t.Fatalf("Reports len = %d, want 1 (duplicate should be suppressed): %+v", len(reports), reports)
+	}
+	if reports[0].Kind != "orphan_waiting" || reports[0].JobID != child.ID {
+		t.Errorf("unexpected report: %+v", reports[0])
+	}
+}
+
+func TestDispatcherSignalFormatAndRotation(t *testing.T) {
+	ctx := context.Background()
+	st, stateDir := openTestStore(t, "disp-inst")
+	sigPath := filepath.Join(stateDir, "signal.jsonl")
+	notifyCh := make(chan struct{}, 1)
+
+	// Tiny maxBytes so the second event triggers rotation to signal.jsonl.1.
+	disp := NewDispatcher(DispatcherOptions{
+		Store:          st,
+		NotifyCh:       notifyCh,
+		SignalPath:     sigPath,
+		SignalMaxBytes: 180,
+		InstanceID:     "disp-inst",
+		Interval:       time.Second,
+		Logger:         discardLogger(),
+	})
+
+	for i := 1; i <= 3; i++ {
+		if _, _, err := st.CreateJob(ctx, store.CreateJobParams{
+			RequestID: fmt.Sprintf("sig-%d", i),
+			Title:     fmt.Sprintf("Signal job %d", i),
+		}); err != nil {
+			t.Fatalf("CreateJob %d: %v", i, err)
+		}
+	}
+
+	n, err := disp.DispatchOnce(ctx)
+	if err != nil {
+		t.Fatalf("DispatchOnce: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("dispatched = %d, want 3", n)
+	}
+
+	// Outbox must now be empty.
+	pending, err := st.ListPendingOutbox(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPendingOutbox: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending outbox = %d, want 0", len(pending))
+	}
+
+	// Notification channel must have received a wakeup.
+	select {
+	case <-notifyCh:
+	default:
+		t.Fatalf("expected notification on notifyCh")
+	}
+
+	// Rotated file must exist.
+	rotatedPath := sigPath + ".1"
+	if _, err := os.Stat(rotatedPath); err != nil {
+		t.Fatalf("expected rotated file %q to exist: %v", rotatedPath, err)
+	}
+
+	// Validate 8-field JSONL schema on both files.
+	requiredKeys := []string{"v", "event_id", "job_id", "env", "src", "hop", "ts", "event"}
+	for _, p := range []string{rotatedPath, sigPath} {
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatalf("open %q: %v", p, err)
+		}
+		sc := bufio.NewScanner(f)
+		lines := 0
+		for sc.Scan() {
+			lines++
+			var raw map[string]any
+			if err := json.Unmarshal(sc.Bytes(), &raw); err != nil {
+				_ = f.Close()
+				t.Fatalf("invalid JSON in %q: %v", p, err)
+			}
+			if len(raw) != 8 {
+				_ = f.Close()
+				t.Fatalf("expected exactly 8 fields in %q, got %d: %v", p, len(raw), raw)
+			}
+			for _, k := range requiredKeys {
+				if _, ok := raw[k]; !ok {
+					_ = f.Close()
+					t.Fatalf("missing field %q in %q: %v", k, p, raw)
+				}
+			}
+		}
+		_ = f.Close()
+		if lines == 0 {
+			t.Errorf("expected at least 1 JSONL line in %q", p)
+		}
+	}
+}
+
+func TestLauncherPrepareAndLaunchFailureRecorded(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openTestStore(t, "launcher-err")
+	mockAdapter := adapter.NewMock(adapter.MockOptions{})
+	notifyCh := make(chan struct{}, 1)
+
+	j1, _, err := st.CreateJob(ctx, store.CreateJobParams{RequestID: "lerr-1", Title: "Prepare fail"})
+	if err != nil {
+		t.Fatalf("CreateJob 1: %v", err)
+	}
+	j2, _, err := st.CreateJob(ctx, store.CreateJobParams{RequestID: "lerr-2", Title: "Launch fail"})
+	if err != nil {
+		t.Fatalf("CreateJob 2: %v", err)
+	}
+
+	mockAdapter.SetJobBehavior(j1.ID, adapter.MockBehavior{PrepareErr: errors.New("workdir disk full")})
+	mockAdapter.SetJobBehavior(j2.ID, adapter.MockBehavior{LaunchErr: errors.New("spawn failed")})
+
+	launcher := NewLauncher(LauncherOptions{
+		Store:      st,
+		Adapter:    mockAdapter,
+		NotifyCh:   notifyCh,
+		MaxClaimed: 2,
+		Logger:     discardLogger(),
+	})
+
+	launched := launcher.DrainOnce(ctx)
+	if launched != 0 {
+		t.Errorf("launched = %d, want 0", launched)
+	}
+
+	g1, err := st.GetJob(ctx, j1.ID)
+	if err != nil {
+		t.Fatalf("GetJob 1: %v", err)
+	}
+	if g1.Status != store.StatusFailed || !strings.Contains(g1.LastError, "workdir disk full") {
+		t.Errorf("j1 = status:%s last_error:%q", g1.Status, g1.LastError)
+	}
+
+	g2, err := st.GetJob(ctx, j2.ID)
+	if err != nil {
+		t.Fatalf("GetJob 2: %v", err)
+	}
+	if g2.Status != store.StatusFailed || !strings.Contains(g2.LastError, "spawn failed") {
+		t.Errorf("j2 = status:%s last_error:%q", g2.Status, g2.LastError)
+	}
+}
