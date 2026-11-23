@@ -292,3 +292,91 @@ type HeldConflictResponse struct {
 	CurrentStatus string      `json:"current_status,omitempty"`
 	Held          *HeldJobDTO `json:"held,omitempty"`
 }
+
+// ReleaseHeldResponse is returned by POST /gate/held/{id}/release.
+type ReleaseHeldResponse struct {
+	Released bool   `json:"released"`
+	JobID    int64  `json:"job_id,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// GateDecisionDTO is the JSON representation of a gate_decisions entry.
+type GateDecisionDTO struct {
+	ID            int64      `json:"id"`
+	JobID         int64      `json:"job_id,omitempty"`
+	HeldID        string     `json:"held_id,omitempty"`
+	Held          bool       `json:"held"`
+	Mode          string     `json:"mode"`
+	RequestedPool string     `json:"requested_pool,omitempty"`
+	AltPools      []string   `json:"alt_pools,omitempty"`
+	Decision      string     `json:"decision"`
+	BlockedBy     string     `json:"blocked_by,omitempty"`
+	SelectedPool  string     `json:"selected_pool,omitempty"`
+	Bypassed      bool       `json:"bypassed"`
+	Reason        string     `json:"reason,omitempty"`
+	MeasuredAt    *time.Time `json:"measured_at,omitempty"`
+	DecidedAt     time.Time  `json:"decided_at"`
+}
+
+func toGateDecisionDTO(d *store.GateDecision) *GateDecisionDTO {
+	if d == nil {
+		return nil
+	}
+	dto := &GateDecisionDTO{
+		ID:            d.ID,
+		JobID:         d.JobID,
+		HeldID:        d.HeldID,
+		Held:          d.Held,
+		Mode:          d.Mode,
+		RequestedPool: d.RequestedPool,
+		Decision:      d.Decision,
+		BlockedBy:     d.BlockedBy,
+		SelectedPool:  d.SelectedPool,
+		Bypassed:      d.Bypassed,
+		Reason:        d.Reason,
+		MeasuredAt:    d.MeasuredAt,
+		DecidedAt:     d.DecidedAt,
+	}
+	if len(d.AltPools) > 0 {
+		dto.AltPools = append([]string(nil), d.AltPools...)
+	}
+	return dto
+}
+
+func toGateDecisionDTOs(items []*store.GateDecision) []*GateDecisionDTO {
+	out := make([]*GateDecisionDTO, 0, len(items))
+	for _, d := range items {
+		out = append(out, toGateDecisionDTO(d))
+	}
+	return out
+}
+
+// ListGateDecisionsResponse is returned by GET /gate/decisions.
+type ListGateDecisionsResponse struct {
+	Decisions []*GateDecisionDTO `json:"decisions"`
+}
+
+// PoolSummaryDTO describes the current quota summary for a configured pool.
+type PoolSummaryDTO struct {
+	Pool                   string     `json:"pool"`
+	Status                 string     `json:"status"`
+	Unmeasured             bool       `json:"unmeasured,omitempty"`
+	BlockedBy              string     `json:"blocked_by,omitempty"`
+	Reason                 string     `json:"reason,omitempty"`
+	WeeklyRemainingPercent *int       `json:"weekly_remaining_percent,omitempty"`
+	WeeklyResetAt          *time.Time `json:"weekly_reset_at,omitempty"`
+	ShortRemainingPercent  *int       `json:"short_remaining_percent,omitempty"`
+	ShortResetAt           *time.Time `json:"short_reset_at,omitempty"`
+	MeasuredAt             *time.Time `json:"measured_at,omitempty"`
+	ServiceStale           bool       `json:"service_stale,omitempty"`
+}
+
+// MetaResponse is returned by GET /meta with non-sensitive form candidates and runtime modes.
+type MetaResponse struct {
+	Hosts         []string         `json:"hosts"`
+	Agents        []string         `json:"agents"`
+	Pools         []string         `json:"pools"`
+	GateMode      string           `json:"gate_mode"`
+	EvaluatorMode string           `json:"evaluator_mode"`
+	PoolSummaries []PoolSummaryDTO `json:"pool_summaries"`
+}

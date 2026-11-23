@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,19 @@ const (
 	maxBodyBytes      = 1 << 20 // 1 MiB
 )
 
+// GateReleaseResult represents the outcome of an immediate re-evaluation release attempt for a held job.
+type GateReleaseResult struct {
+	Released     bool
+	JobID        int64
+	SelectedPool string
+	Reason       string
+}
+
+// GateReleaser decouples the HTTP API server from the concrete Quota Gate checker implementation.
+type GateReleaser interface {
+	ReleaseHeld(ctx context.Context, heldID string) (*GateReleaseResult, error)
+}
+
 // Options configures the HTTP API Server.
 type Options struct {
 	InstanceID  string
@@ -33,9 +47,15 @@ type Options struct {
 
 	// Quota Gate integration settings (off | dry-run | enforce).
 	GateMode        string
+	EvaluatorMode   string
 	QuotaUsageFile  string
 	QuotaStaleAfter time.Duration
 	Pools           map[string]config.PoolConfig
+	// Non-sensitive configured names exposed by GET /meta.
+	Hosts  []string
+	Agents []string
+	// GateReleaser handles POST /gate/held/{id}/release via immediate quota re-evaluation.
+	GateReleaser GateReleaser
 	// Now overrides the evaluation clock in tests when non-nil.
 	Now func() time.Time
 	// SnapshotLoader optionally overrides loading usage snapshots from QuotaUsageFile in tests.
@@ -51,9 +71,13 @@ type Server struct {
 	requireAuth     bool
 	logger          *log.Logger
 	gateMode        string
+	evaluatorMode   string
 	quotaUsageFile  string
 	quotaStaleAfter time.Duration
 	pools           map[string]config.PoolConfig
+	hosts           []string
+	agents          []string
+	gateReleaser    GateReleaser
 	nowFn           func() time.Time
 	snapshotLoader  func() (*quota.Snapshot, error)
 	handler         http.Handler
@@ -73,6 +97,10 @@ func NewServer(st *store.Store, opts Options) *Server {
 	if gateMode == "" {
 		gateMode = config.GateModeOff
 	}
+	evaluatorMode := strings.TrimSpace(opts.EvaluatorMode)
+	if evaluatorMode == "" {
+		evaluatorMode = config.DefaultEvaluatorMode
+	}
 	staleAfter := opts.QuotaStaleAfter
 	if staleAfter <= 0 {
 		staleAfter = config.DefaultQuotaStaleAfter
@@ -90,9 +118,13 @@ func NewServer(st *store.Store, opts Options) *Server {
 		requireAuth:     opts.RequireAuth,
 		logger:          logger,
 		gateMode:        gateMode,
+		evaluatorMode:   evaluatorMode,
 		quotaUsageFile:  strings.TrimSpace(opts.QuotaUsageFile),
 		quotaStaleAfter: staleAfter,
 		pools:           opts.Pools,
+		hosts:           normalizeSortedNames(opts.Hosts),
+		agents:          normalizeSortedNames(opts.Agents),
+		gateReleaser:    opts.GateReleaser,
 		nowFn:           nowFn,
 		snapshotLoader:  opts.SnapshotLoader,
 	}
@@ -115,9 +147,12 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("POST /jobs/{id}/reject-invalid", s.handleRejectInvalidJob)
 	mux.HandleFunc("POST /jobs/{id}/deliver", s.handleDeliverJob)
 	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.HandleFunc("GET /meta", s.handleMeta)
 	mux.HandleFunc("GET /deliveries", s.handleDeliveries)
 	mux.HandleFunc("GET /gate/held", s.handleListHeldJobs)
+	mux.HandleFunc("POST /gate/held/{id}/release", s.handleReleaseHeldJob)
 	mux.HandleFunc("DELETE /gate/held/{id}", s.handleCancelHeldJob)
+	mux.HandleFunc("GET /gate/decisions", s.handleListGateDecisions)
 
 	s.handler = s.authMiddleware(mux)
 	return s
@@ -542,6 +577,96 @@ func (s *Server) handleCancelHeldJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleReleaseHeldJob(w http.ResponseWriter, r *http.Request) {
+	heldID := strings.TrimSpace(r.PathValue("id"))
+	if heldID == "" {
+		writeError(w, http.StatusBadRequest, "held id is required")
+		return
+	}
+	if s.gateReleaser == nil {
+		writeError(w, http.StatusServiceUnavailable, "gate releaser is not configured")
+		return
+	}
+
+	res, err := s.gateReleaser.ReleaseHeld(r.Context(), heldID)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, store.ErrConflict):
+			reason := err.Error()
+			if res != nil && strings.TrimSpace(res.Reason) != "" {
+				reason = res.Reason
+			}
+			writeJSON(w, http.StatusConflict, ReleaseHeldResponse{
+				Released: false,
+				Reason:   reason,
+			})
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	if res == nil || !res.Released {
+		reason := "not releasable"
+		if res != nil && strings.TrimSpace(res.Reason) != "" {
+			reason = res.Reason
+		}
+		writeJSON(w, http.StatusConflict, ReleaseHeldResponse{
+			Released: false,
+			Reason:   reason,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ReleaseHeldResponse{
+		Released: true,
+		JobID:    res.JobID,
+	})
+}
+
+func (s *Server) handleListGateDecisions(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var filter store.GateDecisionsFilter
+
+	if v := strings.TrimSpace(q.Get("job_id")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid job_id %q", v))
+			return
+		}
+		filter.JobID = &n
+	}
+	if v := strings.TrimSpace(q.Get("held_id")); v != "" {
+		filter.HeldID = v
+	}
+	if v := strings.TrimSpace(q.Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid limit %q", v))
+			return
+		}
+		filter.Limit = n
+	}
+
+	decisions, err := s.store.ListGateDecisionsFiltered(r.Context(), filter)
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidInput) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ListGateDecisionsResponse{
+		Decisions: toGateDecisionDTOs(decisions),
+	})
+}
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	statusParam := strings.TrimSpace(q.Get("status"))
@@ -556,9 +681,10 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		cursor int64
-		limit  int
-		desc   bool
+		cursor   int64
+		limit    int
+		desc     bool
+		parentID *int64
 	)
 	if v := strings.TrimSpace(q.Get("cursor")); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -584,9 +710,21 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		desc = b
 	}
+	if v := strings.TrimSpace(q.Get("parent_id")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid parent_id %q", v))
+			return
+		}
+		parentID = &n
+	}
 
 	page, err := s.store.ListJobs(r.Context(), store.ListJobsFilter{
 		Status:     status,
+		Agent:      strings.TrimSpace(q.Get("agent")),
+		Host:       strings.TrimSpace(q.Get("host")),
+		Query:      strings.TrimSpace(q.Get("q")),
+		ParentID:   parentID,
 		Cursor:     cursor,
 		Limit:      limit,
 		Descending: desc,
@@ -866,9 +1004,122 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
+	poolNames := make([]string, 0, len(s.pools))
+	for name := range s.pools {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			poolNames = append(poolNames, trimmed)
+		}
+	}
+	sort.Strings(poolNames)
+
+	var snap *quota.Snapshot
+	if len(poolNames) > 0 {
+		snap = s.loadSnapshotForMeta()
+	}
+
+	evalOpts := quota.EvalOptions{
+		Now:        s.nowFn(),
+		StaleAfter: s.quotaStaleAfter,
+		Pools:      s.pools,
+	}
+	summaries := make([]PoolSummaryDTO, 0, len(poolNames))
+	for _, name := range poolNames {
+		ev := quota.EvaluatePool(name, snap, evalOpts)
+		summary := PoolSummaryDTO{
+			Pool:       name,
+			Status:     string(ev.Status),
+			Unmeasured: ev.Unmeasured,
+			BlockedBy:  ev.BlockedBy,
+			Reason:     ev.Reason,
+		}
+		if ev.Snapshot != nil {
+			w := ev.Snapshot.WeeklyRemainingPercent
+			summary.WeeklyRemainingPercent = &w
+			summary.WeeklyResetAt = ev.Snapshot.WeeklyResetAt
+			summary.ShortRemainingPercent = ev.Snapshot.ShortRemainingPercent
+			summary.ShortResetAt = ev.Snapshot.ShortResetAt
+			if !ev.Snapshot.MeasuredAt.IsZero() {
+				mt := ev.Snapshot.MeasuredAt
+				summary.MeasuredAt = &mt
+			}
+			summary.ServiceStale = ev.Snapshot.ServiceStale
+		}
+		summaries = append(summaries, summary)
+	}
+
+	hosts := s.hosts
+	if hosts == nil {
+		hosts = []string{}
+	}
+	agents := s.agents
+	if agents == nil {
+		agents = []string{}
+	}
+
+	writeJSON(w, http.StatusOK, MetaResponse{
+		Hosts:         hosts,
+		Agents:        agents,
+		Pools:         poolNames,
+		GateMode:      s.gateMode,
+		EvaluatorMode: s.evaluatorMode,
+		PoolSummaries: summaries,
+	})
+}
+
+func (s *Server) loadSnapshotForMeta() *quota.Snapshot {
+	if s.snapshotLoader != nil {
+		snap, err := s.snapshotLoader()
+		if err != nil {
+			return nil
+		}
+		return snap
+	}
+	if s.quotaUsageFile == "" {
+		return nil
+	}
+	snap, err := quota.LoadUsageFile(s.quotaUsageFile)
+	if err != nil {
+		return nil
+	}
+	return snap
+}
+
+func normalizeSortedNames(names []string) []string {
+	if len(names) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		trimmed := strings.TrimSpace(n)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *Server) handleDeliveries(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	status := store.DeliveryStatusUndelivered
+	if v := strings.TrimSpace(q.Get("status")); v != "" {
+		st := store.DeliveryStatus(v)
+		if !st.Valid() {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid delivery status %q", v))
+			return
+		}
+		status = st
+	}
+
 	var limit int
-	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+	if v := strings.TrimSpace(q.Get("limit")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid limit %q", v))
@@ -877,8 +1128,12 @@ func (s *Server) handleDeliveries(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	jobs, err := s.store.ListUndelivered(r.Context(), limit)
+	jobs, err := s.store.ListDeliveries(r.Context(), status, limit)
 	if err != nil {
+		if errors.Is(err, store.ErrInvalidInput) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

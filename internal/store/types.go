@@ -132,9 +132,39 @@ type CancelResult struct {
 // Status is mandatory.
 type ListJobsFilter struct {
 	Status     Status
+	Agent      string
+	Host       string
+	Query      string
+	ParentID   *int64
 	Cursor     int64
 	Limit      int
 	Descending bool
+}
+
+// DeliveryStatus selects which completed/failed jobs are returned by ListDeliveries.
+type DeliveryStatus string
+
+const (
+	DeliveryStatusUndelivered DeliveryStatus = "undelivered"
+	DeliveryStatusDelivered   DeliveryStatus = "delivered"
+	DeliveryStatusAll         DeliveryStatus = "all"
+)
+
+// Valid reports whether s is a supported DeliveryStatus value.
+func (s DeliveryStatus) Valid() bool {
+	switch s {
+	case DeliveryStatusUndelivered, DeliveryStatusDelivered, DeliveryStatusAll:
+		return true
+	default:
+		return false
+	}
+}
+
+// GateDecisionsFilter specifies optional filters for ListGateDecisionsFiltered.
+type GateDecisionsFilter struct {
+	JobID  *int64
+	HeldID string
+	Limit  int
 }
 
 // ListJobsPage holds one page of ListJobs results.

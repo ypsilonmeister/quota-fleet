@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -162,9 +163,13 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		RequireAuth:     cfg.API.RequireAuth,
 		Logger:          logger,
 		GateMode:        cfg.Quota.EffectiveGateMode(),
+		EvaluatorMode:   cfg.Evaluator.EffectiveMode(),
 		QuotaUsageFile:  cfg.Quota.UsageFile,
 		QuotaStaleAfter: cfg.Quota.EffectiveStaleAfter(),
 		Pools:           cfg.Pools,
+		Hosts:           sortedMapKeys(cfg.Hosts),
+		Agents:          sortedMapKeys(cfg.Agents),
+		GateReleaser:    gateReleaserAdapter{checker: rt.GateChecker},
 	})
 
 	httpSrv := &http.Server{
@@ -244,4 +249,41 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 			logger.Printf("WARNING: %s", warnMsg)
 		}
 	}
+}
+
+type gateReleaserAdapter struct {
+	checker *runtime.GateChecker
+}
+
+func (a gateReleaserAdapter) ReleaseHeld(ctx context.Context, heldID string) (*api.GateReleaseResult, error) {
+	if a.checker == nil {
+		return nil, errors.New("gate checker is not initialized")
+	}
+	res, err := a.checker.ReleaseByID(ctx, heldID)
+	if res == nil {
+		return nil, err
+	}
+	out := &api.GateReleaseResult{
+		Released:     res.Released,
+		SelectedPool: res.SelectedPool,
+		Reason:       res.Reason,
+	}
+	if res.Job != nil {
+		out.JobID = res.Job.ID
+	}
+	return out, err
+}
+
+func sortedMapKeys[V any](m map[string]V) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if trimmed := strings.TrimSpace(k); trimmed != "" {
+			keys = append(keys, trimmed)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }

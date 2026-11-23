@@ -923,7 +923,7 @@ func (s *Store) GetJobByRequestID(ctx context.Context, requestID string) (*Job, 
 	return queryJobByRequestID(ctx, s.readDB, requestID)
 }
 
-// ListJobs returns a cursor-paginated list of jobs matching filter.Status.
+// ListJobs returns a cursor-paginated list of jobs matching filter.Status and optional filters.
 // Status is mandatory; omitting or passing an invalid status returns ErrInvalidInput.
 func (s *Store) ListJobs(ctx context.Context, filter ListJobsFilter) (*ListJobsPage, error) {
 	if !filter.Status.Valid() {
@@ -937,29 +937,41 @@ func (s *Store) ListJobs(ctx context.Context, filter ListJobsFilter) (*ListJobsP
 		limit = MaxListLimit
 	}
 
-	var (
-		query string
-		args  []any
-	)
-	fetchLimit := limit + 1
+	conditions := []string{"status = ?"}
+	args := []any{string(filter.Status)}
 
-	if filter.Descending {
-		if filter.Cursor > 0 {
-			query = `SELECT ` + jobColumns + ` FROM jobs WHERE status = ? AND id < ? ORDER BY id DESC LIMIT ?`
-			args = []any{string(filter.Status), filter.Cursor, fetchLimit}
-		} else {
-			query = `SELECT ` + jobColumns + ` FROM jobs WHERE status = ? ORDER BY id DESC LIMIT ?`
-			args = []any{string(filter.Status), fetchLimit}
-		}
-	} else {
-		if filter.Cursor > 0 {
-			query = `SELECT ` + jobColumns + ` FROM jobs WHERE status = ? AND id > ? ORDER BY id ASC LIMIT ?`
-			args = []any{string(filter.Status), filter.Cursor, fetchLimit}
-		} else {
-			query = `SELECT ` + jobColumns + ` FROM jobs WHERE status = ? ORDER BY id ASC LIMIT ?`
-			args = []any{string(filter.Status), fetchLimit}
-		}
+	if agent := strings.TrimSpace(filter.Agent); agent != "" {
+		conditions = append(conditions, "agent = ?")
+		args = append(args, agent)
 	}
+	if host := strings.TrimSpace(filter.Host); host != "" {
+		conditions = append(conditions, "host = ?")
+		args = append(args, host)
+	}
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		conditions = append(conditions, `LOWER(title) LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLikePattern(strings.ToLower(q))+"%")
+	}
+	if filter.ParentID != nil {
+		conditions = append(conditions, "parent_id = ?")
+		args = append(args, *filter.ParentID)
+	}
+
+	fetchLimit := limit + 1
+	orderClause := "ORDER BY id ASC"
+	if filter.Descending {
+		orderClause = "ORDER BY id DESC"
+		if filter.Cursor > 0 {
+			conditions = append(conditions, "id < ?")
+			args = append(args, filter.Cursor)
+		}
+	} else if filter.Cursor > 0 {
+		conditions = append(conditions, "id > ?")
+		args = append(args, filter.Cursor)
+	}
+
+	query := `SELECT ` + jobColumns + ` FROM jobs WHERE ` + strings.Join(conditions, " AND ") + ` ` + orderClause + ` LIMIT ?`
+	args = append(args, fetchLimit)
 
 	rows, err := s.readDB.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -989,6 +1001,11 @@ func (s *Store) ListJobs(ctx context.Context, filter ListJobsFilter) (*ListJobsP
 		page.NextCursor = jobs[len(jobs)-1].ID
 	}
 	return page, nil
+}
+
+func escapeLikePattern(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // MarkDelivered records delivered_at on a done or failed job. It is idempotent for already-delivered jobs.
@@ -1030,6 +1047,18 @@ func (s *Store) MarkDelivered(ctx context.Context, jobID int64) (*Job, error) {
 
 // ListUndelivered returns done and failed jobs whose delivered_at is NULL, ordered by updated_at ASC, id ASC.
 func (s *Store) ListUndelivered(ctx context.Context, limit int) ([]*Job, error) {
+	return s.ListDeliveries(ctx, DeliveryStatusUndelivered, limit)
+}
+
+// ListDeliveries returns done and failed jobs filtered by delivery status.
+// Empty status defaults to DeliveryStatusUndelivered.
+func (s *Store) ListDeliveries(ctx context.Context, status DeliveryStatus, limit int) ([]*Job, error) {
+	if status == "" {
+		status = DeliveryStatusUndelivered
+	}
+	if !status.Valid() {
+		return nil, fmt.Errorf("%w: invalid delivery status %q", ErrInvalidInput, status)
+	}
 	if limit <= 0 {
 		limit = DefaultListLimit
 	}
@@ -1037,13 +1066,35 @@ func (s *Store) ListUndelivered(ctx context.Context, limit int) ([]*Job, error) 
 		limit = MaxListLimit
 	}
 
-	rows, err := s.readDB.QueryContext(ctx, `
-		SELECT `+jobColumns+`
-		FROM jobs
-		WHERE status IN ('done', 'failed') AND delivered_at IS NULL
-		ORDER BY updated_at ASC, id ASC
-		LIMIT ?
-	`, limit)
+	var query string
+	switch status {
+	case DeliveryStatusUndelivered:
+		query = `
+			SELECT ` + jobColumns + `
+			FROM jobs
+			WHERE status IN ('done', 'failed') AND delivered_at IS NULL
+			ORDER BY updated_at ASC, id ASC
+			LIMIT ?
+		`
+	case DeliveryStatusDelivered:
+		query = `
+			SELECT ` + jobColumns + `
+			FROM jobs
+			WHERE status IN ('done', 'failed') AND delivered_at IS NOT NULL
+			ORDER BY delivered_at DESC, id DESC
+			LIMIT ?
+		`
+	case DeliveryStatusAll:
+		query = `
+			SELECT ` + jobColumns + `
+			FROM jobs
+			WHERE status IN ('done', 'failed')
+			ORDER BY updated_at DESC, id DESC
+			LIMIT ?
+		`
+	}
+
+	rows, err := s.readDB.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1282,6 +1333,13 @@ func (s *Store) RecordGateDecision(ctx context.Context, d GateDecision) (*GateDe
 
 // ListGateDecisions returns recorded gate decisions ordered newest-first (id DESC).
 func (s *Store) ListGateDecisions(ctx context.Context, limit int) ([]*GateDecision, error) {
+	return s.ListGateDecisionsFiltered(ctx, GateDecisionsFilter{Limit: limit})
+}
+
+// ListGateDecisionsFiltered returns recorded gate decisions matching optional job_id/held_id filters,
+// ordered newest-first (id DESC).
+func (s *Store) ListGateDecisionsFiltered(ctx context.Context, filter GateDecisionsFilter) ([]*GateDecision, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = DefaultListLimit
 	}
@@ -1289,14 +1347,32 @@ func (s *Store) ListGateDecisions(ctx context.Context, limit int) ([]*GateDecisi
 		limit = MaxListLimit
 	}
 
-	rows, err := s.readDB.QueryContext(ctx, `
+	var (
+		conditions []string
+		args       []any
+	)
+	if filter.JobID != nil {
+		conditions = append(conditions, "job_id = ?")
+		args = append(args, *filter.JobID)
+	}
+	if heldID := strings.TrimSpace(filter.HeldID); heldID != "" {
+		conditions = append(conditions, "held_id = ?")
+		args = append(args, heldID)
+	}
+
+	query := `
 		SELECT
 			id, job_id, held_id, held, mode, requested_pool, alt_pools, decision,
 			blocked_by, selected_pool, bypassed, reason, measured_at, decided_at
 		FROM gate_decisions
-		ORDER BY id DESC
-		LIMIT ?
-	`, limit)
+	`
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, " AND ")
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
