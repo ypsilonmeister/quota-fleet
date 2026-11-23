@@ -122,6 +122,23 @@ func (a *SSHAdapter) CollectEvidence(ctx context.Context, job *store.Job) (Evide
 	return launcher.CollectEvidence(ctx, host, job, workdir)
 }
 
+// FileAccessFor returns a host-appropriate FileAccess scoped to the job's resolved workdir.
+// Hosts routed via the local transport use LocalFileAccess directly; remote hosts use a
+// Transport-backed implementation matching host.OS (Linux POSIX sh or Windows PowerShell).
+func (a *SSHAdapter) FileAccessFor(job *store.Job) (FileAccess, error) {
+	host, _, workdir, err := a.resolveTarget(job)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkDeniedPaths(host, job, workdir); err != nil {
+		return nil, err
+	}
+	if isLocalTarget(a.transport, host) {
+		return newLocalFileAccess(workdir, host.DenyPaths), nil
+	}
+	return NewRemoteFileAccess(a.transport, host, workdir)
+}
+
 // Preflight runs the configured agent preflight command on hostName via the adapter's Transport.
 func (a *SSHAdapter) Preflight(ctx context.Context, hostName, agentName string) (CommandResult, error) {
 	if err := ctx.Err(); err != nil {

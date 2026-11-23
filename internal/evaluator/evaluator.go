@@ -72,6 +72,13 @@ type Evaluator interface {
 	Evaluate(ctx context.Context, job *store.Job, ev adapter.Evidence) (Result, error)
 }
 
+// FileAccessEvaluator is an optional extension of Evaluator that accepts a host-scoped
+// FileAccess for evaluating typed checks and reading workdir artifacts on the job's host.
+type FileAccessEvaluator interface {
+	Evaluator
+	EvaluateWithFileAccess(ctx context.Context, job *store.Job, ev adapter.Evidence, fa FileAccess) (Result, error)
+}
+
 // CriterionResult holds the outcome for a single acceptance criterion.
 type CriterionResult struct {
 	Criterion string `json:"criterion"`

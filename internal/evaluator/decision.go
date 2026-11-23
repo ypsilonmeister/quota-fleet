@@ -11,8 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -139,16 +137,27 @@ type indexedFreeform struct {
 	text string
 }
 
-// Evaluate checks all typed criteria deterministically first. If any typed criterion fails,
+// Evaluate checks all typed criteria deterministically first using local filesystem access
+// scoped to job.Workdir, then calls Gemini Decision 1 for any remaining free-form criteria.
+// For remote hosts, prefer EvaluateWithFileAccess with a host-scoped FileAccess.
+func (e *TypedDecisionEvaluator) Evaluate(ctx context.Context, job *store.Job, ev adapter.Evidence) (Result, error) {
+	return e.EvaluateWithFileAccess(ctx, job, ev, nil)
+}
+
+// EvaluateWithFileAccess checks all typed criteria deterministically first using fa
+// (defaulting to NewLocalFileAccess(job.Workdir) when fa is nil). If any typed criterion fails,
 // it returns overall FAIL immediately without calling Decision 1. If all typed criteria pass
 // and no free-form criteria exist, it returns PASS without calling Decision 1 or requiring an API key.
 // Otherwise, it batches all free-form criteria into a single Decisions API noul request.
-func (e *TypedDecisionEvaluator) Evaluate(ctx context.Context, job *store.Job, ev adapter.Evidence) (Result, error) {
+func (e *TypedDecisionEvaluator) EvaluateWithFileAccess(ctx context.Context, job *store.Job, ev adapter.Evidence, fa FileAccess) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
 	if job == nil {
 		return Result{}, ErrNilJob
+	}
+	if fa == nil {
+		fa = NewLocalFileAccess(job.Workdir)
 	}
 
 	criteria := ParseCriteria(job.AcceptanceCriteria)
@@ -173,7 +182,7 @@ func (e *TypedDecisionEvaluator) Evaluate(ctx context.Context, job *store.Job, e
 	allTypedPassed := true
 
 	for _, item := range typedItems {
-		cr, err := evaluateTypedCriterion(ctx, item.tc, job.Workdir, e.CommandTimeout)
+		cr, err := evaluateTypedCriterion(ctx, item.tc, fa, e.CommandTimeout)
 		if err != nil {
 			return Result{}, err
 		}
@@ -201,7 +210,7 @@ func (e *TypedDecisionEvaluator) Evaluate(ctx context.Context, job *store.Job, e
 	}
 
 	// Free-form criteria require Gemini Decision 1.
-	decisionResults, err := e.evaluateFreeform(ctx, job, ev, freeformItems)
+	decisionResults, err := e.evaluateFreeform(ctx, job, ev, fa, freeformItems)
 	if err != nil {
 		return Result{}, err
 	}
@@ -255,6 +264,7 @@ func (e *TypedDecisionEvaluator) evaluateFreeform(
 	ctx context.Context,
 	job *store.Job,
 	ev adapter.Evidence,
+	fa FileAccess,
 	items []indexedFreeform,
 ) ([]CriterionResult, error) {
 	envName := strings.TrimSpace(e.APIKeyEnv)
@@ -273,7 +283,7 @@ func (e *TypedDecisionEvaluator) evaluateFreeform(
 		}
 	}
 
-	sharedInput := buildDecisionSharedInput(ctx, job, ev)
+	sharedInput := buildDecisionSharedInputWithFileAccess(ctx, job, ev, fa)
 	questions := make(map[string]decisionQuestion, len(items))
 	keys := make([]string, len(items))
 	for i, item := range items {
@@ -465,6 +475,14 @@ func isTimeoutErr(reqCtx context.Context, err error) bool {
 }
 
 func buildDecisionSharedInput(ctx context.Context, job *store.Job, ev adapter.Evidence) string {
+	var fa FileAccess
+	if job != nil && strings.TrimSpace(job.Workdir) != "" {
+		fa = NewLocalFileAccess(job.Workdir)
+	}
+	return buildDecisionSharedInputWithFileAccess(ctx, job, ev, fa)
+}
+
+func buildDecisionSharedInputWithFileAccess(ctx context.Context, job *store.Job, ev adapter.Evidence, fa FileAccess) string {
 	var b strings.Builder
 
 	appendSection := func(heading, content string) {
@@ -531,59 +549,47 @@ func buildDecisionSharedInput(ctx context.Context, job *store.Job, ev adapter.Ev
 		appendSection("Command Outputs", cb.String())
 	}
 
-	wd := strings.TrimSpace(job.Workdir)
-	if wd != "" {
-		if summary := readOptionalArtifact(filepath.Join(wd, "summary.md"), maxArtifactFileRunes); summary != "" {
+	if fa != nil {
+		if summary := readOptionalArtifact(ctx, fa, "summary.md", maxArtifactFileRunes); summary != "" {
 			appendSection("Artifact: summary.md", summary)
 		}
-		if resultTxt := readOptionalArtifact(filepath.Join(wd, "result.txt"), maxArtifactFileRunes); resultTxt != "" {
+		if resultTxt := readOptionalArtifact(ctx, fa, "result.txt", maxArtifactFileRunes); resultTxt != "" {
 			appendSection("Artifact: result.txt", resultTxt)
 		}
-		if gitStatus := runOptionalGit(ctx, wd, "status", "--short"); gitStatus != "" {
-			appendSection("Git Status (git status --short)", truncateHeadRunes(gitStatus, maxGitOutputRunes))
-		}
-		if gitDiffStat := runOptionalGit(ctx, wd, "diff", "--stat"); gitDiffStat != "" {
-			appendSection("Git Diff Stat (git diff --stat)", truncateHeadRunes(gitDiffStat, maxGitOutputRunes))
+		if wdInfo, err := fa.Stat(ctx, "."); err == nil && wdInfo.Exists && wdInfo.IsDir {
+			if gitStatus := runOptionalGit(ctx, fa, "git status --short"); gitStatus != "" {
+				appendSection("Git Status (git status --short)", truncateHeadRunes(gitStatus, maxGitOutputRunes))
+			}
+			if gitDiffStat := runOptionalGit(ctx, fa, "git diff --stat"); gitDiffStat != "" {
+				appendSection("Git Diff Stat (git diff --stat)", truncateHeadRunes(gitDiffStat, maxGitOutputRunes))
+			}
 		}
 	}
 
 	return truncateHeadRunes(b.String(), maxSharedInputRunes)
 }
 
-func readOptionalArtifact(path string, maxRunes int) string {
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() || info.Size() == 0 {
+func readOptionalArtifact(ctx context.Context, fa FileAccess, name string, maxRunes int) string {
+	info, err := fa.Stat(ctx, name)
+	if err != nil || !info.Exists || info.IsDir || info.Size == 0 {
 		return ""
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	// Read enough bytes for maxRunes UTF-8 characters (up to 4 bytes per rune) plus a small buffer.
-	limit := int64(maxRunes*4 + 256)
-	data, err := io.ReadAll(io.LimitReader(f, limit))
+	data, err := fa.ReadFile(ctx, name)
 	if err != nil {
 		return ""
 	}
 	return truncateHeadRunes(strings.TrimSpace(string(data)), maxRunes)
 }
 
-func runOptionalGit(ctx context.Context, workdir string, args ...string) string {
-	info, err := os.Stat(workdir)
-	if err != nil || !info.IsDir() {
-		return ""
-	}
+func runOptionalGit(ctx context.Context, fa FileAccess, gitCmd string) string {
 	gitCtx, cancel := context.WithTimeout(ctx, gitEvidenceTimeout)
 	defer cancel()
 
-	fullArgs := append([]string{"-C", workdir}, args...)
-	cmd := exec.CommandContext(gitCtx, "git", fullArgs...)
-	out, err := cmd.Output()
-	if err != nil {
+	res, err := fa.RunCommand(gitCtx, gitCmd)
+	if err != nil || res.ExitCode != 0 {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(res.Output)
 }
 
 func truncateHeadRunes(s string, maxRunes int) string {

@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"io/fs"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 )
 
 const (
@@ -75,20 +74,20 @@ func parseTypedCriterion(line string) (typedCriterion, bool) {
 	}
 }
 
-func evaluateTypedCriterion(ctx context.Context, tc typedCriterion, workdir string, commandTimeout time.Duration) (CriterionResult, error) {
+func evaluateTypedCriterion(ctx context.Context, tc typedCriterion, fa FileAccess, commandTimeout time.Duration) (CriterionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return CriterionResult{}, err
 	}
 
 	switch tc.kind {
 	case typedKindFileExists:
-		return evalFileExists(tc, workdir), nil
+		return evalFileExists(ctx, tc, fa)
 	case typedKindFileNonEmpty:
-		return evalFileNonEmpty(tc, workdir), nil
+		return evalFileNonEmpty(ctx, tc, fa)
 	case typedKindContains:
-		return evalContains(tc, workdir), nil
+		return evalContains(ctx, tc, fa)
 	case typedKindCommand:
-		return evalCommand(ctx, tc, workdir, commandTimeout)
+		return evalCommand(ctx, tc, fa, commandTimeout)
 	default:
 		return CriterionResult{
 			Criterion: tc.raw,
@@ -98,161 +97,175 @@ func evaluateTypedCriterion(ctx context.Context, tc typedCriterion, workdir stri
 	}
 }
 
-func resolveWorkdirPath(workdir, rawPath string) (relDisplay, fullPath string, err error) {
-	p := strings.TrimSpace(rawPath)
-	if p == "" {
-		return "", "", errors.New("empty path")
-	}
-	if filepath.IsAbs(p) {
-		return p, p, nil
-	}
-	wd := strings.TrimSpace(workdir)
-	if wd == "" {
-		return p, "", errors.New("job workdir is empty")
-	}
-	return p, filepath.Join(wd, p), nil
-}
-
-func evalFileExists(tc typedCriterion, workdir string) CriterionResult {
-	display, fullPath, err := resolveWorkdirPath(workdir, tc.rest)
-	if err != nil {
+func evalFileExists(ctx context.Context, tc typedCriterion, fa FileAccess) (CriterionResult, error) {
+	display := strings.TrimSpace(tc.rest)
+	if display == "" {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
-			Evidence:  fmt.Sprintf("typed file_exists: %v", err),
-		}
+			Evidence:  "typed file_exists: empty path",
+		}, nil
 	}
-	info, err := os.Stat(fullPath)
+	info, err := fa.Stat(ctx, display)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if ctx.Err() != nil {
+			return CriterionResult{}, ctx.Err()
+		}
+		if errors.Is(err, adapter.ErrEmptyPath) || errors.Is(err, adapter.ErrEmptyWorkdir) {
 			return CriterionResult{
 				Criterion: tc.raw,
 				Passed:    false,
-				Evidence:  fmt.Sprintf("typed file_exists: not found: %s", display),
-			}
+				Evidence:  fmt.Sprintf("typed file_exists: %v", err),
+			}, nil
 		}
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
 			Evidence:  fmt.Sprintf("typed file_exists: stat error for %s: %v", display, err),
-		}
+		}, nil
 	}
-	if info.IsDir() {
+	if !info.Exists {
+		return CriterionResult{
+			Criterion: tc.raw,
+			Passed:    false,
+			Evidence:  fmt.Sprintf("typed file_exists: not found: %s", display),
+		}, nil
+	}
+	if info.IsDir {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    true,
 			Evidence:  fmt.Sprintf("typed file_exists: found dir %s", display),
-		}
+		}, nil
 	}
 	return CriterionResult{
 		Criterion: tc.raw,
 		Passed:    true,
-		Evidence:  fmt.Sprintf("typed file_exists: found file %s (%dB)", display, info.Size()),
-	}
+		Evidence:  fmt.Sprintf("typed file_exists: found file %s (%dB)", display, info.Size),
+	}, nil
 }
 
-func evalFileNonEmpty(tc typedCriterion, workdir string) CriterionResult {
-	display, fullPath, err := resolveWorkdirPath(workdir, tc.rest)
-	if err != nil {
+func evalFileNonEmpty(ctx context.Context, tc typedCriterion, fa FileAccess) (CriterionResult, error) {
+	display := strings.TrimSpace(tc.rest)
+	if display == "" {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
-			Evidence:  fmt.Sprintf("typed file_nonempty: %v", err),
-		}
+			Evidence:  "typed file_nonempty: empty path",
+		}, nil
 	}
-	info, err := os.Stat(fullPath)
+	info, err := fa.Stat(ctx, display)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if ctx.Err() != nil {
+			return CriterionResult{}, ctx.Err()
+		}
+		if errors.Is(err, adapter.ErrEmptyPath) || errors.Is(err, adapter.ErrEmptyWorkdir) {
 			return CriterionResult{
 				Criterion: tc.raw,
 				Passed:    false,
-				Evidence:  fmt.Sprintf("typed file_nonempty: not found: %s", display),
-			}
+				Evidence:  fmt.Sprintf("typed file_nonempty: %v", err),
+			}, nil
 		}
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
 			Evidence:  fmt.Sprintf("typed file_nonempty: stat error for %s: %v", display, err),
-		}
+		}, nil
 	}
-	if info.IsDir() {
+	if !info.Exists {
+		return CriterionResult{
+			Criterion: tc.raw,
+			Passed:    false,
+			Evidence:  fmt.Sprintf("typed file_nonempty: not found: %s", display),
+		}, nil
+	}
+	if info.IsDir {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
 			Evidence:  fmt.Sprintf("typed file_nonempty: %s is a directory", display),
-		}
+		}, nil
 	}
-	if info.Size() <= 0 {
+	if info.Size <= 0 {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
 			Evidence:  fmt.Sprintf("typed file_nonempty: %s is empty (0B)", display),
-		}
+		}, nil
 	}
 	return CriterionResult{
 		Criterion: tc.raw,
 		Passed:    true,
-		Evidence:  fmt.Sprintf("typed file_nonempty: %s (%dB)", display, info.Size()),
-	}
+		Evidence:  fmt.Sprintf("typed file_nonempty: %s (%dB)", display, info.Size),
+	}, nil
 }
 
-func evalContains(tc typedCriterion, workdir string) CriterionResult {
+func evalContains(ctx context.Context, tc typedCriterion, fa FileAccess) (CriterionResult, error) {
 	parts := strings.SplitN(tc.rest, containsSeparator, 2)
 	if len(parts) != 2 {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
 			Evidence:  "typed contains: invalid syntax (expected '<path> :: <text>')",
-		}
+		}, nil
 	}
-	rawPath := parts[0]
+	display := strings.TrimSpace(parts[0])
 	needle := parts[1]
 	if needle == "" {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
 			Evidence:  "typed contains: empty search text",
-		}
+		}, nil
 	}
-
-	display, fullPath, err := resolveWorkdirPath(workdir, rawPath)
-	if err != nil {
+	if display == "" {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
-			Evidence:  fmt.Sprintf("typed contains: %v", err),
-		}
+			Evidence:  "typed contains: empty path",
+		}, nil
 	}
-	data, err := os.ReadFile(fullPath)
+
+	data, err := fa.ReadFile(ctx, display)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if ctx.Err() != nil {
+			return CriterionResult{}, ctx.Err()
+		}
+		if errors.Is(err, adapter.ErrEmptyPath) || errors.Is(err, adapter.ErrEmptyWorkdir) {
+			return CriterionResult{
+				Criterion: tc.raw,
+				Passed:    false,
+				Evidence:  fmt.Sprintf("typed contains: %v", err),
+			}, nil
+		}
+		if errors.Is(err, fs.ErrNotExist) {
 			return CriterionResult{
 				Criterion: tc.raw,
 				Passed:    false,
 				Evidence:  fmt.Sprintf("typed contains: not found: %s", display),
-			}
+			}, nil
 		}
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
 			Evidence:  fmt.Sprintf("typed contains: read error for %s: %v", display, err),
-		}
+		}, nil
 	}
 	if strings.Contains(string(data), needle) {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    true,
 			Evidence:  fmt.Sprintf("typed contains: matched in %s", display),
-		}
+		}, nil
 	}
 	return CriterionResult{
 		Criterion: tc.raw,
 		Passed:    false,
 		Evidence:  fmt.Sprintf("typed contains: text not found in %s", display),
-	}
+	}, nil
 }
 
-func evalCommand(ctx context.Context, tc typedCriterion, workdir string, commandTimeout time.Duration) (CriterionResult, error) {
+func evalCommand(ctx context.Context, tc typedCriterion, fa FileAccess, commandTimeout time.Duration) (CriterionResult, error) {
 	cmdStr := strings.TrimSpace(tc.rest)
 	if cmdStr == "" {
 		return CriterionResult{
@@ -268,22 +281,8 @@ func evalCommand(ctx context.Context, tc typedCriterion, workdir string, command
 	cmdCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", cmdStr)
-	if wd := strings.TrimSpace(workdir); wd != "" {
-		cmd.Dir = wd
-	}
-	// Run in its own process group so timeouts clean up any child processes.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	cmd.WaitDelay = 2 * time.Second
-
-	out, err := cmd.CombinedOutput()
-	if err == nil {
+	res, err := fa.RunCommand(cmdCtx, cmdStr)
+	if err == nil && res.ExitCode == 0 {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    true,
@@ -297,7 +296,7 @@ func evalCommand(ctx context.Context, tc typedCriterion, workdir string, command
 	}
 
 	// Command-level timeout is treated as FAIL, not an evaluation error.
-	if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+	if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 		return CriterionResult{
 			Criterion: tc.raw,
 			Passed:    false,
@@ -305,10 +304,9 @@ func evalCommand(ctx context.Context, tc typedCriterion, workdir string, command
 		}, nil
 	}
 
-	var exitErr *exec.ExitError
-	snippet := sanitizeOneLineSnippet(string(out), maxCommandOutputEvidenceBytes)
-	if errors.As(err, &exitErr) {
-		ev := fmt.Sprintf("typed command: exit %d", exitErr.ExitCode())
+	snippet := sanitizeOneLineSnippet(res.Output, maxCommandOutputEvidenceBytes)
+	if err == nil {
+		ev := fmt.Sprintf("typed command: exit %d", res.ExitCode)
 		if snippet != "" {
 			ev = fmt.Sprintf("%s (%s)", ev, snippet)
 		}

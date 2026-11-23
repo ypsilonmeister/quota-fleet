@@ -175,7 +175,7 @@ func (s *Shepherd) finishExitedJob(ctx context.Context, job *store.Job, state ad
 		terminalJob = res.Job
 		s.logger.Printf("shepherd failed job #%d (exit_code=%d, cancelled_children=%v)", job.ID, state.ExitCode, res.CancelledChildIDs)
 	} else {
-		evalRes, err := s.evaluator.Evaluate(ctx, job, ev)
+		evalRes, err := s.evaluateJob(ctx, job, ev)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -238,6 +238,21 @@ func (s *Shepherd) finishExitedJob(ctx context.Context, job *store.Job, state ad
 	if err := deliverAndMark(ctx, s.store, s.notifier, terminalJob); err != nil && ctx.Err() == nil {
 		s.logger.Printf("shepherd delivery error for job #%d: %v", terminalJob.ID, err)
 	}
+}
+
+func (s *Shepherd) evaluateJob(ctx context.Context, job *store.Job, ev adapter.Evidence) (evaluator.Result, error) {
+	if faEval, ok := s.evaluator.(evaluator.FileAccessEvaluator); ok {
+		var fa evaluator.FileAccess
+		if provider, ok := s.adapter.(adapter.FileAccessProvider); ok {
+			var err error
+			fa, err = provider.FileAccessFor(job)
+			if err != nil {
+				return evaluator.Result{}, fmt.Errorf("resolve host file access: %w", err)
+			}
+		}
+		return faEval.EvaluateWithFileAccess(ctx, job, ev, fa)
+	}
+	return s.evaluator.Evaluate(ctx, job, ev)
 }
 
 func formatNonZeroExitFailure(exitCode int, logTail string) (reason, resultText string) {
