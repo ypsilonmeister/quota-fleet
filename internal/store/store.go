@@ -97,6 +97,14 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs.worktree_spec: %w", err)
 	}
+	if err := ensureHeldJobsColumns(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate held_jobs: %w", err)
+	}
+	if err := ensureGateDecisionsSchema(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate gate_decisions: %w", err)
+	}
 
 	var readDB *sql.DB
 	shared := isMem
@@ -906,6 +914,15 @@ func (s *Store) GetJob(ctx context.Context, jobID int64) (*Job, error) {
 	return queryJobByID(ctx, s.readDB, jobID)
 }
 
+// GetJobByRequestID returns a job by request_id, or ErrNotFound if it does not exist.
+func (s *Store) GetJobByRequestID(ctx context.Context, requestID string) (*Job, error) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return nil, fmt.Errorf("%w: request_id must not be empty", ErrInvalidInput)
+	}
+	return queryJobByRequestID(ctx, s.readDB, requestID)
+}
+
 // ListJobs returns a cursor-paginated list of jobs matching filter.Status.
 // Status is mandatory; omitting or passing an invalid status returns ErrInvalidInput.
 func (s *Store) ListJobs(ctx context.Context, filter ListJobsFilter) (*ListJobsPage, error) {
@@ -1174,9 +1191,11 @@ func (s *Store) RecordReconcilerDedup(ctx context.Context, dedupKey string) (boo
 }
 
 // RecordGateDecision inserts a Quota Gate evaluation record into gate_decisions.
+// Either JobID > 0 or HeldID != "" must be provided.
 func (s *Store) RecordGateDecision(ctx context.Context, d GateDecision) (*GateDecision, error) {
-	if d.JobID <= 0 {
-		return nil, fmt.Errorf("%w: job_id must be > 0", ErrInvalidInput)
+	heldID := strings.TrimSpace(d.HeldID)
+	if d.JobID < 0 || (d.JobID == 0 && heldID == "") {
+		return nil, fmt.Errorf("%w: job_id must be > 0 or held_id must be set", ErrInvalidInput)
 	}
 	switch d.Decision {
 	case "would_pass", "would_hold", "unknown":
@@ -1205,20 +1224,29 @@ func (s *Store) RecordGateDecision(ctx context.Context, d GateDecision) (*GateDe
 		measuredArg = formatTime(t)
 	}
 
+	var jobIDArg any
+	if d.JobID > 0 {
+		jobIDArg = d.JobID
+	}
+
 	bypassedInt := 0
 	if d.Bypassed {
 		bypassedInt = 1
+	}
+	heldInt := 0
+	if d.Held {
+		heldInt = 1
 	}
 
 	var insertedID int64
 	err = s.withImmediateTx(ctx, func(conn *sql.Conn) error {
 		res, err := conn.ExecContext(ctx, `
 			INSERT INTO gate_decisions (
-				job_id, mode, requested_pool, alt_pools, decision,
+				job_id, held_id, held, mode, requested_pool, alt_pools, decision,
 				blocked_by, selected_pool, bypassed, reason, measured_at, decided_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`,
-			d.JobID, mode, strings.TrimSpace(d.RequestedPool), altPoolsJSON, d.Decision,
+			jobIDArg, heldID, heldInt, mode, strings.TrimSpace(d.RequestedPool), altPoolsJSON, d.Decision,
 			strings.TrimSpace(d.BlockedBy), strings.TrimSpace(d.SelectedPool), bypassedInt,
 			strings.TrimSpace(d.Reason), measuredArg, formatTime(decidedAt),
 		)
@@ -1238,6 +1266,7 @@ func (s *Store) RecordGateDecision(ctx context.Context, d GateDecision) (*GateDe
 
 	out := d
 	out.ID = insertedID
+	out.HeldID = heldID
 	out.Mode = mode
 	out.RequestedPool = strings.TrimSpace(d.RequestedPool)
 	out.BlockedBy = strings.TrimSpace(d.BlockedBy)
@@ -1262,7 +1291,7 @@ func (s *Store) ListGateDecisions(ctx context.Context, limit int) ([]*GateDecisi
 
 	rows, err := s.readDB.QueryContext(ctx, `
 		SELECT
-			id, job_id, mode, requested_pool, alt_pools, decision,
+			id, job_id, held_id, held, mode, requested_pool, alt_pools, decision,
 			blocked_by, selected_pool, bypassed, reason, measured_at, decided_at
 		FROM gate_decisions
 		ORDER BY id DESC
@@ -1277,17 +1306,23 @@ func (s *Store) ListGateDecisions(ctx context.Context, limit int) ([]*GateDecisi
 	for rows.Next() {
 		var (
 			d           GateDecision
+			jobIDNI     sql.NullInt64
+			heldInt     int
 			altPoolsStr string
 			bypassedInt int
 			measuredNS  sql.NullString
 			decidedStr  string
 		)
 		if err := rows.Scan(
-			&d.ID, &d.JobID, &d.Mode, &d.RequestedPool, &altPoolsStr, &d.Decision,
+			&d.ID, &jobIDNI, &d.HeldID, &heldInt, &d.Mode, &d.RequestedPool, &altPoolsStr, &d.Decision,
 			&d.BlockedBy, &d.SelectedPool, &bypassedInt, &d.Reason, &measuredNS, &decidedStr,
 		); err != nil {
 			return nil, err
 		}
+		if jobIDNI.Valid {
+			d.JobID = jobIDNI.Int64
+		}
+		d.Held = heldInt != 0
 		d.Bypassed = bypassedInt != 0
 		altPools, err := decodeAltPools(altPoolsStr)
 		if err != nil {

@@ -7,12 +7,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
+	"github.com/ypsilonmeister/quota-fleet/internal/runtime"
+	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
 func runGate(args []string, stdout, stderr io.Writer) int {
@@ -26,6 +29,10 @@ func runGate(args []string, stdout, stderr io.Writer) int {
 		return runGateCheck(args[1:], stdout, stderr)
 	case "decisions":
 		return runGateDecisions(args[1:], stdout, stderr)
+	case "held":
+		return runGateHeld(args[1:], stdout, stderr)
+	case "release":
+		return runGateRelease(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printGateUsage(stdout)
 		return 0
@@ -40,6 +47,8 @@ func printGateUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  quota-fleet gate check --pool <name> [--alt-pools a,b] [--usage-file path] [--stale-after 45m] [--json] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate decisions [--limit N] [--db path] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet gate held [--status held|released|cancelled|all] [--limit N] [--json] [--db path] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet gate release <held_id> [--usage-file path] [--stale-after 45m] [--json] [--db path] [--config fleet.yaml]")
 }
 
 func runGateCheck(args []string, stdout, stderr io.Writer) int {
@@ -212,6 +221,15 @@ func runGateDecisions(args []string, stdout, stderr io.Writer) int {
 
 	for _, d := range decisions {
 		var details []string
+		if d.Mode != "" {
+			details = append(details, "mode="+d.Mode)
+		}
+		if d.Held {
+			details = append(details, "held=true")
+		}
+		if d.HeldID != "" && d.JobID > 0 {
+			details = append(details, "held_id="+d.HeldID)
+		}
 		if d.RequestedPool != "" {
 			details = append(details, "pool="+d.RequestedPool)
 		}
@@ -235,9 +253,227 @@ func runGateDecisions(args []string, stdout, stderr io.Writer) int {
 		}
 		details = append(details, "decided_at="+d.DecidedAt.Format(time.RFC3339))
 
-		fmt.Fprintf(stdout, "#%d\tjob=#%d\t%-10s\t%s\n", d.ID, d.JobID, d.Decision, strings.Join(details, " "))
+		target := fmt.Sprintf("job=#%d", d.JobID)
+		if d.JobID == 0 && d.HeldID != "" {
+			target = "held=" + d.HeldID
+		}
+		fmt.Fprintf(stdout, "#%d\t%s\t%-10s\t%s\n", d.ID, target, d.Decision, strings.Join(details, " "))
 	}
 	return 0
+}
+
+func runGateHeld(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("gate held", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	var (
+		cfgPath   string
+		dbPath    string
+		statusRaw string
+		limit     int
+		asJSON    bool
+	)
+	fs.StringVar(&cfgPath, "config", resolveDefaultConfigPath(), "path to fleet.yaml")
+	fs.StringVar(&cfgPath, "c", resolveDefaultConfigPath(), "path to fleet.yaml (shorthand)")
+	fs.StringVar(&dbPath, "db", "", "override SQLite database path")
+	fs.StringVar(&statusRaw, "status", string(store.HeldStatusHeld), "status filter (held|released|cancelled|all)")
+	fs.IntVar(&limit, "limit", 0, "maximum number of held jobs to show")
+	fs.BoolVar(&asJSON, "json", false, "output result as JSON")
+
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if limit < 0 {
+		fmt.Fprintf(stderr, "gate held failed: --limit must be >= 0 (got %d)\n", limit)
+		return 1
+	}
+	status := store.HeldStatus(strings.TrimSpace(statusRaw))
+	if status == "" {
+		status = store.HeldStatusHeld
+	}
+	if status != "all" && !status.Valid() {
+		fmt.Fprintf(stderr, "gate held failed: invalid --status %q (allowed: held, released, cancelled, all)\n", statusRaw)
+		return 1
+	}
+
+	ctx := context.Background()
+	st, _, err := openLocalStore(ctx, cfgPath, dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gate held failed: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	items, err := st.ListHeldJobs(ctx, status, limit)
+	if err != nil {
+		fmt.Fprintf(stderr, "gate held failed: %v\n", err)
+		return 1
+	}
+
+	if asJSON {
+		if items == nil {
+			items = []*store.HeldJob{}
+		}
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(items); err != nil {
+			fmt.Fprintf(stderr, "gate held failed: encode json: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	if len(items) == 0 {
+		fmt.Fprintf(stdout, "no held jobs (status=%s)\n", status)
+		return 0
+	}
+
+	for _, h := range items {
+		var details []string
+		if h.Pool != "" {
+			details = append(details, "pool="+h.Pool)
+		}
+		if len(h.AltPools) > 0 {
+			details = append(details, "alt="+strings.Join(h.AltPools, ","))
+		}
+		if h.Reason != "" {
+			details = append(details, "reason="+h.Reason)
+		}
+		if h.ReleasedJobID != nil {
+			details = append(details, fmt.Sprintf("released_job=#%d", *h.ReleasedJobID))
+		}
+		if h.ReleasedPool != "" {
+			details = append(details, "released_pool="+h.ReleasedPool)
+		}
+		if h.LastError != "" {
+			details = append(details, fmt.Sprintf("last_error=%q", h.LastError))
+		}
+		details = append(details, "created_at="+h.CreatedAt.Format(time.RFC3339))
+		fmt.Fprintf(stdout, "%s\t%-9s\t%s\t%s\n", h.ID, h.Status, h.Payload.Title, strings.Join(details, " "))
+	}
+	return 0
+}
+
+func runGateRelease(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("gate release", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	var (
+		cfgPath       string
+		dbPath        string
+		usageFileFlag string
+		staleAfterRaw string
+		asJSON        bool
+	)
+	fs.StringVar(&cfgPath, "config", resolveDefaultConfigPath(), "path to fleet.yaml")
+	fs.StringVar(&cfgPath, "c", resolveDefaultConfigPath(), "path to fleet.yaml (shorthand)")
+	fs.StringVar(&dbPath, "db", "", "override SQLite database path")
+	fs.StringVar(&usageFileFlag, "usage-file", "", "override usage.json path")
+	fs.StringVar(&staleAfterRaw, "stale-after", "", "override staleness duration (e.g. 45m)")
+	fs.BoolVar(&asJSON, "json", false, "output result as JSON")
+
+	heldID, err := parseStringIDAndFlags(fs, args, "held_id")
+	if err != nil {
+		fmt.Fprintf(stderr, "gate release failed: %v\n", err)
+		return 1
+	}
+
+	var (
+		usageFile  = strings.TrimSpace(usageFileFlag)
+		staleAfter = config.DefaultQuotaStaleAfter
+		poolsCfg   map[string]config.PoolConfig
+	)
+
+	if cfg, err := config.Load(cfgPath); err == nil {
+		poolsCfg = cfg.Pools
+		staleAfter = cfg.Quota.EffectiveStaleAfter()
+		if usageFile == "" {
+			usageFile = strings.TrimSpace(cfg.Quota.UsageFile)
+		}
+	} else {
+		if dbPath == "" || !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "gate release failed: %v\n", err)
+			return 1
+		}
+	}
+
+	if strings.TrimSpace(staleAfterRaw) != "" {
+		d, err := time.ParseDuration(strings.TrimSpace(staleAfterRaw))
+		if err != nil || d <= 0 {
+			fmt.Fprintf(stderr, "gate release failed: invalid --stale-after %q\n", staleAfterRaw)
+			return 1
+		}
+		staleAfter = d
+	}
+
+	ctx := context.Background()
+	st, _, err := openLocalStore(ctx, cfgPath, dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gate release failed: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	checker := runtime.NewGateChecker(runtime.GateCheckerOptions{
+		Store:      st,
+		GateMode:   config.GateModeEnforce,
+		UsageFile:  usageFile,
+		StaleAfter: staleAfter,
+		Pools:      poolsCfg,
+		Logger:     log.New(io.Discard, "", 0),
+	})
+
+	res, relErr := checker.ReleaseByID(ctx, heldID)
+	if asJSON && res != nil {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(res)
+		if relErr != nil || !res.Released {
+			return 1
+		}
+		return 0
+	}
+
+	if relErr != nil {
+		if res != nil && res.Reason != "" {
+			fmt.Fprintf(stderr, "gate release failed: held %s not released: %s\n", heldID, res.Reason)
+		} else {
+			fmt.Fprintf(stderr, "gate release failed: %v\n", relErr)
+		}
+		return 1
+	}
+	if !res.Released {
+		fmt.Fprintf(stderr, "gate release: held %s not released: %s\n", heldID, res.Reason)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "released held %s -> job #%d [%s] %s\n", res.Held.ID, res.Job.ID, res.Job.Status, res.Job.Title)
+	fmt.Fprintf(stdout, "  selected_pool: %s\n", res.SelectedPool)
+	fmt.Fprintf(stdout, "  request_id:    %s\n", res.Job.RequestID)
+	return 0
+}
+
+// parseStringIDAndFlags allows both `<id> [--flags...]` and `[--flags...] <id>`.
+func parseStringIDAndFlags(fs *flag.FlagSet, args []string, label string) (string, error) {
+	var idRaw string
+	flagArgs := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		idRaw = strings.TrimSpace(args[0])
+		flagArgs = args[1:]
+	}
+	if err := fs.Parse(flagArgs); err != nil {
+		return "", err
+	}
+	if idRaw == "" {
+		if fs.NArg() == 0 {
+			return "", fmt.Errorf("%s is required", label)
+		}
+		idRaw = strings.TrimSpace(fs.Arg(0))
+	}
+	if idRaw == "" {
+		return "", fmt.Errorf("%s is required", label)
+	}
+	return idRaw, nil
 }
 
 func parseCommaList(raw string) []string {

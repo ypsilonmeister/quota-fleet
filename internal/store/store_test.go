@@ -1258,3 +1258,234 @@ func TestGateDecisionsRecordAndListNewestFirst(t *testing.T) {
 		t.Errorf("limited = %+v, want only d2", limited)
 	}
 }
+
+func TestHeldJobsLifecycleIdempotencyAndErrorDedup(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	// 1. HoldJob creates a held entry with full payload.
+	h1, created, err := st.HoldJob(ctx, HoldJobParams{
+		RequestID: "held-req-1",
+		Pool:      "claude",
+		AltPools:  []string{"codex"},
+		Payload: CreateJobParams{
+			RequestID:          "held-req-1",
+			Title:              "Held Coding Job",
+			Agent:              "claude",
+			Host:               "ubuntu",
+			Workdir:            "/work/repo",
+			TargetRef:          "feat/gate",
+			Instructions:       "implement feature",
+			AcceptanceCriteria: "tests pass",
+			Model:              "claude-opus",
+			Pool:               "claude",
+			AltPools:           []string{"codex"},
+		},
+		Reason:          "exhausted:weekly",
+		SnapshotSummary: `{"decision":"would_hold"}`,
+	})
+	if err != nil || !created {
+		t.Fatalf("HoldJob 1: created=%v err=%v", created, err)
+	}
+	if !strings.HasPrefix(h1.ID, "held-") || h1.Status != HeldStatusHeld || h1.Pool != "claude" {
+		t.Fatalf("h1 = %+v", h1)
+	}
+	if h1.Payload.Title != "Held Coding Job" || h1.Payload.Instructions != "implement feature" || len(h1.AltPools) != 1 || h1.AltPools[0] != "codex" {
+		t.Errorf("h1 payload/alt_pools = %+v", h1)
+	}
+
+	// 2. Duplicate HoldJob with same request_id is idempotent (returns existing held, created=false).
+	h1Dup, createdDup, err := st.HoldJob(ctx, HoldJobParams{
+		RequestID: "held-req-1",
+		Pool:      "claude",
+		Payload: CreateJobParams{
+			RequestID: "held-req-1",
+			Title:     "Different Title",
+		},
+	})
+	if err != nil || createdDup || h1Dup.ID != h1.ID {
+		t.Fatalf("HoldJob dup = (%+v, %v, %v), want existing %s created=false", h1Dup, createdDup, err, h1.ID)
+	}
+
+	// 3. RecordHeldReleaseError records new error (isNew=true, error_count=1),
+	// and deduplicates identical error (isNew=false, error_count stays 1).
+	hErr1, isNew1, err := st.RecordHeldReleaseError(ctx, h1.ID, "parent job not found")
+	if err != nil || !isNew1 || hErr1.ErrorCount != 1 || hErr1.LastError != "parent job not found" {
+		t.Fatalf("RecordHeldReleaseError #1 = (%+v, %v, %v)", hErr1, isNew1, err)
+	}
+	hErr2, isNew2, err := st.RecordHeldReleaseError(ctx, h1.ID, "parent job not found")
+	if err != nil || isNew2 || hErr2.ErrorCount != 1 || hErr2.LastError != "parent job not found" {
+		t.Fatalf("RecordHeldReleaseError #2 (dup) = (%+v, %v, %v)", hErr2, isNew2, err)
+	}
+	hErr3, isNew3, err := st.RecordHeldReleaseError(ctx, h1.ID, "different error")
+	if err != nil || !isNew3 || hErr3.ErrorCount != 2 || hErr3.LastError != "different error" {
+		t.Fatalf("RecordHeldReleaseError #3 (new) = (%+v, %v, %v)", hErr3, isNew3, err)
+	}
+
+	// 4. Release h1 -> creates job, marks released, clears last_error.
+	job, _, err := st.CreateJob(ctx, h1.Payload)
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	released, err := st.MarkHeldReleased(ctx, h1.ID, job.ID, "codex")
+	if err != nil {
+		t.Fatalf("MarkHeldReleased: %v", err)
+	}
+	if released.Status != HeldStatusReleased || released.ReleasedJobID == nil || *released.ReleasedJobID != job.ID ||
+		released.ReleasedPool != "codex" || released.ReleasedAt == nil || released.LastError != "" {
+		t.Fatalf("released = %+v", released)
+	}
+
+	// 5. HoldJob for request_id that already has a job returns ErrJobAlreadyExists.
+	if _, _, err := st.HoldJob(ctx, HoldJobParams{
+		RequestID: "held-req-1",
+		Pool:      "claude",
+		Payload:   CreateJobParams{RequestID: "held-req-1", Title: "Retry after release"},
+	}); !errors.Is(err, ErrJobAlreadyExists) {
+		t.Errorf("HoldJob for existing job err = %v, want ErrJobAlreadyExists", err)
+	}
+
+	// 6. CancelHeldJob soft-cancels without deleting the row; second cancel returns ErrConflict.
+	h2, _, err := st.HoldJob(ctx, HoldJobParams{
+		RequestID: "held-req-2",
+		Pool:      "codex",
+		Payload:   CreateJobParams{RequestID: "held-req-2", Title: "To cancel"},
+		Reason:    "stale",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob 2: %v", err)
+	}
+	cancelled, err := st.CancelHeldJob(ctx, h2.ID)
+	if err != nil {
+		t.Fatalf("CancelHeldJob: %v", err)
+	}
+	if cancelled.Status != HeldStatusCancelled || cancelled.CancelledAt == nil {
+		t.Fatalf("cancelled = %+v", cancelled)
+	}
+	if _, err := st.CancelHeldJob(ctx, h2.ID); !errors.Is(err, ErrConflict) {
+		t.Errorf("second CancelHeldJob err = %v, want ErrConflict", err)
+	}
+
+	// Verify row still exists in DB (not physically deleted).
+	stillThere, err := st.GetHeldJob(ctx, h2.ID)
+	if err != nil || stillThere.Status != HeldStatusCancelled {
+		t.Fatalf("GetHeldJob after cancel = (%+v, %v)", stillThere, err)
+	}
+
+	// ListHeldJobs filtering: active held=0, all=2.
+	active, err := st.ListHeldJobs(ctx, HeldStatusHeld, 10)
+	if err != nil || len(active) != 0 {
+		t.Errorf("active held = (%d, %v), want 0", len(active), err)
+	}
+	all, err := st.ListHeldJobs(ctx, "all", 10)
+	if err != nil || len(all) != 2 {
+		t.Errorf("all held = (%d, %v), want 2", len(all), err)
+	}
+
+	// 7. GateDecision with Held=true and JobID=0 (enforce hold) persists and reads cleanly.
+	gd, err := st.RecordGateDecision(ctx, GateDecision{
+		HeldID:        h2.ID,
+		Held:          true,
+		Mode:          "enforce",
+		RequestedPool: "codex",
+		Decision:      "would_hold",
+		BlockedBy:     "weekly",
+	})
+	if err != nil {
+		t.Fatalf("RecordGateDecision held: %v", err)
+	}
+	if gd.JobID != 0 || gd.HeldID != h2.ID || !gd.Held || gd.Mode != "enforce" {
+		t.Fatalf("gd = %+v", gd)
+	}
+	decisions, err := st.ListGateDecisions(ctx, 5)
+	if err != nil || len(decisions) != 1 || !decisions[0].Held || decisions[0].HeldID != h2.ID || decisions[0].JobID != 0 {
+		t.Fatalf("ListGateDecisions = (%+v, %v)", decisions, err)
+	}
+}
+
+func TestMigratePhase31GateDecisionsSchema(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "phase31.db")
+
+	// Open once to create jobs table, then downgrade gate_decisions & held_jobs to Phase 3-1 schema.
+	st1, err := Open(ctx, dbPath, Options{InstanceID: "mig-inst"})
+	if err != nil {
+		t.Fatalf("Open initial: %v", err)
+	}
+	j1, _, err := st1.CreateJob(ctx, CreateJobParams{RequestID: "mig-j1", Title: "Legacy Job"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	_, err = st1.writeDB.ExecContext(ctx, `
+		DROP TABLE gate_decisions;
+		CREATE TABLE gate_decisions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id INTEGER NOT NULL REFERENCES jobs(id),
+			mode TEXT NOT NULL DEFAULT 'dry-run',
+			requested_pool TEXT NOT NULL DEFAULT '',
+			alt_pools TEXT NOT NULL DEFAULT '[]',
+			decision TEXT NOT NULL CHECK(decision IN ('would_pass','would_hold','unknown')),
+			blocked_by TEXT NOT NULL DEFAULT '',
+			selected_pool TEXT NOT NULL DEFAULT '',
+			bypassed INTEGER NOT NULL DEFAULT 0,
+			reason TEXT NOT NULL DEFAULT '',
+			measured_at TEXT NULL,
+			decided_at TEXT NOT NULL
+		);
+		INSERT INTO gate_decisions (job_id, mode, requested_pool, alt_pools, decision, blocked_by, selected_pool, bypassed, reason, measured_at, decided_at)
+		VALUES (?, 'dry-run', 'claude', '[]', 'would_hold', 'weekly', '', 0, '', NULL, '2026-11-23T00:00:00Z');
+		DROP TABLE held_jobs;
+		CREATE TABLE held_jobs (
+			id TEXT PRIMARY KEY,
+			request_id TEXT NOT NULL UNIQUE,
+			pool TEXT NOT NULL,
+			alt_pools TEXT NOT NULL DEFAULT '[]',
+			payload_json TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+	`, j1.ID)
+	if err != nil {
+		t.Fatalf("simulate Phase 3-1 schema: %v", err)
+	}
+	_ = st1.Close()
+
+	// Re-open with current code: migrations should preserve old gate_decisions and allow enforce holds.
+	st2, err := Open(ctx, dbPath, Options{InstanceID: "mig-inst"})
+	if err != nil {
+		t.Fatalf("Open migrated: %v", err)
+	}
+	defer st2.Close()
+
+	h, _, err := st2.HoldJob(ctx, HoldJobParams{
+		RequestID: "mig-held-1",
+		Pool:      "claude",
+		Payload:   CreateJobParams{RequestID: "mig-held-1", Title: "Migrated Hold"},
+		Reason:    "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob after migration: %v", err)
+	}
+	if _, err := st2.RecordGateDecision(ctx, GateDecision{
+		HeldID:        h.ID,
+		Held:          true,
+		Mode:          "enforce",
+		RequestedPool: "claude",
+		Decision:      "would_hold",
+		BlockedBy:     "weekly",
+	}); err != nil {
+		t.Fatalf("RecordGateDecision enforce after migration: %v", err)
+	}
+
+	decs, err := st2.ListGateDecisions(ctx, 10)
+	if err != nil || len(decs) != 2 {
+		t.Fatalf("ListGateDecisions after migration = (%d, %v), want 2", len(decs), err)
+	}
+	if !decs[0].Held || decs[0].HeldID != h.ID || decs[0].JobID != 0 {
+		t.Errorf("newest migrated decision = %+v", decs[0])
+	}
+	if decs[1].Held || decs[1].JobID != j1.ID || decs[1].Mode != "dry-run" {
+		t.Errorf("legacy preserved decision = %+v", decs[1])
+	}
+}

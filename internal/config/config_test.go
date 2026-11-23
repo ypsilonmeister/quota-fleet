@@ -507,6 +507,9 @@ limits: { max_claimed: 1, attempts_cap: 1 }
 	if got := cfg.Quota.EffectiveStaleAfter(); got != DefaultQuotaStaleAfter {
 		t.Errorf("EffectiveStaleAfter() = %v, want %v", got, DefaultQuotaStaleAfter)
 	}
+	if got := cfg.Quota.EffectiveGateCheckInterval(); got != DefaultQuotaGateCheckInterval {
+		t.Errorf("EffectiveGateCheckInterval() = %v, want %v", got, DefaultQuotaGateCheckInterval)
+	}
 
 	cfgDry, err := Parse([]byte(`
 instance_id: "inst-q-dry"
@@ -515,6 +518,7 @@ quota:
   usage_file: ~/workspace/muse-widget/usage.json
   stale_after: 30m
   gate_mode: dry-run
+  gate_check_interval: 2m
 `))
 	if err != nil {
 		t.Fatalf("Parse dry-run: %v", err)
@@ -531,6 +535,31 @@ quota:
 	if cfgDry.Quota.EffectiveStaleAfter().Minutes() != 30 {
 		t.Errorf("EffectiveStaleAfter() = %v, want 30m", cfgDry.Quota.EffectiveStaleAfter())
 	}
+	if cfgDry.Quota.EffectiveGateCheckInterval().Minutes() != 2 {
+		t.Errorf("EffectiveGateCheckInterval() = %v, want 2m", cfgDry.Quota.EffectiveGateCheckInterval())
+	}
+
+	cfgEnforce, err := Parse([]byte(`
+instance_id: "inst-q-enforce"
+limits: { max_claimed: 1, attempts_cap: 1 }
+quota:
+  usage_file: ~/workspace/muse-widget/usage.json
+  stale_after: 45m
+  gate_mode: enforce
+  gate_check_interval: 30s
+`))
+	if err != nil {
+		t.Fatalf("Parse enforce: %v", err)
+	}
+	if err := cfgEnforce.Validate(); err != nil {
+		t.Fatalf("Validate enforce: %v", err)
+	}
+	if cfgEnforce.Quota.EffectiveGateMode() != GateModeEnforce {
+		t.Errorf("EffectiveGateMode() = %q, want enforce", cfgEnforce.Quota.EffectiveGateMode())
+	}
+	if cfgEnforce.Quota.EffectiveGateCheckInterval().Seconds() != 30 {
+		t.Errorf("EffectiveGateCheckInterval() = %v, want 30s", cfgEnforce.Quota.EffectiveGateCheckInterval())
+	}
 
 	invalidCases := []struct {
 		name    string
@@ -538,12 +567,12 @@ quota:
 		wantErr string
 	}{
 		{
-			name: "enforce not supported in Phase 3-1",
+			name: "unsupported gate_mode",
 			yaml: `
 instance_id: "inst"
 limits: { max_claimed: 1, attempts_cap: 1 }
 quota:
-  gate_mode: enforce
+  gate_mode: strict
 `,
 			wantErr: "quota.gate_mode",
 		},
@@ -566,6 +595,26 @@ quota:
   stale_after: "0s"
 `,
 			wantErr: "quota.stale_after",
+		},
+		{
+			name: "invalid gate_check_interval duration",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+quota:
+  gate_check_interval: "nope"
+`,
+			wantErr: "quota.gate_check_interval",
+		},
+		{
+			name: "zero gate_check_interval",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+quota:
+  gate_check_interval: "0s"
+`,
+			wantErr: "quota.gate_check_interval",
 		},
 	}
 	for _, tc := range invalidCases {

@@ -459,3 +459,91 @@ func TestResolvePoolByAppliesTo(t *testing.T) {
 		}
 	}
 }
+
+func TestShouldHoldOnEnforceAndSummary(t *testing.T) {
+	measured := mustTime(t, "2026-11-23T10:00:00+09:00")
+	freshNow := measured.Add(10 * time.Minute)
+	staleNow := measured.Add(50 * time.Minute)
+	resetAt := measured.Add(24 * time.Hour)
+
+	t.Run("all exhausted holds", func(t *testing.T) {
+		snap := &Snapshot{
+			MeasuredAt: measured,
+			Pools: map[string]PoolSnapshot{
+				PoolClaude: {WeeklyRemainingPercent: 0, WeeklyResetAt: timePtr(resetAt), ShortRemainingPercent: intPtr(50), MeasuredAt: measured},
+				PoolCodex:  {WeeklyRemainingPercent: 40, WeeklyResetAt: timePtr(resetAt), ShortRemainingPercent: intPtr(0), MeasuredAt: measured},
+			},
+		}
+		ev := EvaluateGate(PoolClaude, []string{PoolCodex}, snap, EvalOptions{Now: freshNow})
+		if !ShouldHoldOnEnforce(ev) {
+			t.Fatalf("expected hold for all exhausted, got %+v", ev)
+		}
+		if got := FormatHoldReason(ev); got != "exhausted:weekly" {
+			t.Errorf("FormatHoldReason = %q, want exhausted:weekly", got)
+		}
+		if sum := SummarizeEvaluation(ev); sum == "" {
+			t.Errorf("SummarizeEvaluation returned empty string")
+		}
+	})
+
+	t.Run("all stale holds", func(t *testing.T) {
+		snap := &Snapshot{
+			MeasuredAt: measured,
+			Pools: map[string]PoolSnapshot{
+				PoolClaude: {WeeklyRemainingPercent: 90, ShortRemainingPercent: intPtr(90), MeasuredAt: measured},
+			},
+		}
+		ev := EvaluateGate(PoolClaude, nil, snap, EvalOptions{Now: staleNow, StaleAfter: 45 * time.Minute})
+		if ev.Decision != DecisionUnknown || ev.Reason != ReasonStale {
+			t.Fatalf("unexpected eval: %+v", ev)
+		}
+		if !ShouldHoldOnEnforce(ev) {
+			t.Fatalf("expected hold for stale snapshot")
+		}
+		if got := FormatHoldReason(ev); got != ReasonStale {
+			t.Errorf("FormatHoldReason = %q, want %q", got, ReasonStale)
+		}
+	})
+
+	t.Run("mixed exhausted and stale holds", func(t *testing.T) {
+		snap := &Snapshot{
+			MeasuredAt: measured,
+			Pools: map[string]PoolSnapshot{
+				PoolClaude: {WeeklyRemainingPercent: 0, ShortRemainingPercent: intPtr(50), MeasuredAt: measured},
+				PoolCodex:  {WeeklyRemainingPercent: 50, ShortRemainingPercent: intPtr(50), MeasuredAt: measured, ServiceStale: true},
+			},
+		}
+		ev := EvaluateGate(PoolClaude, []string{PoolCodex}, snap, EvalOptions{Now: freshNow})
+		if !ShouldHoldOnEnforce(ev) {
+			t.Fatalf("expected hold for mixed exhausted + stale, got %+v", ev)
+		}
+	})
+
+	t.Run("short_window_null only does NOT hold", func(t *testing.T) {
+		snap := &Snapshot{
+			MeasuredAt: measured,
+			Pools: map[string]PoolSnapshot{
+				PoolClaude: {WeeklyRemainingPercent: 80, ShortRemainingPercent: nil, MeasuredAt: measured},
+			},
+		}
+		ev := EvaluateGate(PoolClaude, nil, snap, EvalOptions{Now: freshNow})
+		if ev.Decision != DecisionUnknown || ev.Reason != ReasonShortWindowNull {
+			t.Fatalf("unexpected eval: %+v", ev)
+		}
+		if ShouldHoldOnEnforce(ev) {
+			t.Fatalf("provisional short_window_null must NOT hold")
+		}
+	})
+
+	t.Run("unmeasured bypass does NOT hold", func(t *testing.T) {
+		ev := EvaluateGate("agy-argon", nil, nil, EvalOptions{
+			Now: staleNow,
+			Pools: map[string]config.PoolConfig{
+				"agy-argon": {Unmeasured: true},
+			},
+		})
+		if ShouldHoldOnEnforce(ev) {
+			t.Fatalf("unmeasured pool must NOT hold")
+		}
+	})
+}

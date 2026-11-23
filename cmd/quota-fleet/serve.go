@@ -122,6 +122,11 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		ReconcileInterval: cfg.Runtime.EffectiveReconcileInterval(),
 		StaleClaimedAfter: cfg.Runtime.EffectiveStaleClaimedAfter(),
 		SignalMaxBytes:    cfg.Runtime.EffectiveSignalMaxBytes(),
+		GateMode:          cfg.Quota.EffectiveGateMode(),
+		QuotaUsageFile:    cfg.Quota.UsageFile,
+		QuotaStaleAfter:   cfg.Quota.EffectiveStaleAfter(),
+		GateCheckInterval: cfg.Quota.EffectiveGateCheckInterval(),
+		Pools:             cfg.Pools,
 		Logger:            logger,
 	})
 	if err != nil {

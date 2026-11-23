@@ -76,10 +76,18 @@ CREATE TABLE IF NOT EXISTS leases (
 CREATE TABLE IF NOT EXISTS held_jobs (
     id TEXT PRIMARY KEY,
     request_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'held' CHECK(status IN ('held','released','cancelled')),
     pool TEXT NOT NULL,
     alt_pools TEXT NOT NULL DEFAULT '[]',
     payload_json TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
+    snapshot_summary TEXT NOT NULL DEFAULT '',
+    released_job_id INTEGER NULL REFERENCES jobs(id),
+    released_pool TEXT NOT NULL DEFAULT '',
+    released_at TEXT NULL,
+    cancelled_at TEXT NULL,
+    last_error TEXT NOT NULL DEFAULT '',
+    error_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -103,7 +111,9 @@ CREATE TABLE IF NOT EXISTS reconciler_dedup (
 
 CREATE TABLE IF NOT EXISTS gate_decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id INTEGER NOT NULL REFERENCES jobs(id),
+    job_id INTEGER NULL REFERENCES jobs(id),
+    held_id TEXT NOT NULL DEFAULT '',
+    held INTEGER NOT NULL DEFAULT 0,
     mode TEXT NOT NULL DEFAULT 'dry-run',
     requested_pool TEXT NOT NULL DEFAULT '',
     alt_pools TEXT NOT NULL DEFAULT '[]',

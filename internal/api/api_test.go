@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -677,5 +678,231 @@ func TestGateModeOffDoesNotRecordDecisions(t *testing.T) {
 	}
 	if len(decisions) != 0 {
 		t.Fatalf("expected 0 gate_decisions when gate_mode=off, got %d", len(decisions))
+	}
+}
+
+func TestEnforceQuotaGateHoldIdempotencyBypassUnknownAndCancel(t *testing.T) {
+	measured, _ := time.Parse(time.RFC3339, "2026-11-23T10:00:00+09:00")
+	freshNow := measured.Add(10 * time.Minute)
+	staleNow := measured.Add(50 * time.Minute)
+	resetSoon := measured.Add(24 * time.Hour)
+	resetLater := measured.Add(72 * time.Hour)
+
+	intPtr := func(v int) *int { return &v }
+
+	currentNow := freshNow
+	currentSnap := &quota.Snapshot{
+		MeasuredAt: measured,
+		Pools: map[string]quota.PoolSnapshot{
+			"claude": {
+				WeeklyRemainingPercent: 0,
+				WeeklyResetAt:          &resetLater,
+				ShortRemainingPercent:  intPtr(80),
+				MeasuredAt:             measured,
+			},
+			"codex": {
+				WeeklyRemainingPercent: 50,
+				WeeklyResetAt:          &resetSoon,
+				ShortRemainingPercent:  intPtr(0),
+				MeasuredAt:             measured,
+			},
+			"agy-gemini": {
+				WeeklyRemainingPercent: 75,
+				WeeklyResetAt:          &resetSoon,
+				ShortRemainingPercent:  nil, // provisional unknown (short_window_null)
+				MeasuredAt:             measured,
+			},
+			"agy-3p": {
+				WeeklyRemainingPercent: 60,
+				WeeklyResetAt:          &resetSoon,
+				ShortRemainingPercent:  intPtr(90),
+				MeasuredAt:             measured,
+			},
+		},
+	}
+
+	pools := map[string]config.PoolConfig{
+		"claude":     {Provider: "claude-usage"},
+		"codex":      {Provider: "codex-usage"},
+		"agy-gemini": {Provider: "agy-usage", AppliesTo: []config.PoolTarget{{Agent: "agy", ModelFamily: "gemini"}}},
+		"agy-3p":     {Provider: "agy-usage", AppliesTo: []config.PoolTarget{{Agent: "agy", ModelFamily: "claude-gpt"}}},
+		"agy-argon":  {Unmeasured: true},
+	}
+
+	_, st, ts := newTestServer(t, Options{
+		InstanceID:      "gate-enforce-inst",
+		MaxClaimed:      2,
+		GateMode:        config.GateModeEnforce,
+		QuotaStaleAfter: 45 * time.Minute,
+		Pools:           pools,
+		Now:             func() time.Time { return currentNow },
+		SnapshotLoader:  func() (*quota.Snapshot, error) { return currentSnap, nil },
+	})
+
+	// 1. All candidate pools exhausted -> 202 Accepted with held_id, persisted in held_jobs, NO job created.
+	respHold := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID:          "enf-exhausted-1",
+		Title:              "Exhausted Pool Job",
+		Agent:              "claude",
+		Host:               "ubuntu",
+		Workdir:            "/work/demo",
+		Instructions:       "do work",
+		AcceptanceCriteria: "tests pass",
+		Model:              "claude-opus",
+		Pool:               "claude",
+		AltPools:           []string{"codex"},
+	})
+	if respHold.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /jobs (exhausted) status = %d, want 202", respHold.StatusCode)
+	}
+	holdResp := decodeResp[HoldJobResponse](t, respHold)
+	if !holdResp.Created || holdResp.HeldID == "" || holdResp.Held == nil || holdResp.Held.Status != "held" {
+		t.Fatalf("unexpected HoldJobResponse: %+v", holdResp)
+	}
+	if holdResp.Held.Payload.Title != "Exhausted Pool Job" || holdResp.Held.Payload.Workdir != "/work/demo" || holdResp.Held.SnapshotSummary == "" {
+		t.Errorf("held payload/summary incomplete: %+v", holdResp.Held)
+	}
+	// Verify no job was created in jobs table.
+	if _, err := st.GetJobByRequestID(context.Background(), "enf-exhausted-1"); err != store.ErrNotFound {
+		t.Fatalf("expected no job for held request_id, got err=%v", err)
+	}
+
+	// 2. Idempotency: resending same request_id returns existing held_id (202, created=false), no duplicate held.
+	respHoldDup := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "enf-exhausted-1",
+		Title:     "Exhausted Pool Job",
+		Pool:      "claude",
+		AltPools:  []string{"codex"},
+	})
+	if respHoldDup.StatusCode != http.StatusAccepted {
+		t.Fatalf("duplicate held POST /jobs status = %d, want 202", respHoldDup.StatusCode)
+	}
+	holdDup := decodeResp[HoldJobResponse](t, respHoldDup)
+	if holdDup.Created || holdDup.HeldID != holdResp.HeldID {
+		t.Fatalf("duplicate hold = %+v, want same held_id=%s created=false", holdDup, holdResp.HeldID)
+	}
+
+	// 3. Unmeasured pool bypasses enforce even when snapshot is stale.
+	currentNow = staleNow
+	respUnm := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "enf-unmeasured-1",
+		Title:     "Argon Bypass Job",
+		Pool:      "agy-argon",
+	})
+	if respUnm.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /jobs (unmeasured) status = %d, want 201", respUnm.StatusCode)
+	}
+	unmJob := decodeResp[CreateJobResponse](t, respUnm)
+	if !unmJob.Created || unmJob.Job.Pool != "agy-argon" {
+		t.Fatalf("unmeasured job = %+v", unmJob)
+	}
+
+	// 4. Stale snapshot holds measured pool (202 Accepted, reason=stale).
+	respStale := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "enf-stale-1",
+		Title:     "Stale Snapshot Job",
+		Agent:     "agy",
+		Model:     "claude-sonnet-4-5", // resolves to agy-3p via applies_to
+	})
+	if respStale.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /jobs (stale) status = %d, want 202", respStale.StatusCode)
+	}
+	staleHold := decodeResp[HoldJobResponse](t, respStale)
+	if !staleHold.Created || staleHold.Held.Pool != "agy-3p" || staleHold.Held.Reason != "stale" {
+		t.Fatalf("stale hold = %+v", staleHold.Held)
+	}
+
+	// 5. Unknown-only (short_window_null) does NOT hold; creates job and records unknown gate_decision.
+	currentNow = freshNow
+	respUnk := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "enf-unknown-1",
+		Title:     "Unknown Short Window Job",
+		Agent:     "agy",
+		Model:     "gemini-2.5-pro", // resolves to agy-gemini (short=nil)
+	})
+	if respUnk.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /jobs (unknown-only) status = %d, want 201", respUnk.StatusCode)
+	}
+	unkJob := decodeResp[CreateJobResponse](t, respUnk)
+	if !unkJob.Created || unkJob.Job == nil {
+		t.Fatalf("unknown-only job = %+v", unkJob)
+	}
+
+	// 6. Idempotency: resending request_id of an ALREADY-EXISTING job returns 200 + existing job even if pool is now exhausted.
+	currentNow = staleNow // make all measured pools stale
+	respExistingJob := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+		RequestID: "enf-unknown-1",
+		Title:     "Unknown Short Window Job",
+		Pool:      "claude", // exhausted/stale
+	})
+	if respExistingJob.StatusCode != http.StatusOK {
+		t.Fatalf("retry existing job request_id status = %d, want 200", respExistingJob.StatusCode)
+	}
+	existingJobResp := decodeResp[CreateJobResponse](t, respExistingJob)
+	if existingJobResp.Created || existingJobResp.Job.ID != unkJob.Job.ID {
+		t.Fatalf("retry existing job = %+v, want id=%d created=false", existingJobResp, unkJob.Job.ID)
+	}
+
+	// 7. GET /gate/held returns the 2 active held jobs (exhausted + stale).
+	respList := doJSON(t, http.MethodGet, ts.URL+"/gate/held", "", nil)
+	if respList.StatusCode != http.StatusOK {
+		t.Fatalf("GET /gate/held status = %d, want 200", respList.StatusCode)
+	}
+	listResp := decodeResp[ListHeldJobsResponse](t, respList)
+	if len(listResp.Held) != 2 {
+		t.Fatalf("GET /gate/held len = %d, want 2 (%+v)", len(listResp.Held), listResp.Held)
+	}
+
+	// 8. DELETE /gate/held/{id} cancels without physical deletion; second delete returns 409 Conflict.
+	respDel := doJSON(t, http.MethodDelete, ts.URL+"/gate/held/"+holdResp.HeldID, "", nil)
+	if respDel.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE /gate/held/%s status = %d, want 200", holdResp.HeldID, respDel.StatusCode)
+	}
+	delResp := decodeResp[HeldJobActionResponse](t, respDel)
+	if delResp.Held.Status != "cancelled" || delResp.Held.CancelledAt == nil {
+		t.Fatalf("cancelled held = %+v", delResp.Held)
+	}
+
+	respDel2 := doJSON(t, http.MethodDelete, ts.URL+"/gate/held/"+holdResp.HeldID, "", nil)
+	if respDel2.StatusCode != http.StatusConflict {
+		t.Fatalf("second DELETE /gate/held/%s status = %d, want 409", holdResp.HeldID, respDel2.StatusCode)
+	}
+	confResp := decodeResp[HeldConflictResponse](t, respDel2)
+	if confResp.CurrentStatus != "cancelled" {
+		t.Errorf("conflict response = %+v", confResp)
+	}
+
+	// Active held list now has 1 entry; ?status=all still has 2 (soft cancel, not deleted).
+	respListAfter := doJSON(t, http.MethodGet, ts.URL+"/gate/held", "", nil)
+	listAfter := decodeResp[ListHeldJobsResponse](t, respListAfter)
+	if len(listAfter.Held) != 1 || listAfter.Held[0].ID != staleHold.HeldID {
+		t.Fatalf("active held after delete = %+v", listAfter.Held)
+	}
+	respListAll := doJSON(t, http.MethodGet, ts.URL+"/gate/held?status=all", "", nil)
+	listAll := decodeResp[ListHeldJobsResponse](t, respListAll)
+	if len(listAll.Held) != 2 {
+		t.Fatalf("all held after delete len = %d, want 2", len(listAll.Held))
+	}
+
+	// 9. Verify gate_decisions recorded all 4 unique enforce decisions and distinguishes actual holds.
+	decs, err := st.ListGateDecisions(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("ListGateDecisions: %v", err)
+	}
+	if len(decs) != 4 {
+		t.Fatalf("len(gate_decisions) = %d, want 4 (%+v)", len(decs), decs)
+	}
+	// Newest first: unknown-only (not held), stale (held), unmeasured (not held), exhausted (held).
+	if decs[0].Mode != "enforce" || decs[0].Decision != "unknown" || decs[0].Reason != "short_window_null" || decs[0].Held || decs[0].JobID != unkJob.Job.ID {
+		t.Errorf("dec[0] = %+v", decs[0])
+	}
+	if decs[1].Mode != "enforce" || decs[1].Decision != "unknown" || decs[1].Reason != "stale" || !decs[1].Held || decs[1].HeldID != staleHold.HeldID || decs[1].JobID != 0 {
+		t.Errorf("dec[1] = %+v", decs[1])
+	}
+	if decs[2].Mode != "enforce" || decs[2].Decision != "would_pass" || !decs[2].Bypassed || decs[2].Held || decs[2].JobID != unmJob.Job.ID {
+		t.Errorf("dec[2] = %+v", decs[2])
+	}
+	if decs[3].Mode != "enforce" || decs[3].Decision != "would_hold" || decs[3].BlockedBy != "weekly" || !decs[3].Held || decs[3].HeldID != holdResp.HeldID || decs[3].JobID != 0 {
+		t.Errorf("dec[3] = %+v", decs[3])
 	}
 }

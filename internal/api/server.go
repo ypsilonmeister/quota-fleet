@@ -31,13 +31,15 @@ type Options struct {
 	RequireAuth bool
 	Logger      *log.Logger
 
-	// Quota Gate integration settings (off | dry-run).
+	// Quota Gate integration settings (off | dry-run | enforce).
 	GateMode        string
 	QuotaUsageFile  string
 	QuotaStaleAfter time.Duration
 	Pools           map[string]config.PoolConfig
 	// Now overrides the evaluation clock in tests when non-nil.
 	Now func() time.Time
+	// SnapshotLoader optionally overrides loading usage snapshots from QuotaUsageFile in tests.
+	SnapshotLoader func() (*quota.Snapshot, error)
 }
 
 // Server exposes the quota-fleet Job Store over an HTTP JSON API.
@@ -53,6 +55,7 @@ type Server struct {
 	quotaStaleAfter time.Duration
 	pools           map[string]config.PoolConfig
 	nowFn           func() time.Time
+	snapshotLoader  func() (*quota.Snapshot, error)
 	handler         http.Handler
 }
 
@@ -91,6 +94,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 		quotaStaleAfter: staleAfter,
 		pools:           opts.Pools,
 		nowFn:           nowFn,
+		snapshotLoader:  opts.SnapshotLoader,
 	}
 
 	if s.token == "" && !s.requireAuth {
@@ -112,6 +116,8 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("POST /jobs/{id}/deliver", s.handleDeliverJob)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("GET /deliveries", s.handleDeliveries)
+	mux.HandleFunc("GET /gate/held", s.handleListHeldJobs)
+	mux.HandleFunc("DELETE /gate/held/{id}", s.handleCancelHeldJob)
 
 	s.handler = s.authMiddleware(mux)
 	return s
@@ -159,7 +165,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, created, err := s.store.CreateJob(r.Context(), store.CreateJobParams{
+	params := store.CreateJobParams{
 		RequestID:          req.RequestID,
 		Title:              req.Title,
 		Draft:              req.Draft,
@@ -175,16 +181,16 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Pool:               req.Pool,
 		AltPools:           req.AltPools,
 		SessionID:          req.SessionID,
-	})
+	}
+
+	if s.gateMode == config.GateModeEnforce {
+		s.handleCreateJobEnforce(w, r, req, params)
+		return
+	}
+
+	job, created, err := s.store.CreateJob(r.Context(), params)
 	if err != nil {
-		switch {
-		case errors.Is(err, store.ErrInvalidInput),
-			errors.Is(err, store.ErrParentNotFound),
-			errors.Is(err, store.ErrParentTerminal):
-			writeError(w, http.StatusBadRequest, err.Error())
-		default:
-			writeError(w, http.StatusInternalServerError, err.Error())
-		}
+		s.writeCreateJobError(w, err)
 		return
 	}
 
@@ -202,20 +208,249 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, req CreateJobRequest) {
+func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, req CreateJobRequest, params store.CreateJobParams) {
+	ctx := r.Context()
+
+	reqID := strings.TrimSpace(req.RequestID)
+	if reqID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: request_id must not be empty", store.ErrInvalidInput))
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: title must not be empty", store.ErrInvalidInput))
+		return
+	}
+
+	// Idempotency #1: if a job already exists for request_id, return it immediately without holding.
+	if existingJob, err := s.store.GetJobByRequestID(ctx, reqID); err == nil {
+		writeJSON(w, http.StatusOK, CreateJobResponse{
+			Job:     toJobDTO(existingJob),
+			Created: false,
+		})
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Idempotency #2: if a held_jobs entry already exists for request_id, return it without duplicate holds.
+	if existingHeld, err := s.store.GetHeldJobByRequestID(ctx, reqID); err == nil {
+		switch existingHeld.Status {
+		case store.HeldStatusHeld:
+			writeJSON(w, http.StatusAccepted, HoldJobResponse{
+				HeldID:  existingHeld.ID,
+				Held:    toHeldJobDTO(existingHeld),
+				Created: false,
+			})
+			return
+		case store.HeldStatusReleased:
+			if existingHeld.ReleasedJobID != nil {
+				if job, jerr := s.store.GetJob(ctx, *existingHeld.ReleasedJobID); jerr == nil {
+					writeJSON(w, http.StatusOK, CreateJobResponse{
+						Job:     toJobDTO(job),
+						Created: false,
+					})
+					return
+				}
+			}
+			writeJSON(w, http.StatusConflict, HeldConflictResponse{
+				Error:         fmt.Sprintf("%v: held job %s for request_id=%s was already released", store.ErrConflict, existingHeld.ID, reqID),
+				CurrentStatus: string(existingHeld.Status),
+				Held:          toHeldJobDTO(existingHeld),
+			})
+			return
+		default:
+			writeJSON(w, http.StatusConflict, HeldConflictResponse{
+				Error:         fmt.Sprintf("%v: held job %s for request_id=%s is %s", store.ErrConflict, existingHeld.ID, reqID, existingHeld.Status),
+				CurrentStatus: string(existingHeld.Status),
+				Held:          toHeldJobDTO(existingHeld),
+			})
+			return
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	reqPool := s.resolveRequestPool(req)
+	if reqPool == "" && len(req.AltPools) == 0 {
+		job, created, err := s.store.CreateJob(ctx, params)
+		if err != nil {
+			s.writeCreateJobError(w, err)
+			return
+		}
+		status := http.StatusOK
+		if created {
+			status = http.StatusCreated
+		}
+		writeJSON(w, status, CreateJobResponse{
+			Job:     toJobDTO(job),
+			Created: created,
+		})
+		return
+	}
+
+	eval, evalErr := s.evaluateGate(reqPool, req.AltPools)
+	if evalErr != nil {
+		s.logger.Printf("WARNING: quota gate enforce evaluation for request_id=%s failed to load snapshot: %v", reqID, evalErr)
+	}
+
+	if quota.ShouldHoldOnEnforce(eval) {
+		held, heldCreated, err := s.store.HoldJob(ctx, store.HoldJobParams{
+			RequestID:       reqID,
+			Pool:            reqPool,
+			AltPools:        eval.AltPools,
+			Payload:         params,
+			Reason:          quota.FormatHoldReason(eval),
+			SnapshotSummary: quota.SummarizeEvaluation(eval),
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrJobAlreadyExists):
+				if existingJob, jerr := s.store.GetJobByRequestID(ctx, reqID); jerr == nil {
+					writeJSON(w, http.StatusOK, CreateJobResponse{
+						Job:     toJobDTO(existingJob),
+						Created: false,
+					})
+					return
+				}
+				writeError(w, http.StatusConflict, err.Error())
+			case errors.Is(err, store.ErrConflict):
+				resp := HeldConflictResponse{Error: err.Error()}
+				if held != nil {
+					resp.CurrentStatus = string(held.Status)
+					resp.Held = toHeldJobDTO(held)
+				}
+				writeJSON(w, http.StatusConflict, resp)
+			case errors.Is(err, store.ErrInvalidInput):
+				writeError(w, http.StatusBadRequest, err.Error())
+			default:
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+
+		if heldCreated {
+			if _, derr := s.store.RecordGateDecision(ctx, store.GateDecision{
+				HeldID:        held.ID,
+				Held:          true,
+				Mode:          config.GateModeEnforce,
+				RequestedPool: eval.RequestedPool,
+				AltPools:      eval.AltPools,
+				Decision:      string(eval.Decision),
+				BlockedBy:     eval.BlockedBy,
+				SelectedPool:  eval.SelectedPool,
+				Bypassed:      eval.Bypassed,
+				Reason:        eval.Reason,
+				MeasuredAt:    eval.MeasuredAt,
+				DecidedAt:     eval.DecidedAt,
+			}); derr != nil {
+				s.logger.Printf("WARNING: failed to record enforce hold gate decision for held %s: %v", held.ID, derr)
+			}
+		}
+
+		writeJSON(w, http.StatusAccepted, HoldJobResponse{
+			HeldID:  held.ID,
+			Held:    toHeldJobDTO(held),
+			Created: heldCreated,
+		})
+		return
+	}
+
+	// Not held (healthy pool selected, unmeasured bypass, or provisional unknown only).
+	// When a healthy/bypassed pool is selected, assign it to the created job.
+	if eval.Decision == quota.DecisionWouldPass && eval.SelectedPool != "" {
+		params.Pool = eval.SelectedPool
+	}
+
+	job, created, err := s.store.CreateJob(ctx, params)
+	if err != nil {
+		s.writeCreateJobError(w, err)
+		return
+	}
+
+	if created {
+		if _, derr := s.store.RecordGateDecision(ctx, store.GateDecision{
+			JobID:         job.ID,
+			Held:          false,
+			Mode:          config.GateModeEnforce,
+			RequestedPool: eval.RequestedPool,
+			AltPools:      eval.AltPools,
+			Decision:      string(eval.Decision),
+			BlockedBy:     eval.BlockedBy,
+			SelectedPool:  eval.SelectedPool,
+			Bypassed:      eval.Bypassed,
+			Reason:        eval.Reason,
+			MeasuredAt:    eval.MeasuredAt,
+			DecidedAt:     eval.DecidedAt,
+		}); derr != nil {
+			s.logger.Printf("WARNING: failed to record enforce pass gate decision for job #%d: %v", job.ID, derr)
+		}
+	}
+
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, CreateJobResponse{
+		Job:     toJobDTO(job),
+		Created: created,
+	})
+}
+
+func (s *Server) writeCreateJobError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrInvalidInput),
+		errors.Is(err, store.ErrParentNotFound),
+		errors.Is(err, store.ErrParentTerminal):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+func (s *Server) resolveRequestPool(req CreateJobRequest) string {
 	reqPool := strings.TrimSpace(req.Pool)
 	if reqPool == "" {
 		reqPool = quota.ResolvePoolByAppliesTo(s.pools, req.Agent, req.Model)
 	}
+	return reqPool
+}
+
+func (s *Server) evaluateGate(primaryPool string, altPools []string) (quota.GateEvaluation, error) {
+	opts := quota.EvalOptions{
+		Now:        s.nowFn(),
+		StaleAfter: s.quotaStaleAfter,
+		Pools:      s.pools,
+	}
+	primaryPool = strings.TrimSpace(primaryPool)
+	if primaryPool != "" {
+		if cfg, ok := s.pools[primaryPool]; ok && cfg.Unmeasured {
+			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+		}
+	}
+	if s.snapshotLoader != nil {
+		snap, err := s.snapshotLoader()
+		if err != nil {
+			eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
+			if !eval.Bypassed {
+				eval.Decision = quota.DecisionUnknown
+				eval.Reason = fmt.Sprintf("%s: %v", quota.ReasonSnapshotError, err)
+			}
+			return eval, err
+		}
+		return quota.EvaluateGate(primaryPool, altPools, snap, opts), nil
+	}
+	return quota.EvaluateFromFile(s.quotaUsageFile, primaryPool, altPools, opts)
+}
+
+func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, req CreateJobRequest) {
+	reqPool := s.resolveRequestPool(req)
 	if reqPool == "" && len(req.AltPools) == 0 {
 		return
 	}
 
-	eval, evalErr := quota.EvaluateFromFile(s.quotaUsageFile, reqPool, req.AltPools, quota.EvalOptions{
-		Now:        s.nowFn(),
-		StaleAfter: s.quotaStaleAfter,
-		Pools:      s.pools,
-	})
+	eval, evalErr := s.evaluateGate(reqPool, req.AltPools)
 	if evalErr != nil {
 		s.logger.Printf("WARNING: quota gate dry-run evaluation for job #%d failed to load snapshot: %v", job.ID, evalErr)
 	}
@@ -236,6 +471,75 @@ func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, r
 	if err != nil {
 		s.logger.Printf("WARNING: failed to record dry-run gate decision for job #%d: %v", job.ID, err)
 	}
+}
+
+func (s *Server) handleListHeldJobs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	status := store.HeldStatusHeld
+	if v := strings.TrimSpace(q.Get("status")); v != "" {
+		st := store.HeldStatus(v)
+		if st != "all" && !st.Valid() {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid held status %q", v))
+			return
+		}
+		status = st
+	}
+
+	var limit int
+	if v := strings.TrimSpace(q.Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid limit %q", v))
+			return
+		}
+		limit = n
+	}
+
+	items, err := s.store.ListHeldJobs(r.Context(), status, limit)
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidInput) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ListHeldJobsResponse{
+		Held: toHeldJobDTOs(items),
+	})
+}
+
+func (s *Server) handleCancelHeldJob(w http.ResponseWriter, r *http.Request) {
+	heldID := strings.TrimSpace(r.PathValue("id"))
+	if heldID == "" {
+		writeError(w, http.StatusBadRequest, "held id is required")
+		return
+	}
+
+	held, err := s.store.CancelHeldJob(r.Context(), heldID)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrNotFound):
+			writeError(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, store.ErrConflict):
+			resp := HeldConflictResponse{Error: err.Error()}
+			if cur, gerr := s.store.GetHeldJob(r.Context(), heldID); gerr == nil && cur != nil {
+				resp.CurrentStatus = string(cur.Status)
+				resp.Held = toHeldJobDTO(cur)
+			}
+			writeJSON(w, http.StatusConflict, resp)
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, HeldJobActionResponse{
+		Held: toHeldJobDTO(held),
+	})
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {

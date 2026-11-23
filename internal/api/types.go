@@ -213,3 +213,82 @@ type ConflictResponse struct {
 	CurrentStatus string  `json:"current_status,omitempty"`
 	Job           *JobDTO `json:"job,omitempty"`
 }
+
+// HeldJobDTO is the JSON representation of a held_jobs entry.
+type HeldJobDTO struct {
+	ID              string                `json:"id"`
+	RequestID       string                `json:"request_id"`
+	Status          string                `json:"status"`
+	Pool            string                `json:"pool"`
+	AltPools        []string              `json:"alt_pools,omitempty"`
+	Payload         store.CreateJobParams `json:"payload"`
+	Reason          string                `json:"reason,omitempty"`
+	SnapshotSummary string                `json:"snapshot_summary,omitempty"`
+	ReleasedJobID   *int64                `json:"released_job_id,omitempty"`
+	ReleasedPool    string                `json:"released_pool,omitempty"`
+	ReleasedAt      *time.Time            `json:"released_at,omitempty"`
+	CancelledAt     *time.Time            `json:"cancelled_at,omitempty"`
+	LastError       string                `json:"last_error,omitempty"`
+	ErrorCount      int                   `json:"error_count,omitempty"`
+	CreatedAt       time.Time             `json:"created_at"`
+	UpdatedAt       time.Time             `json:"updated_at"`
+}
+
+func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
+	if h == nil {
+		return nil
+	}
+	dto := &HeldJobDTO{
+		ID:              h.ID,
+		RequestID:       h.RequestID,
+		Status:          string(h.Status),
+		Pool:            h.Pool,
+		Payload:         h.Payload,
+		Reason:          h.Reason,
+		SnapshotSummary: h.SnapshotSummary,
+		ReleasedJobID:   h.ReleasedJobID,
+		ReleasedPool:    h.ReleasedPool,
+		ReleasedAt:      h.ReleasedAt,
+		CancelledAt:     h.CancelledAt,
+		LastError:       h.LastError,
+		ErrorCount:      h.ErrorCount,
+		CreatedAt:       h.CreatedAt,
+		UpdatedAt:       h.UpdatedAt,
+	}
+	if len(h.AltPools) > 0 {
+		dto.AltPools = append([]string(nil), h.AltPools...)
+	}
+	return dto
+}
+
+func toHeldJobDTOs(items []*store.HeldJob) []*HeldJobDTO {
+	out := make([]*HeldJobDTO, 0, len(items))
+	for _, h := range items {
+		out = append(out, toHeldJobDTO(h))
+	}
+	return out
+}
+
+// HoldJobResponse is returned with 202 Accepted by POST /jobs when Quota Gate holds a job.
+type HoldJobResponse struct {
+	HeldID  string      `json:"held_id"`
+	Held    *HeldJobDTO `json:"held"`
+	Created bool        `json:"created"`
+}
+
+// ListHeldJobsResponse is returned by GET /gate/held.
+type ListHeldJobsResponse struct {
+	Held []*HeldJobDTO `json:"held"`
+}
+
+// HeldJobActionResponse is returned by DELETE /gate/held/{id}.
+type HeldJobActionResponse struct {
+	Held *HeldJobDTO `json:"held"`
+}
+
+// HeldConflictResponse is returned on 409 Conflict for held_jobs transitions.
+type HeldConflictResponse struct {
+	Error         string      `json:"error"`
+	CurrentStatus string      `json:"current_status,omitempty"`
+	Held          *HeldJobDTO `json:"held,omitempty"`
+}

@@ -49,7 +49,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  quota-fleet serve [--config fleet.yaml] [--db path/to/fleet.db] [--listen 127.0.0.1:8737]")
 	fmt.Fprintln(w, "  quota-fleet job <create|list|get|cancel|requeue> [options]")
-	fmt.Fprintln(w, "  quota-fleet gate <check|decisions> [options]")
+	fmt.Fprintln(w, "  quota-fleet gate <check|decisions|held|release> [options]")
 	fmt.Fprintln(w, "  quota-fleet config check [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet status [--config fleet.yaml] [--db path/to/fleet.db]")
 }

@@ -23,13 +23,16 @@ const (
 	DefaultShepherdInterval  = 5 * time.Second
 	DefaultReconcileInterval = 30 * time.Second
 	DefaultStaleClaimedAfter = 15 * time.Minute
-	DefaultSignalMaxBytes    = int64(1 << 20) // 1 MiB
-	DefaultQuotaStaleAfter   = 45 * time.Minute
+	DefaultSignalMaxBytes         = int64(1 << 20) // 1 MiB
+	DefaultQuotaStaleAfter        = 45 * time.Minute
+	DefaultQuotaGateCheckInterval = 1 * time.Minute
 
 	// GateModeOff disables Quota Gate checks on job registration.
 	GateModeOff = "off"
 	// GateModeDryRun evaluates Quota Gate on job registration and records decisions without holding jobs.
 	GateModeDryRun = "dry-run"
+	// GateModeEnforce evaluates Quota Gate, holds jobs when pools are exhausted/stale, and releases them when recovered.
+	GateModeEnforce = "enforce"
 
 	// PromptStyleStdin passes prompt.txt to the agent via stdin redirection (`< prompt.txt`).
 	PromptStyleStdin = "stdin"
@@ -111,14 +114,20 @@ func (e EvaluatorConfig) EffectiveMaxEvalRetries() int {
 
 // QuotaConfig holds Quota Gate and usage snapshot settings.
 type QuotaConfig struct {
-	UsageFile  string `yaml:"usage_file"`
-	StaleAfter string `yaml:"stale_after"`
-	GateMode   string `yaml:"gate_mode"`
+	UsageFile         string `yaml:"usage_file"`
+	StaleAfter        string `yaml:"stale_after"`
+	GateMode          string `yaml:"gate_mode"`
+	GateCheckInterval string `yaml:"gate_check_interval"`
 }
 
 // EffectiveStaleAfter returns the configured staleness threshold or DefaultQuotaStaleAfter (45m).
 func (q QuotaConfig) EffectiveStaleAfter() time.Duration {
 	return parseDurationOrDefault(q.StaleAfter, DefaultQuotaStaleAfter)
+}
+
+// EffectiveGateCheckInterval returns the configured periodic Gate check interval or DefaultQuotaGateCheckInterval (1m).
+func (q QuotaConfig) EffectiveGateCheckInterval() time.Duration {
+	return parseDurationOrDefault(q.GateCheckInterval, DefaultQuotaGateCheckInterval)
 }
 
 // EffectiveGateMode returns the configured gate mode, defaulting to "off".
@@ -357,8 +366,11 @@ func (c *Config) Validate() error {
 	if err := validatePositiveDuration("quota.stale_after", c.Quota.StaleAfter); err != nil {
 		errs = append(errs, err)
 	}
-	if mode := strings.TrimSpace(c.Quota.GateMode); mode != "" && mode != GateModeOff && mode != GateModeDryRun {
-		errs = append(errs, fmt.Errorf("quota.gate_mode %q is not supported (allowed: %q, %q)", mode, GateModeOff, GateModeDryRun))
+	if err := validatePositiveDuration("quota.gate_check_interval", c.Quota.GateCheckInterval); err != nil {
+		errs = append(errs, err)
+	}
+	if mode := strings.TrimSpace(c.Quota.GateMode); mode != "" && mode != GateModeOff && mode != GateModeDryRun && mode != GateModeEnforce {
+		errs = append(errs, fmt.Errorf("quota.gate_mode %q is not supported (allowed: %q, %q, %q)", mode, GateModeOff, GateModeDryRun, GateModeEnforce))
 	}
 
 	if mode := strings.TrimSpace(c.Evaluator.Mode); mode != "" && mode != EvaluatorModeTypedDecision && mode != EvaluatorModeAlwaysPass {

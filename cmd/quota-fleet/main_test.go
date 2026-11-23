@@ -657,3 +657,265 @@ quota:
 		t.Errorf("limit=1 output = %q, want only job=#2", out.String())
 	}
 }
+
+func TestCLIGateHeldAndReleaseAndServeAutoRelease(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	cfgPath := filepath.Join(dir, "fleet.yaml")
+	usagePath := filepath.Join(dir, "usage.json")
+
+	now := time.Now().UTC().Truncate(time.Second)
+	writeUsage := func(claudeWeekly, claude5h, codexWeekly, codex5h int) {
+		t.Helper()
+		payload := fmt.Sprintf(`{
+			"updatedAt": "%s",
+			"services": {
+				"claude": {
+					"remainingPercent": %d,
+					"resetAt": "%s",
+					"subText": "5h %d%%",
+					"subResetAt": "%s"
+				},
+				"codex": {
+					"remainingPercent": %d,
+					"resetAt": "%s",
+					"subText": "5h %d%%",
+					"subResetAt": "%s"
+				}
+			}
+		}`,
+			now.Add(-2*time.Minute).Format(time.RFC3339),
+			claudeWeekly, now.Add(72*time.Hour).Format(time.RFC3339), claude5h, now.Add(3*time.Hour).Format(time.RFC3339),
+			codexWeekly, now.Add(24*time.Hour).Format(time.RFC3339), codex5h, now.Add(2*time.Hour).Format(time.RFC3339),
+		)
+		// Write atomically via temp file + rename so concurrent readers never observe partial JSON.
+		tmp := usagePath + ".tmp"
+		if err := os.WriteFile(tmp, []byte(payload), 0o600); err != nil {
+			t.Fatalf("WriteFile tmp usage.json: %v", err)
+		}
+		if err := os.Rename(tmp, usagePath); err != nil {
+			t.Fatalf("Rename usage.json: %v", err)
+		}
+	}
+
+	// Start with both pools exhausted.
+	writeUsage(0, 50, 40, 0)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cfgYAML := fmt.Sprintf(`
+instance_id: "enforce-cli-serve-inst"
+state_dir: "%s"
+api:
+  listen: "%s"
+runtime:
+  adapter: "mock"
+  dispatch_interval: "15ms"
+  shepherd_interval: "15ms"
+  reconcile_interval: "30ms"
+  stale_claimed_after: "5s"
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+evaluator:
+  mode: "always-pass"
+pools:
+  claude:
+    provider: claude-usage
+  codex:
+    provider: codex-usage
+quota:
+  usage_file: "%s"
+  stale_after: 45m
+  gate_mode: enforce
+  gate_check_interval: 25ms
+`, filepath.ToSlash(stateDir), addr, filepath.ToSlash(usagePath))
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("WriteFile fleet.yaml: %v", err)
+	}
+
+	// Part A: Start serve in enforce mode, POST /jobs -> 202 held, verify CLI `gate held` & `gate release` (fails while exhausted).
+	ctx, cancel := context.WithCancel(context.Background())
+	var serveOut, serveErr bytes.Buffer
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runServeContext(ctx, []string{"--config", cfgPath}, &serveOut, &serveErr)
+	}()
+
+	baseURL := "http://" + addr
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := http.Get(baseURL + "/status")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("serve did not become ready: stderr=%s", serveErr.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	// Submit job 1 (will be auto-released by serve loop once usage.json recovers).
+	reqBody1 := `{"request_id":"auto-rel-1","title":"Auto Release Job","pool":"claude","alt_pools":["codex"]}`
+	resp1, err := http.Post(baseURL+"/jobs", "application/json", strings.NewReader(reqBody1))
+	if err != nil {
+		cancel()
+		t.Fatalf("POST /jobs 1: %v", err)
+	}
+	var hold1 struct {
+		HeldID string `json:"held_id"`
+	}
+	_ = json.NewDecoder(resp1.Body).Decode(&hold1)
+	_ = resp1.Body.Close()
+	if resp1.StatusCode != http.StatusAccepted || hold1.HeldID == "" {
+		cancel()
+		t.Fatalf("POST /jobs 1 status=%d held_id=%q", resp1.StatusCode, hold1.HeldID)
+	}
+
+	// CLI `gate held` lists hold1.
+	var out, errBuf bytes.Buffer
+	if code := run([]string{"gate", "held", "--config", cfgPath}, &out, &errBuf); code != 0 {
+		cancel()
+		t.Fatalf("gate held exit=%d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), hold1.HeldID) || !strings.Contains(out.String(), "Auto Release Job") {
+		cancel()
+		t.Fatalf("gate held output missing %s:\n%s", hold1.HeldID, out.String())
+	}
+
+	// CLI `gate release <held_id>` while exhausted fails and explains why.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"gate", "release", hold1.HeldID, "--config", cfgPath}, &out, &errBuf); code == 0 {
+		cancel()
+		t.Fatalf("expected gate release while exhausted to exit non-zero, stdout=%q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "exhausted") {
+		cancel()
+		t.Fatalf("gate release failure reason = %q, want mention of exhausted", errBuf.String())
+	}
+
+	// Swap usage.json so both pools recover (codex resets sooner -> +24h vs claude +72h).
+	writeUsage(80, 90, 50, 70)
+
+	// Wait for serve's resident GateChecker loop to auto-release hold1 and create+complete the job.
+	var releasedJobID int64
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		r, err := http.Get(baseURL + "/gate/held?status=all")
+		if err == nil {
+			var list struct {
+				Held []struct {
+					ID            string `json:"id"`
+					Status        string `json:"status"`
+					ReleasedJobID *int64 `json:"released_job_id"`
+					ReleasedPool  string `json:"released_pool"`
+				} `json:"held"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&list)
+			_ = r.Body.Close()
+			if len(list.Held) == 1 && list.Held[0].Status == "released" && list.Held[0].ReleasedJobID != nil {
+				if list.Held[0].ReleasedPool != "codex" {
+					cancel()
+					t.Fatalf("auto-released pool = %q, want codex (soonest weekly reset)", list.Held[0].ReleasedPool)
+				}
+				releasedJobID = *list.Held[0].ReleasedJobID
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("held job %s was not auto-released by serve loop; stderr=%s", hold1.HeldID, serveErr.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Wait for the released job to finish via Dispatcher/Launcher/Shepherd.
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		r, err := http.Get(fmt.Sprintf("%s/jobs/%d", baseURL, releasedJobID))
+		if err == nil {
+			var j struct {
+				Status string `json:"status"`
+				Pool   string `json:"pool"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&j)
+			_ = r.Body.Close()
+			if j.Status == "done" {
+				if j.Pool != "codex" {
+					cancel()
+					t.Fatalf("released job pool = %q, want codex", j.Pool)
+				}
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("released job #%d did not complete in time", releasedJobID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Stop serve cleanly before testing standalone CLI manual release.
+	cancel()
+	select {
+	case code := <-doneCh:
+		if code != 0 {
+			t.Fatalf("serve exit=%d stderr=%s", code, serveErr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("serve did not shut down within timeout")
+	}
+
+	// Part B: Seed a held job directly in DB and manually release it via CLI `gate release <held_id>`.
+	dbPath := filepath.Join(stateDir, "fleet.db")
+	st, err := store.Open(context.Background(), dbPath, store.Options{InstanceID: "enforce-cli-serve-inst"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	hManual, _, err := st.HoldJob(context.Background(), store.HoldJobParams{
+		RequestID: "manual-rel-1",
+		Pool:      "claude",
+		AltPools:  []string{"codex"},
+		Payload: store.CreateJobParams{
+			RequestID: "manual-rel-1",
+			Title:     "Manual Release Job",
+			Pool:      "claude",
+			AltPools:  []string{"codex"},
+		},
+		Reason: "exhausted:weekly",
+	})
+	if err != nil {
+		_ = st.Close()
+		t.Fatalf("HoldJob manual: %v", err)
+	}
+	_ = st.Close()
+
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"gate", "release", hManual.ID, "--config", cfgPath}, &out, &errBuf); code != 0 {
+		t.Fatalf("gate release manual exit=%d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "released held "+hManual.ID) || !strings.Contains(out.String(), "selected_pool: codex") {
+		t.Errorf("unexpected gate release output:\n%s", out.String())
+	}
+
+	// CLI `gate decisions` shows enforce hold and release decisions cleanly.
+	out.Reset()
+	errBuf.Reset()
+	if code := run([]string{"gate", "decisions", "--config", cfgPath, "--limit", "10"}, &out, &errBuf); code != 0 {
+		t.Fatalf("gate decisions exit=%d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "held=true") || !strings.Contains(out.String(), "mode=enforce") {
+		t.Errorf("gate decisions output missing enforce hold markers:\n%s", out.String())
+	}
+}

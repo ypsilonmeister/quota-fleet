@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
+	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
+	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 	_ "modernc.org/sqlite"
 )
@@ -1270,5 +1272,143 @@ func TestShepherdEvaluationRetryCounterResetsOnSuccess(t *testing.T) {
 	shepherd.evalMu.Unlock()
 	if stillTracked2 {
 		t.Errorf("expected evalFailures entry for job #%d to be cleared after fail verdict", j2.ID)
+	}
+}
+
+func TestGateCheckerAutoReleaseSoonestResetAndFailureRetention(t *testing.T) {
+	ctx := context.Background()
+	st, _ := openTestStore(t, "gate-checker-test")
+
+	measured := time.Date(2026, 11, 23, 1, 0, 0, 0, time.UTC)
+	now := measured.Add(10 * time.Minute)
+	resetSooner := measured.Add(12 * time.Hour)
+	resetLater := measured.Add(72 * time.Hour)
+	intPtr := func(v int) *int { return &v }
+
+	var (
+		snapMu sync.Mutex
+		snap   = &quota.Snapshot{
+			MeasuredAt: measured,
+			Pools: map[string]quota.PoolSnapshot{
+				"claude": {WeeklyRemainingPercent: 0, WeeklyResetAt: &resetLater, ShortRemainingPercent: intPtr(50), MeasuredAt: measured},
+				"codex":  {WeeklyRemainingPercent: 40, WeeklyResetAt: &resetSooner, ShortRemainingPercent: intPtr(0), MeasuredAt: measured},
+			},
+		}
+	)
+
+	checker := NewGateChecker(GateCheckerOptions{
+		Store:      st,
+		GateMode:   config.GateModeEnforce,
+		StaleAfter: 45 * time.Minute,
+		Pools: map[string]config.PoolConfig{
+			"claude": {Provider: "claude-usage"},
+			"codex":  {Provider: "codex-usage"},
+		},
+		Now:    func() time.Time { return now },
+		Logger: discardLogger(),
+		SnapshotLoader: func() (*quota.Snapshot, error) {
+			snapMu.Lock()
+			defer snapMu.Unlock()
+			return snap, nil
+		},
+	})
+
+	// 1. Hold a normal job with pool=claude, alt_pools=[codex].
+	hOK, _, err := st.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "gc-rel-ok",
+		Pool:      "claude",
+		AltPools:  []string{"codex"},
+		Payload: store.CreateJobParams{
+			RequestID:    "gc-rel-ok",
+			Title:        "Recoverable Held Job",
+			Agent:        "claude",
+			Host:         "ubuntu",
+			Workdir:      "/work/repo",
+			Instructions: "do it",
+			Pool:         "claude",
+			AltPools:     []string{"codex"},
+		},
+		Reason: "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob hOK: %v", err)
+	}
+
+	// 2. Hold a job referencing a missing parent so CreateJob fails on release.
+	missingParent := int64(999999)
+	hFail, _, err := st.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "gc-rel-fail",
+		Pool:      "claude",
+		Payload: store.CreateJobParams{
+			RequestID: "gc-rel-fail",
+			Title:     "Failing Release Job",
+			ParentID:  &missingParent,
+			Pool:      "claude",
+		},
+		Reason: "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob hFail: %v", err)
+	}
+
+	// While pools are exhausted, CheckOnce releases nothing.
+	if err := checker.CheckOnce(ctx); err != nil {
+		t.Fatalf("CheckOnce (exhausted): %v", err)
+	}
+	gotOK, _ := st.GetHeldJob(ctx, hOK.ID)
+	if gotOK.Status != store.HeldStatusHeld {
+		t.Fatalf("hOK status while exhausted = %s, want held", gotOK.Status)
+	}
+
+	// Swap snapshot: BOTH claude (reset +72h) and codex (reset +12h) recover -> codex must be picked (soonest weekly reset).
+	snapMu.Lock()
+	snap = &quota.Snapshot{
+		MeasuredAt: measured,
+		Pools: map[string]quota.PoolSnapshot{
+			"claude": {WeeklyRemainingPercent: 80, WeeklyResetAt: &resetLater, ShortRemainingPercent: intPtr(90), MeasuredAt: measured},
+			"codex":  {WeeklyRemainingPercent: 40, WeeklyResetAt: &resetSooner, ShortRemainingPercent: intPtr(70), MeasuredAt: measured},
+		},
+	}
+	snapMu.Unlock()
+
+	if err := checker.CheckOnce(ctx); err != nil {
+		t.Fatalf("CheckOnce (recovered): %v", err)
+	}
+
+	// Verify hOK was released to a job using codex (soonest weekly reset).
+	gotOK, err = st.GetHeldJob(ctx, hOK.ID)
+	if err != nil {
+		t.Fatalf("GetHeldJob hOK: %v", err)
+	}
+	if gotOK.Status != store.HeldStatusReleased || gotOK.ReleasedJobID == nil || gotOK.ReleasedPool != "codex" {
+		t.Fatalf("hOK after recovery = %+v, want released pool=codex", gotOK)
+	}
+	createdJob, err := st.GetJob(ctx, *gotOK.ReleasedJobID)
+	if err != nil {
+		t.Fatalf("GetJob released: %v", err)
+	}
+	if createdJob.RequestID != "gc-rel-ok" || createdJob.Pool != "codex" || createdJob.Title != "Recoverable Held Job" {
+		t.Errorf("createdJob = %+v", createdJob)
+	}
+
+	// Verify hFail remained held with last_error recorded and error_count=1.
+	gotFail, err := st.GetHeldJob(ctx, hFail.ID)
+	if err != nil {
+		t.Fatalf("GetHeldJob hFail: %v", err)
+	}
+	if gotFail.Status != store.HeldStatusHeld || !strings.Contains(gotFail.LastError, "parent") || gotFail.ErrorCount != 1 {
+		t.Fatalf("hFail after 1st failure = %+v", gotFail)
+	}
+
+	// Running CheckOnce again with the SAME failure does not inflate error_count (deduped).
+	if err := checker.CheckOnce(ctx); err != nil {
+		t.Fatalf("CheckOnce (2nd failure): %v", err)
+	}
+	gotFail2, err := st.GetHeldJob(ctx, hFail.ID)
+	if err != nil {
+		t.Fatalf("GetHeldJob hFail 2: %v", err)
+	}
+	if gotFail2.Status != store.HeldStatusHeld || gotFail2.ErrorCount != 1 || gotFail2.LastError != gotFail.LastError {
+		t.Errorf("hFail after 2nd identical failure = %+v, want error_count=1", gotFail2)
 	}
 }

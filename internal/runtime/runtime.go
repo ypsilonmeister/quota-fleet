@@ -12,10 +12,11 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
+	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
-// Options configures the resident Runtime bundle (Dispatcher, Launcher, Shepherd, Reconciler).
+// Options configures the resident Runtime bundle (Dispatcher, Launcher, Shepherd, Reconciler, GateChecker).
 type Options struct {
 	Store             *store.Store
 	Adapter           adapter.Adapter
@@ -32,16 +33,23 @@ type Options struct {
 	ReconcileInterval time.Duration
 	StaleClaimedAfter time.Duration
 	SignalMaxBytes    int64
+	GateMode          string
+	QuotaUsageFile    string
+	QuotaStaleAfter   time.Duration
+	GateCheckInterval time.Duration
+	Pools             map[string]config.PoolConfig
+	SnapshotLoader    func() (*quota.Snapshot, error)
 	Now               func() time.Time
 	Logger            *log.Logger
 }
 
 // Runtime bundles and coordinates the lifecycle of all resident components.
 type Runtime struct {
-	Dispatcher *Dispatcher
-	Launcher   *Launcher
-	Shepherd   *Shepherd
-	Reconciler *Reconciler
+	Dispatcher  *Dispatcher
+	Launcher    *Launcher
+	Shepherd    *Shepherd
+	Reconciler  *Reconciler
+	GateChecker *GateChecker
 
 	notifyCh chan struct{}
 	logger   *log.Logger
@@ -155,18 +163,30 @@ func New(opts Options) (*Runtime, error) {
 		Now:               opts.Now,
 		Logger:            logger,
 	})
+	gateChecker := NewGateChecker(GateCheckerOptions{
+		Store:          opts.Store,
+		GateMode:       opts.GateMode,
+		UsageFile:      opts.QuotaUsageFile,
+		StaleAfter:     opts.QuotaStaleAfter,
+		Pools:          opts.Pools,
+		Interval:       opts.GateCheckInterval,
+		Now:            opts.Now,
+		Logger:         logger,
+		SnapshotLoader: opts.SnapshotLoader,
+	})
 
 	return &Runtime{
-		Dispatcher: dispatcher,
-		Launcher:   launcher,
-		Shepherd:   shepherd,
-		Reconciler: reconciler,
-		notifyCh:   notifyCh,
-		logger:     logger,
+		Dispatcher:  dispatcher,
+		Launcher:    launcher,
+		Shepherd:    shepherd,
+		Reconciler:  reconciler,
+		GateChecker: gateChecker,
+		notifyCh:    notifyCh,
+		logger:      logger,
 	}, nil
 }
 
-// Start launches Dispatcher, Launcher, Shepherd, and Reconciler in background goroutines.
+// Start launches Dispatcher, Launcher, Shepherd, Reconciler, and (when enforce) GateChecker in background goroutines.
 // Call Stop to gracefully shut down and wait for all goroutines to exit.
 func (r *Runtime) Start(ctx context.Context) error {
 	r.mu.Lock()
@@ -187,6 +207,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 		{"launcher", r.Launcher.Run},
 		{"shepherd", r.Shepherd.Run},
 		{"reconciler", r.Reconciler.Run},
+	}
+	if r.GateChecker != nil && r.GateChecker.Enabled() {
+		components = append(components, struct {
+			name string
+			fn   func(context.Context) error
+		}{"gate", r.GateChecker.Run})
 	}
 
 	for _, comp := range components {

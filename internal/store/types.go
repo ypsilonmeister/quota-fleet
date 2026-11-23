@@ -53,6 +53,7 @@ var (
 	ErrConflict           = errors.New("status conflict")
 	ErrTokenMismatch      = errors.New("claim token mismatch")
 	ErrInstanceIDMismatch = errors.New("instance_id mismatch")
+	ErrJobAlreadyExists   = errors.New("job already exists for request_id")
 )
 
 // WorktreeSpec defines optional git worktree creation parameters for a job.
@@ -92,21 +93,21 @@ type Job struct {
 
 // CreateJobParams holds input fields for CreateJob.
 type CreateJobParams struct {
-	RequestID          string
-	Title              string
-	Draft              bool
-	Agent              string
-	Host               string
-	Workdir            string
-	WorktreeSpec       *WorktreeSpec
-	TargetRef          string
-	Instructions       string
-	AcceptanceCriteria string
-	ParentID           *int64
-	Model              string
-	Pool               string
-	AltPools           []string
-	SessionID          string
+	RequestID          string        `json:"request_id"`
+	Title              string        `json:"title"`
+	Draft              bool          `json:"draft,omitempty"`
+	Agent              string        `json:"agent,omitempty"`
+	Host               string        `json:"host,omitempty"`
+	Workdir            string        `json:"workdir,omitempty"`
+	WorktreeSpec       *WorktreeSpec `json:"worktree_spec,omitempty"`
+	TargetRef          string        `json:"target_ref,omitempty"`
+	Instructions       string        `json:"instructions,omitempty"`
+	AcceptanceCriteria string        `json:"acceptance_criteria,omitempty"`
+	ParentID           *int64        `json:"parent_id,omitempty"`
+	Model              string        `json:"model,omitempty"`
+	Pool               string        `json:"pool,omitempty"`
+	AltPools           []string      `json:"alt_pools,omitempty"`
+	SessionID          string        `json:"session_id,omitempty"`
 }
 
 // CompleteResult holds the outcome of Complete.
@@ -160,6 +161,8 @@ type OutboxEvent struct {
 type GateDecision struct {
 	ID            int64
 	JobID         int64
+	HeldID        string
+	Held          bool
 	Mode          string
 	RequestedPool string
 	AltPools      []string
@@ -170,4 +173,53 @@ type GateDecision struct {
 	Reason        string
 	MeasuredAt    *time.Time
 	DecidedAt     time.Time
+}
+
+// HeldStatus represents the lifecycle state of a held_jobs entry.
+type HeldStatus string
+
+const (
+	HeldStatusHeld      HeldStatus = "held"
+	HeldStatusReleased  HeldStatus = "released"
+	HeldStatusCancelled HeldStatus = "cancelled"
+)
+
+// Valid reports whether s is a valid HeldStatus.
+func (s HeldStatus) Valid() bool {
+	switch s {
+	case HeldStatusHeld, HeldStatusReleased, HeldStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// HeldJob represents a row in held_jobs persisted by Quota Gate in enforce mode.
+type HeldJob struct {
+	ID              string
+	RequestID       string
+	Status          HeldStatus
+	Pool            string
+	AltPools        []string
+	Payload         CreateJobParams
+	Reason          string
+	SnapshotSummary string
+	ReleasedJobID   *int64
+	ReleasedPool    string
+	ReleasedAt      *time.Time
+	CancelledAt     *time.Time
+	LastError       string
+	ErrorCount      int
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// HoldJobParams holds input fields for HoldJob.
+type HoldJobParams struct {
+	RequestID       string
+	Pool            string
+	AltPools        []string
+	Payload         CreateJobParams
+	Reason          string
+	SnapshotSummary string
 }

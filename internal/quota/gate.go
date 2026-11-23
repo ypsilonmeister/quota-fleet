@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -268,6 +269,108 @@ func EvaluateFromFile(usageFile, primaryPool string, altPools []string, opts Eva
 		return eval, err
 	}
 	return EvaluateGate(primaryPool, altPools, snap, opts), nil
+}
+
+// ShouldHoldOnEnforce reports whether eval should hold the job in gate_mode=enforce.
+//
+// Hold policy:
+//   - Never hold if a healthy pool was selected or an unmeasured pool bypassed measurement.
+//   - Hold if all candidate pools are exhausted (DecisionWouldHold) or stale (PoolUnknown with ReasonStale),
+//     including mixed combinations of exhausted and stale candidates.
+//   - Do NOT hold if any candidate is provisional unknown (e.g. short_window_null), pool_not_found,
+//     or snapshot_error; those proceed and record an unknown decision for operator visibility.
+func ShouldHoldOnEnforce(eval GateEvaluation) bool {
+	if eval.Bypassed || eval.Decision == DecisionWouldPass {
+		return false
+	}
+	if eval.Decision == DecisionWouldHold {
+		return true
+	}
+	if len(eval.Pools) == 0 {
+		return false
+	}
+	for _, p := range eval.Pools {
+		if p.Status == PoolExhausted {
+			continue
+		}
+		if p.Status == PoolUnknown && p.Reason == ReasonStale {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// FormatHoldReason builds a concise machine- and human-readable hold reason from eval.
+func FormatHoldReason(eval GateEvaluation) string {
+	if eval.Decision == DecisionWouldHold {
+		if eval.BlockedBy != "" {
+			return "exhausted:" + eval.BlockedBy
+		}
+		return "exhausted"
+	}
+	if eval.Reason != "" {
+		return eval.Reason
+	}
+	return string(eval.Decision)
+}
+
+type poolSnapshotSummary struct {
+	Pool                   string           `json:"pool"`
+	Status                 PoolHealthStatus `json:"status"`
+	BlockedBy              string           `json:"blocked_by,omitempty"`
+	Reason                 string           `json:"reason,omitempty"`
+	WeeklyRemainingPercent *int             `json:"weekly_remaining_percent,omitempty"`
+	WeeklyResetAt          *time.Time       `json:"weekly_reset_at,omitempty"`
+	ShortRemainingPercent  *int             `json:"short_remaining_percent,omitempty"`
+	ShortResetAt           *time.Time       `json:"short_reset_at,omitempty"`
+	ServiceStale           bool             `json:"service_stale,omitempty"`
+}
+
+type evaluationSnapshotSummary struct {
+	MeasuredAt *time.Time            `json:"measured_at,omitempty"`
+	DecidedAt  time.Time             `json:"decided_at"`
+	Decision   DecisionKind          `json:"decision"`
+	BlockedBy  string                `json:"blocked_by,omitempty"`
+	Reason     string                `json:"reason,omitempty"`
+	Pools      []poolSnapshotSummary `json:"pools,omitempty"`
+}
+
+// SummarizeEvaluation serializes a compact JSON summary of the snapshot and pool
+// states observed at gate decision time for persistence on held_jobs.
+func SummarizeEvaluation(eval GateEvaluation) string {
+	summary := evaluationSnapshotSummary{
+		MeasuredAt: eval.MeasuredAt,
+		DecidedAt:  eval.DecidedAt,
+		Decision:   eval.Decision,
+		BlockedBy:  eval.BlockedBy,
+		Reason:     eval.Reason,
+	}
+	if len(eval.Pools) > 0 {
+		summary.Pools = make([]poolSnapshotSummary, 0, len(eval.Pools))
+		for _, p := range eval.Pools {
+			ps := poolSnapshotSummary{
+				Pool:      p.Pool,
+				Status:    p.Status,
+				BlockedBy: p.BlockedBy,
+				Reason:    p.Reason,
+			}
+			if p.Snapshot != nil {
+				w := p.Snapshot.WeeklyRemainingPercent
+				ps.WeeklyRemainingPercent = &w
+				ps.WeeklyResetAt = p.Snapshot.WeeklyResetAt
+				ps.ShortRemainingPercent = p.Snapshot.ShortRemainingPercent
+				ps.ShortResetAt = p.Snapshot.ShortResetAt
+				ps.ServiceStale = p.Snapshot.ServiceStale
+			}
+			summary.Pools = append(summary.Pools, ps)
+		}
+	}
+	b, err := json.Marshal(summary)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // ResolvePoolByAppliesTo finds the first pool (in sorted pool-name order) whose
