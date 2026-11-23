@@ -169,9 +169,8 @@ func BuildMatrix(cfg *config.Config, rows []*store.AgentVersion) Matrix {
 			LimitationNote:    LimitationNote,
 		}
 
-		unpinnedVersions := make(map[string]struct{})
 		allOKVersions := make(map[string]struct{})
-		unpinnedOKCells := make([]int, 0, len(hosts))
+		allOKCells := make([]int, 0, len(hosts))
 
 		for _, h := range hosts {
 			idx := cellIdx[key{host: h, agent: a}]
@@ -183,45 +182,37 @@ func BuildMatrix(cfg *config.Config, rows []*store.AgentVersion) Matrix {
 			case store.AgentVersionStatusOK:
 				if c.Version != "" {
 					allOKVersions[c.Version] = struct{}{}
-					if !c.Pinned {
-						unpinnedVersions[c.Version] = struct{}{}
-						unpinnedOKCells = append(unpinnedOKCells, idx)
-					}
+					allOKCells = append(allOKCells, idx)
 				}
 			case store.AgentVersionStatusNotFound, store.AgentVersionStatusError:
 				summary.FailedHosts = append(summary.FailedHosts, h)
 			}
 		}
 
-		// Collect sorted distinct unpinned ok versions.
-		for v := range unpinnedVersions {
+		// Collect sorted distinct ok versions across all hosts (including pinned).
+		for v := range allOKVersions {
 			summary.Versions = append(summary.Versions, v)
 		}
 		sort.Strings(summary.Versions)
 
 		// Drift rule (docs/08 §3):
-		// Drift exists when 2+ distinct normalized ok versions exist among unpinned hosts.
-		// Pinned hosts are excluded from lag/drift notifications and clearly marked as pinned.
-		if len(unpinnedVersions) >= 2 {
+		// Drift exists when 2+ distinct normalized ok versions exist across hosts.
+		// Pinned hosts still participate in drift detection and max version calculation,
+		// and are excluded ONLY from lag ("遅れ") classification/notifications.
+		if len(allOKVersions) >= 2 {
 			summary.Drifted = true
 			hasDrift = true
 		}
 
-		// Determine semver comparability and max version among unpinned ok hosts
-		// (falling back to all ok hosts for display max_version if all ok hosts are pinned).
-		versionPool := unpinnedVersions
-		if len(versionPool) == 0 {
-			versionPool = allOKVersions
-		}
-
-		if len(versionPool) > 0 {
+		// Determine semver comparability and max version across all ok hosts.
+		if len(allOKVersions) > 0 {
 			allSemver := true
 			var (
 				maxSV  Semver
 				maxStr string
 				hasMax bool
 			)
-			for v := range versionPool {
+			for v := range allOKVersions {
 				sv, ok := ParseSemver(v)
 				if !ok {
 					allSemver = false
@@ -238,10 +229,14 @@ func BuildMatrix(cfg *config.Config, rows []*store.AgentVersion) Matrix {
 				summary.MaxVersion = maxStr
 			}
 
-			// Mark Comparable and Behind on each unpinned ok cell.
-			for _, idx := range unpinnedOKCells {
+			// Mark Comparable on every ok cell, and Behind only on unpinned ok cells below max.
+			for _, idx := range allOKCells {
 				c := &cells[idx]
 				c.Comparable = allSemver
+				if c.Pinned {
+					c.Behind = false
+					continue
+				}
 				if allSemver && hasMax {
 					if sv, ok := ParseSemver(c.Version); ok && CompareSemver(sv, maxSV) < 0 {
 						c.Behind = true
@@ -250,16 +245,6 @@ func BuildMatrix(cfg *config.Config, rows []*store.AgentVersion) Matrix {
 							summary.ManualUpdateHosts = append(summary.ManualUpdateHosts, c.Host)
 						}
 					}
-				}
-			}
-			// Mark Comparable on pinned ok cells too (for display info), but NEVER Behind.
-			for _, h := range hosts {
-				idx := cellIdx[key{host: h, agent: a}]
-				c := &cells[idx]
-				if c.Pinned && c.Status == store.AgentVersionStatusOK {
-					_, ok := ParseSemver(c.Version)
-					c.Comparable = ok
-					c.Behind = false
 				}
 			}
 		}

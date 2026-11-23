@@ -206,6 +206,146 @@ func (s *Store) RecordAgentVersionEvent(ctx context.Context, ev AgentVersionEven
 	return recorded, nil
 }
 
+// ApplyAgentVersionSnapshot atomically reads the current agent_versions rows inside a single
+// BEGIN IMMEDIATE transaction, upserts all probed versions, reads the resulting agent_versions rows,
+// invokes buildEvents(prevRows, nextRows), and inserts all returned events into agent_version_events.
+// If any step fails or ctx is cancelled before commit, both state updates and events roll back together.
+func (s *Store) ApplyAgentVersionSnapshot(
+	ctx context.Context,
+	probed []AgentVersion,
+	buildEvents func(prevRows, nextRows []*AgentVersion) ([]AgentVersionEvent, error),
+) ([]*AgentVersion, []*AgentVersionEvent, error) {
+	// Validate inputs before starting the transaction.
+	normalized := make([]AgentVersion, len(probed))
+	for i, v := range probed {
+		host := strings.TrimSpace(v.Host)
+		agent := strings.TrimSpace(v.Agent)
+		if host == "" || agent == "" {
+			return nil, nil, fmt.Errorf("%w: host and agent must not be empty", ErrInvalidInput)
+		}
+		if !v.Status.Valid() {
+			return nil, nil, fmt.Errorf("%w: invalid agent version status %q", ErrInvalidInput, v.Status)
+		}
+		checkedAt := v.CheckedAt
+		if checkedAt.IsZero() {
+			checkedAt = time.Now().UTC()
+		}
+		v.Host = host
+		v.Agent = agent
+		v.CheckedAt = checkedAt.UTC()
+		normalized[i] = v
+	}
+
+	var (
+		allRows  []*AgentVersion
+		recorded []*AgentVersionEvent
+	)
+	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		prevRows, err := listAgentVersionsConn(ctx, conn)
+		if err != nil {
+			return fmt.Errorf("list previous agent versions: %w", err)
+		}
+
+		for _, v := range normalized {
+			if _, err := conn.ExecContext(ctx, `
+				INSERT INTO agent_versions (host, agent, version_raw, version, status, error_detail, checked_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(host, agent) DO UPDATE SET
+					version_raw = excluded.version_raw,
+					version = excluded.version,
+					status = excluded.status,
+					error_detail = excluded.error_detail,
+					checked_at = excluded.checked_at
+			`, v.Host, v.Agent, v.VersionRaw, v.Version, string(v.Status), v.ErrorDetail, formatTime(v.CheckedAt)); err != nil {
+				return fmt.Errorf("upsert agent version (%s/%s): %w", v.Host, v.Agent, err)
+			}
+		}
+
+		nextRows, err := listAgentVersionsConn(ctx, conn)
+		if err != nil {
+			return fmt.Errorf("list updated agent versions: %w", err)
+		}
+
+		var events []AgentVersionEvent
+		if buildEvents != nil {
+			events, err = buildEvents(prevRows, nextRows)
+			if err != nil {
+				return err
+			}
+		}
+
+		recSlice := make([]*AgentVersionEvent, 0, len(events))
+		for _, ev := range events {
+			if !ev.EventType.Valid() {
+				return fmt.Errorf("%w: invalid agent version event type %q", ErrInvalidInput, ev.EventType)
+			}
+			agent := strings.TrimSpace(ev.Agent)
+			if agent == "" {
+				return fmt.Errorf("%w: agent must not be empty", ErrInvalidInput)
+			}
+			createdAt := ev.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = time.Now().UTC()
+			}
+			manualInt := 0
+			if ev.ManualUpdate {
+				manualInt = 1
+			}
+			host := strings.TrimSpace(ev.Host)
+			res, err := conn.ExecContext(ctx, `
+				INSERT INTO agent_version_events (event_type, agent, host, old_version, new_version, detail, manual_update, created_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`, string(ev.EventType), agent, host, ev.OldVersion, ev.NewVersion, ev.Detail, manualInt, formatTime(createdAt))
+			if err != nil {
+				return fmt.Errorf("record agent version event (%s/%s): %w", ev.EventType, agent, err)
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				return err
+			}
+			cp := ev
+			cp.ID = id
+			cp.Agent = agent
+			cp.Host = host
+			cp.CreatedAt = createdAt.UTC()
+			recSlice = append(recSlice, &cp)
+		}
+
+		allRows = nextRows
+		recorded = recSlice
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return allRows, recorded, nil
+}
+
+func listAgentVersionsConn(ctx context.Context, conn *sql.Conn) ([]*AgentVersion, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT host, agent, version_raw, version, status, error_detail, checked_at
+		FROM agent_versions
+		ORDER BY host ASC, agent ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*AgentVersion
+	for rows.Next() {
+		v, err := scanAgentVersion(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ListAgentVersionEvents returns events from agent_version_events ordered by newest first (id DESC).
 // When filter.Since is set, only events with created_at strictly after filter.Since are returned.
 func (s *Store) ListAgentVersionEvents(ctx context.Context, filter AgentVersionEventsFilter) ([]*AgentVersionEvent, error) {

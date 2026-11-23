@@ -88,30 +88,16 @@ func NewChecker(opts CheckerOptions) (*Checker, error) {
 	}, nil
 }
 
-// Check probes every configured host × resolvable agent, updates agent_versions,
-// records change/drift/failure events in agent_version_events, and invokes OnEvent for each.
+// Check probes every configured host × resolvable agent, atomically persists agent_versions
+// and change/drift/failure events in agent_version_events within a single transaction, and
+// invokes OnEvent for each event after commit.
 func (c *Checker) Check(ctx context.Context) (*CheckResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	prevRows, err := c.store.ListAgentVersions(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list previous agent versions: %w", err)
-	}
-	prevMatrix := BuildMatrix(c.cfg, prevRows)
-
-	type pairKey struct {
-		host  string
-		agent string
-	}
-	prevByKey := make(map[pairKey]*store.AgentVersion, len(prevRows))
-	for _, r := range prevRows {
-		prevByKey[pairKey{host: r.Host, agent: r.Agent}] = r
-	}
-
 	hosts, agents := configuredHostsAndAgents(c.cfg)
-	var newEvents []store.AgentVersionEvent
+	probed := make([]store.AgentVersion, 0, len(hosts)*len(agents))
 
 	for _, hostName := range hosts {
 		if err := ctx.Err(); err != nil {
@@ -137,43 +123,52 @@ func (c *Checker) Check(ctx context.Context) (*CheckResult, error) {
 			} else {
 				next = c.probeOne(ctx, fa, hostName, hostCfg, agentName, now)
 			}
+			probed = append(probed, next)
+		}
+	}
 
-			if err := c.store.UpsertAgentVersion(ctx, next); err != nil {
-				return nil, fmt.Errorf("upsert agent version (%s/%s): %w", hostName, agentName, err)
-			}
+	type pairKey struct {
+		host  string
+		agent string
+	}
 
-			_, manual := resolvePolicy(c.cfg, hostName, agentName)
-			prev := prevByKey[pairKey{host: hostName, agent: agentName}]
+	allRows, recorded, err := c.store.ApplyAgentVersionSnapshot(ctx, probed, func(prevRows, nextRows []*store.AgentVersion) ([]store.AgentVersionEvent, error) {
+		prevMatrix := BuildMatrix(c.cfg, prevRows)
+		nextMatrix := BuildMatrix(c.cfg, nextRows)
+
+		prevByKey := make(map[pairKey]*store.AgentVersion, len(prevRows))
+		for _, r := range prevRows {
+			prevByKey[pairKey{host: r.Host, agent: r.Agent}] = r
+		}
+
+		var newEvents []store.AgentVersionEvent
+		for _, next := range probed {
+			_, manual := resolvePolicy(c.cfg, next.Host, next.Agent)
+			prev := prevByKey[pairKey{host: next.Host, agent: next.Agent}]
 			if ev, ok := diffCellEvent(prev, next, manual); ok {
 				newEvents = append(newEvents, ev)
 			}
 		}
-	}
 
-	allRows, err := c.store.ListAgentVersions(ctx)
+		prevSumByAgent := make(map[string]AgentSummary, len(prevMatrix.Summaries))
+		for _, s := range prevMatrix.Summaries {
+			prevSumByAgent[s.Agent] = s
+		}
+		eventTime := c.now().UTC()
+		for _, nextSum := range nextMatrix.Summaries {
+			prevSum := prevSumByAgent[nextSum.Agent]
+			if ev, ok := diffDriftEvent(prevSum, nextSum, eventTime); ok {
+				newEvents = append(newEvents, ev)
+			}
+		}
+		return newEvents, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("list updated agent versions: %w", err)
+		return nil, err
 	}
+
 	nextMatrix := BuildMatrix(c.cfg, allRows)
-
-	prevSumByAgent := make(map[string]AgentSummary, len(prevMatrix.Summaries))
-	for _, s := range prevMatrix.Summaries {
-		prevSumByAgent[s.Agent] = s
-	}
-	for _, nextSum := range nextMatrix.Summaries {
-		prevSum := prevSumByAgent[nextSum.Agent]
-		if ev, ok := diffDriftEvent(prevSum, nextSum, c.now().UTC()); ok {
-			newEvents = append(newEvents, ev)
-		}
-	}
-
-	recorded := make([]*store.AgentVersionEvent, 0, len(newEvents))
-	for _, ev := range newEvents {
-		rec, err := c.store.RecordAgentVersionEvent(ctx, ev)
-		if err != nil {
-			return nil, fmt.Errorf("record agent version event (%s/%s): %w", ev.EventType, ev.Agent, err)
-		}
-		recorded = append(recorded, rec)
+	for _, rec := range recorded {
 		if c.onEvent != nil {
 			c.onEvent(ctx, rec)
 		}
@@ -186,7 +181,7 @@ func (c *Checker) Check(ctx context.Context) (*CheckResult, error) {
 }
 
 func (c *Checker) probeOne(ctx context.Context, fa adapter.FileAccess, hostName string, hostCfg config.HostConfig, agentName string, now time.Time) store.AgentVersion {
-	cmd, err := buildAgentVersionCommand(c.cfg, hostCfg, agentName)
+	cmd, targetExe, err := buildAgentVersionCommand(c.cfg, hostCfg, agentName)
 	if err != nil {
 		return store.AgentVersion{
 			Host:        hostName,
@@ -201,10 +196,10 @@ func (c *Checker) probeOne(ctx context.Context, fa adapter.FileAccess, hostName 
 	defer cancel()
 
 	res, runErr := fa.RunCommand(probeCtx, cmd)
-	return classifyProbeResult(hostName, agentName, res, runErr, now)
+	return classifyProbeResult(hostName, agentName, targetExe, res, runErr, now)
 }
 
-func buildAgentVersionCommand(cfg *config.Config, hostCfg config.HostConfig, agentName string) (string, error) {
+func buildAgentVersionCommand(cfg *config.Config, hostCfg config.HostConfig, agentName string) (string, string, error) {
 	driver, err := adapter.ResolveDriver(cfg, hostCfg, agentName)
 	if err != nil {
 		// Allow agents that only specify a host command override or agent name without a launch template.
@@ -230,7 +225,11 @@ func buildAgentVersionCommand(cfg *config.Config, hostCfg config.HostConfig, age
 
 	versionArgs := resolveVersionArgs(cfg, hostCfg, agentName)
 	isWin := strings.EqualFold(strings.TrimSpace(hostCfg.OS), "windows")
-	return driver.BuildVersionCommand(versionArgs, isWin)
+	cmd, err := driver.BuildVersionCommand(versionArgs, isWin)
+	if err != nil {
+		return "", "", err
+	}
+	return cmd, driver.ResolveBaseCommand(), nil
 }
 
 func resolveVersionArgs(cfg *config.Config, hostCfg config.HostConfig, agentName string) []string {
@@ -247,7 +246,7 @@ func resolveVersionArgs(cfg *config.Config, hostCfg config.HostConfig, agentName
 	return nil
 }
 
-func classifyProbeResult(hostName, agentName string, res adapter.ExecResult, runErr error, now time.Time) store.AgentVersion {
+func classifyProbeResult(hostName, agentName, targetExe string, res adapter.ExecResult, runErr error, now time.Time) store.AgentVersion {
 	if runErr != nil {
 		detail := runErr.Error()
 		if trimmed := strings.TrimSpace(res.Output); trimmed != "" {
@@ -264,11 +263,7 @@ func classifyProbeResult(hostName, agentName string, res adapter.ExecResult, run
 
 	trimmedOut := strings.TrimSpace(res.Output)
 	if res.ExitCode != 0 {
-		if isCommandNotFound(res.ExitCode, trimmedOut) {
-			detail := trimmedOut
-			if detail == "" {
-				detail = fmt.Sprintf("command not found (exit %d)", res.ExitCode)
-			}
+		if detail, ok := detectTargetCommandNotFound(targetExe, res.ExitCode, trimmedOut); ok {
 			return store.AgentVersion{
 				Host:        hostName,
 				Agent:       agentName,
@@ -321,26 +316,63 @@ func classifyProbeResult(hostName, agentName string, res adapter.ExecResult, run
 	}
 }
 
-func isCommandNotFound(exitCode int, output string) bool {
-	if exitCode == 127 || exitCode == 9009 {
-		return true
-	}
-	lower := strings.ToLower(output)
-	patterns := []string{
-		"command not found",
-		": not found",
-		"is not recognized as the name of a cmdlet",
-		"is not recognized as a name of a cmdlet",
-		"is not recognized as an internal or external command",
-		"commandnotfoundexception",
-		"no such file or directory",
-	}
-	for _, p := range patterns {
-		if strings.Contains(lower, p) {
-			return true
+// detectTargetCommandNotFound distinguishes absence of the target executable itself from
+// runtime failures of an already-launched command (e.g., missing config files or missing
+// child dependencies inside a wrapper script).
+func detectTargetCommandNotFound(targetExe string, exitCode int, output string) (string, bool) {
+	// 1. Authoritative pre-check marker emitted by BuildVersionCommand before invoking targetExe.
+	if exitCode == 127 {
+		for _, line := range strings.Split(output, "\n") {
+			trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+			if strings.HasPrefix(trimmed, adapter.VersionProbeNotFoundMarker) {
+				missing := strings.TrimSpace(strings.TrimPrefix(trimmed, adapter.VersionProbeNotFoundMarker))
+				if missing == "" {
+					missing = strings.TrimSpace(targetExe)
+				}
+				if missing != "" {
+					return fmt.Sprintf("command not found: %s", missing), true
+				}
+				return "command not found (exit 127)", true
+			}
 		}
 	}
-	return false
+
+	// 2. Fallback for direct shell errors that explicitly name targetExe as unresolved.
+	// Bare exit codes (127/9009) and generic "no such file or directory" messages are
+	// intentionally NOT treated as not_found because an executed binary or wrapper can emit them.
+	exe := strings.ToLower(strings.TrimSpace(targetExe))
+	if exe == "" || output == "" {
+		return "", false
+	}
+
+	for _, rawLine := range strings.Split(output, "\n") {
+		line := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(rawLine, "\r")))
+		if line == "" {
+			continue
+		}
+		// POSIX sh / dash: "sh: 1: <exe>: not found" or "<exe>: not found"
+		if strings.HasSuffix(line, ": "+exe+": not found") || line == exe+": not found" {
+			return output, true
+		}
+		// bash / zsh: "bash: <exe>: command not found", "bash: line 1: <exe>: command not found",
+		// "zsh: command not found: <exe>", "<exe>: command not found"
+		if strings.HasSuffix(line, ": "+exe+": command not found") ||
+			line == exe+": command not found" ||
+			strings.HasSuffix(line, "command not found: "+exe) {
+			return output, true
+		}
+		// PowerShell: "The term '<exe>' is not recognized as the name of a cmdlet..."
+		if strings.Contains(line, "the term '"+exe+"' is not recognized as the name of a cmdlet") ||
+			strings.Contains(line, "the term '"+exe+"' is not recognized as a name of a cmdlet") {
+			return output, true
+		}
+		// Windows cmd.exe: "'<exe>' is not recognized as an internal or external command"
+		if strings.Contains(line, "'"+exe+"' is not recognized as an internal or external command") {
+			return output, true
+		}
+	}
+
+	return "", false
 }
 
 func diffCellEvent(prev *store.AgentVersion, next store.AgentVersion, manualUpdate bool) (store.AgentVersionEvent, bool) {

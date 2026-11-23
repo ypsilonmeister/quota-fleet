@@ -205,8 +205,14 @@ func (d AgentDriver) ResolveBaseCommand() string {
 	return strings.TrimSpace(d.Name)
 }
 
+// VersionProbeNotFoundMarker is emitted by BuildVersionCommand when the target executable
+// cannot be resolved before invocation, distinguishing command absence from runtime failures.
+const VersionProbeNotFoundMarker = "__QUOTA_FLEET_CMD_NOT_FOUND__:"
+
 // BuildVersionCommand builds the shell command passed to FileAccess.RunCommand
 // to query the agent's version (`<command> <version_args...>`), defaulting to `--version`.
+// Before executing the target command, it checks whether the target executable can be resolved
+// and emits VersionProbeNotFoundMarker with exit code 127 only when the executable itself is absent.
 // On Windows, it returns PowerShell statements suitable for windowsFileAccess.RunCommand.
 func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (string, error) {
 	exe := d.ResolveBaseCommand()
@@ -221,8 +227,13 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 	if isWindows {
 		var stmts []string
 		stmts = append(stmts, formatPowerShellEnvAssigns(d.Env)...)
+		exeExpr := psExpr(exe)
+		stmts = append(stmts, fmt.Sprintf(
+			"if (-not (Get-Command %s -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath %s)) { [Console]::Error.WriteLine(%s + ' ' + %s); exit 127 }",
+			exeExpr, exeExpr, psExpr(VersionProbeNotFoundMarker), exeExpr,
+		))
 		psTokens := make([]string, 0, 1+len(args))
-		psTokens = append(psTokens, psExpr(exe))
+		psTokens = append(psTokens, exeExpr)
 		for _, a := range args {
 			psTokens = append(psTokens, psExpr(a))
 		}
@@ -230,8 +241,22 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 		return strings.Join(stmts, "; "), nil
 	}
 
+	exeToken := formatRemoteCommandToken(exe)
+	var preCheck string
+	if strings.Contains(exe, "/") {
+		preCheck = fmt.Sprintf(
+			"if [ ! -e %s ]; then printf '%%s %%s\\n' %s %s >&2; exit 127; fi",
+			exeToken, shellQuote(VersionProbeNotFoundMarker), shellQuote(exe),
+		)
+	} else {
+		preCheck = fmt.Sprintf(
+			"if ! command -v %s >/dev/null 2>&1; then printf '%%s %%s\\n' %s %s >&2; exit 127; fi",
+			exeToken, shellQuote(VersionProbeNotFoundMarker), shellQuote(exe),
+		)
+	}
+
 	parts := make([]string, 0, 1+len(args))
-	parts = append(parts, formatRemoteCommandToken(exe))
+	parts = append(parts, exeToken)
 	for _, a := range args {
 		if isSafeBareToken(a) {
 			parts = append(parts, a)
@@ -239,7 +264,7 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 			parts = append(parts, shellQuote(a))
 		}
 	}
-	cmd := strings.Join(parts, " ")
+	cmd := preCheck + "; " + strings.Join(parts, " ")
 	if len(d.Env) == 0 {
 		return cmd, nil
 	}

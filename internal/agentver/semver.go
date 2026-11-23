@@ -16,12 +16,15 @@ type Semver struct {
 }
 
 var (
-	semverExtractRe = regexp.MustCompile(`(?i)\bv?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b`)
-	semverExactRe   = regexp.MustCompile(`^[vV]?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$`)
+	// Strict SemVer 2.0.0 grammar with optional leading v/V:
+	// - major, minor, patch: 0 or [1-9][0-9]* (no leading zeros)
+	// - prerelease: dot-separated non-empty identifiers; numeric-only identifiers forbid leading zeros
+	// - build: dot-separated non-empty [0-9A-Za-z-]+ identifiers
+	semverExactRe = regexp.MustCompile(`^[vV]?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$`)
 )
 
 // NormalizeVersion extracts a normalized version string from raw command output.
-// If the first non-empty line contains a semver token (e.g. "2.1.76 (Claude Code)" or
+// If the first non-empty line contains a valid SemVer 2.0.0 token (e.g. "2.1.76 (Claude Code)" or
 // "codex-cli 0.169.0" or "v0.4.2"), that semver without leading "v" is returned.
 // Otherwise, the trimmed first non-empty line is returned verbatim so equality checks
 // still work without inventing a fake semver ordering.
@@ -30,13 +33,22 @@ func NormalizeVersion(raw string) string {
 	if line == "" {
 		return ""
 	}
-	if m := semverExtractRe.FindStringSubmatch(line); len(m) >= 2 {
-		return m[1]
+	for _, field := range strings.Fields(line) {
+		tok := strings.Trim(field, "()[]{},;\"'")
+		if tok == "" {
+			continue
+		}
+		if _, ok := ParseSemver(tok); ok {
+			if strings.HasPrefix(tok, "v") || strings.HasPrefix(tok, "V") {
+				return tok[1:]
+			}
+			return tok
+		}
 	}
 	return line
 }
 
-// ParseSemver parses s as a SemVer 2.0.0 version (allowing an optional leading 'v'/'V').
+// ParseSemver parses s as a strict SemVer 2.0.0 version (allowing an optional leading 'v'/'V').
 // Returns ok=false when s is not a valid semver string.
 func ParseSemver(s string) (Semver, bool) {
 	s = strings.TrimSpace(s)
@@ -91,15 +103,21 @@ func CompareSemver(a, b Semver) int {
 		if ap[i] == bp[i] {
 			continue
 		}
-		ai, aErr := strconv.Atoi(ap[i])
-		bi, bErr := strconv.Atoi(bp[i])
+		aNum := isAllDigits(ap[i])
+		bNum := isAllDigits(bp[i])
 		switch {
-		case aErr == nil && bErr == nil:
-			return cmpInt(ai, bi)
-		case aErr == nil && bErr != nil:
+		case aNum && bNum:
+			if len(ap[i]) != len(bp[i]) {
+				return cmpInt(len(ap[i]), len(bp[i]))
+			}
+			if ap[i] < bp[i] {
+				return -1
+			}
+			return 1
+		case aNum && !bNum:
 			// Numeric identifiers always have lower precedence than non-numeric identifiers.
 			return -1
-		case aErr != nil && bErr == nil:
+		case !aNum && bNum:
 			return 1
 		default:
 			if ap[i] < bp[i] {
@@ -109,6 +127,18 @@ func CompareSemver(a, b Semver) int {
 		}
 	}
 	return cmpInt(len(ap), len(bp))
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func cmpInt(a, b int) int {

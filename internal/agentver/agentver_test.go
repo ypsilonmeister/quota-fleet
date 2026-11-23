@@ -2,14 +2,19 @@ package agentver
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
+	_ "modernc.org/sqlite"
 )
 
 type fakeFileAccess struct {
@@ -109,7 +114,7 @@ func TestBuildMatrix_DriftAndPinExclusionAndNonSemver(t *testing.T) {
 		{Host: "ubuntu", Agent: "claude", Version: "2.1.76", Status: store.AgentVersionStatusOK, CheckedAt: now},
 		{Host: "ubuntu-vm", Agent: "claude", Version: "2.1.70", Status: store.AgentVersionStatusOK, CheckedAt: now},
 		{Host: "home-win", Agent: "claude", Version: "2.1.76", Status: store.AgentVersionStatusOK, CheckedAt: now},
-		// codex: ubuntu 0.171.0, ubuntu-vm 0.171.0, home-win 0.169.0 (PINNED) -> NO DRIFT!
+		// codex: ubuntu 0.171.0, ubuntu-vm 0.171.0, home-win 0.169.0 (PINNED) -> DRIFT detected, home-win excluded from lag!
 		{Host: "ubuntu", Agent: "codex", Version: "0.171.0", Status: store.AgentVersionStatusOK, CheckedAt: now},
 		{Host: "ubuntu-vm", Agent: "codex", Version: "0.171.0", Status: store.AgentVersionStatusOK, CheckedAt: now},
 		{Host: "home-win", Agent: "codex", Version: "0.169.0", Status: store.AgentVersionStatusOK, CheckedAt: now},
@@ -141,13 +146,20 @@ func TestBuildMatrix_DriftAndPinExclusionAndNonSemver(t *testing.T) {
 		t.Errorf("claude manual_update_hosts = %v, want [ubuntu-vm]", claudeSum.ManualUpdateHosts)
 	}
 
-	// Verify codex pin exclusion: home-win is pinned, so NO drift and NOT lagging.
+	// Verify codex pin rule (docs/08 §3): differing pinned host STILL triggers drift,
+	// while pin excludes home-win ONLY from lagging_hosts / Behind.
 	codexSum := sumByAgent["codex"]
-	if codexSum.Drifted {
-		t.Errorf("expected codex Drifted=false because only differing host is pinned, got %+v", codexSum)
+	if !codexSum.Drifted {
+		t.Errorf("expected codex Drifted=true even when only differing host is pinned, got %+v", codexSum)
+	}
+	if !codexSum.Comparable || codexSum.MaxVersion != "0.171.0" {
+		t.Errorf("expected codex Comparable=true MaxVersion=0.171.0, got %+v", codexSum)
+	}
+	if len(codexSum.Versions) != 2 || codexSum.Versions[0] != "0.169.0" || codexSum.Versions[1] != "0.171.0" {
+		t.Errorf("expected codex versions=[0.169.0 0.171.0], got %v", codexSum.Versions)
 	}
 	if len(codexSum.LaggingHosts) != 0 {
-		t.Errorf("expected codex lagging_hosts empty, got %v", codexSum.LaggingHosts)
+		t.Errorf("expected codex lagging_hosts empty (pinned host excluded from lag), got %v", codexSum.LaggingHosts)
 	}
 	if len(codexSum.PinnedHosts) != 1 || codexSum.PinnedHosts[0] != "home-win" {
 		t.Errorf("expected codex pinned_hosts=[home-win], got %v", codexSum.PinnedHosts)
@@ -254,16 +266,17 @@ func TestChecker_DriftLifecyclePinExclusionAndProbeFailures(t *testing.T) {
 		t.Fatalf("NewChecker: %v", err)
 	}
 
-	// Pass 1: all aligned (except home-win/codex which is pinned to 0.169.0).
+	// Pass 1: claude & agy aligned; home-win/codex is pinned at 0.169.0 while others are 0.171.0
+	// -> codex MUST be detected as drifted and record drift_started, with no lagging hosts.
 	res1, err := checker.Check(ctx)
 	if err != nil {
 		t.Fatalf("Check pass 1: %v", err)
 	}
-	if res1.Matrix.HasDrift {
-		t.Fatalf("pass 1: expected HasDrift=false (pinned host excluded), got summaries=%+v", res1.Matrix.Summaries)
+	if !res1.Matrix.HasDrift {
+		t.Fatalf("pass 1: expected HasDrift=true because codex has 0.169.0 (pinned) vs 0.171.0, got summaries=%+v", res1.Matrix.Summaries)
 	}
-	if len(res1.Events) != 0 {
-		t.Fatalf("pass 1: expected 0 events on clean initial probe, got %d: %+v", len(res1.Events), res1.Events)
+	if len(res1.Events) != 1 || res1.Events[0].EventType != store.AgentEventDriftStarted || res1.Events[0].Agent != "codex" || res1.Events[0].Host != "" {
+		t.Fatalf("pass 1: expected 1 drift_started event for codex with empty lagging host, got %+v", res1.Events)
 	}
 
 	// Pass 2: introduce drift on ubuntu-vm/claude (2.1.76 -> 2.1.70), and simulate not_found + error on agy.
@@ -371,8 +384,14 @@ func TestChecker_DriftLifecyclePinExclusionAndProbeFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check pass 3: %v", err)
 	}
-	if res3.Matrix.HasDrift {
-		t.Fatalf("pass 3: expected HasDrift=false after revert")
+	// claude drift is resolved, while codex remains drifted (pinned 0.169.0 vs 0.171.0).
+	for _, s := range res3.Matrix.Summaries {
+		if s.Agent == "claude" && s.Drifted {
+			t.Fatalf("pass 3: expected claude Drifted=false after revert, got %+v", s)
+		}
+		if s.Agent == "codex" && (!s.Drifted || len(s.LaggingHosts) != 0) {
+			t.Fatalf("pass 3: expected codex Drifted=true with 0 lagging hosts, got %+v", s)
+		}
 	}
 
 	var sawDriftResolved bool
@@ -391,7 +410,433 @@ func TestChecker_DriftLifecyclePinExclusionAndProbeFailures(t *testing.T) {
 	if sawRecovery != 2 {
 		t.Errorf("expected 2 probe recovery events, got %d", sawRecovery)
 	}
-	if len(hooked) != len(res2.Events)+len(res3.Events) {
-		t.Errorf("expected OnEvent hook called %d times, got %d", len(res2.Events)+len(res3.Events), len(hooked))
+	if len(hooked) != len(res1.Events)+len(res2.Events)+len(res3.Events) {
+		t.Errorf("expected OnEvent hook called %d times, got %d", len(res1.Events)+len(res2.Events)+len(res3.Events), len(hooked))
+	}
+}
+
+func TestProbeClassification_DistinguishesNotFoundFromRuntimeErrors(t *testing.T) {
+	now := time.Date(2026, 11, 24, 7, 30, 0, 0, time.UTC)
+
+	// 1. Direct classifyProbeResult cases.
+	cases := []struct {
+		name       string
+		targetExe  string
+		res        adapter.ExecResult
+		runErr     error
+		wantStatus store.AgentVersionStatus
+	}{
+		{
+			name:       "pre-check not found marker",
+			targetExe:  "agy",
+			res:        adapter.ExecResult{ExitCode: 127, Output: adapter.VersionProbeNotFoundMarker + " agy\n"},
+			wantStatus: store.AgentVersionStatusNotFound,
+		},
+		{
+			name:       "config missing file error must be error not not_found",
+			targetExe:  "claude",
+			res:        adapter.ExecResult{ExitCode: 1, Output: "config: no such file or directory"},
+			wantStatus: store.AgentVersionStatusError,
+		},
+		{
+			name:       "bare exit 127 without marker or target shell error must be error",
+			targetExe:  "claude",
+			res:        adapter.ExecResult{ExitCode: 127, Output: ""},
+			wantStatus: store.AgentVersionStatusError,
+		},
+		{
+			name:       "wrapper missing child dependency exit 127 must be error",
+			targetExe:  "/usr/local/bin/claude-wrapper",
+			res:        adapter.ExecResult{ExitCode: 127, Output: "sh: 1: missing-dep: not found"},
+			wantStatus: store.AgentVersionStatusError,
+		},
+		{
+			name:       "bare exit 9009 without target message must be error",
+			targetExe:  "codex",
+			res:        adapter.ExecResult{ExitCode: 9009, Output: "'helper' is not recognized as an internal or external command"},
+			wantStatus: store.AgentVersionStatusError,
+		},
+		{
+			name:       "direct sh not found naming target exe",
+			targetExe:  "agy",
+			res:        adapter.ExecResult{ExitCode: 127, Output: "sh: 1: agy: not found"},
+			wantStatus: store.AgentVersionStatusNotFound,
+		},
+		{
+			name:       "direct bash command not found naming target exe",
+			targetExe:  "codex",
+			res:        adapter.ExecResult{ExitCode: 127, Output: "bash: line 1: codex: command not found"},
+			wantStatus: store.AgentVersionStatusNotFound,
+		},
+		{
+			name:       "direct powershell not recognized naming target exe",
+			targetExe:  "codex",
+			res:        adapter.ExecResult{ExitCode: 1, Output: "codex : The term 'codex' is not recognized as the name of a cmdlet, function, script file, or operable program."},
+			wantStatus: store.AgentVersionStatusNotFound,
+		},
+		{
+			name:       "powershell not recognized naming different command must be error",
+			targetExe:  "codex",
+			res:        adapter.ExecResult{ExitCode: 1, Output: "helper : The term 'helper' is not recognized as the name of a cmdlet, function, script file, or operable program."},
+			wantStatus: store.AgentVersionStatusError,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyProbeResult("h1", "agent", tc.targetExe, tc.res, tc.runErr, now)
+			if got.Status != tc.wantStatus {
+				t.Errorf("classifyProbeResult() status = %q (detail=%q), want %q", got.Status, got.ErrorDetail, tc.wantStatus)
+			}
+			if got.Version != "" {
+				t.Errorf("failed probe must have empty version, got %q", got.Version)
+			}
+		})
+	}
+
+	// 2. End-to-end execution via LocalFileAccess + BuildVersionCommand.
+	dir := t.TempDir()
+	cfgFailBin := filepath.Join(dir, "cfg-fail")
+	if err := os.WriteFile(cfgFailBin, []byte("#!/bin/sh\necho 'config: no such file or directory' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write cfg-fail: %v", err)
+	}
+	wrapperMissingDepBin := filepath.Join(dir, "wrapper-missing-dep")
+	if err := os.WriteFile(wrapperMissingDepBin, []byte("#!/bin/sh\nmissing-inner-dep-xyz-999 --version\n"), 0o755); err != nil {
+		t.Fatalf("write wrapper-missing-dep: %v", err)
+	}
+	nonExecBin := filepath.Join(dir, "non-exec")
+	if err := os.WriteFile(nonExecBin, []byte("#!/bin/sh\necho 1.0.0\n"), 0o644); err != nil {
+		t.Fatalf("write non-exec: %v", err)
+	}
+	missingPathBin := filepath.Join(dir, "does-not-exist-bin")
+
+	st, err := store.Open(context.Background(), ":memory:", store.Options{InstanceID: "test"})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		InstanceID: "test",
+		Hosts: map[string]config.HostConfig{
+			"local": {
+				Transport: "local",
+				Agents: map[string]config.HostAgentOverride{
+					"cfg-fail":            {Command: cfgFailBin},
+					"wrapper-missing-dep": {Command: wrapperMissingDepBin},
+					"non-exec":            {Command: nonExecBin},
+					"missing-path":        {Command: missingPathBin},
+					"missing-bare":        {Command: "definitely-absent-agent-cmd-xyz"},
+				},
+			},
+		},
+		Agents: map[string]config.AgentConfig{
+			"cfg-fail":            {},
+			"wrapper-missing-dep": {},
+			"non-exec":            {},
+			"missing-path":        {},
+			"missing-bare":        {},
+		},
+	}
+
+	checker, err := NewChecker(CheckerOptions{
+		Store:  st,
+		Config: cfg,
+		Provider: &fakeHostProvider{
+			hosts: map[string]adapter.FileAccess{
+				"local": adapter.NewLocalFileAccess(dir),
+			},
+		},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewChecker: %v", err)
+	}
+
+	res, err := checker.Check(context.Background())
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	wantStatuses := map[string]store.AgentVersionStatus{
+		"cfg-fail":            store.AgentVersionStatusError,
+		"wrapper-missing-dep": store.AgentVersionStatusError,
+		"non-exec":            store.AgentVersionStatusError,
+		"missing-path":        store.AgentVersionStatusNotFound,
+		"missing-bare":        store.AgentVersionStatusNotFound,
+	}
+	for _, c := range res.Matrix.Entries {
+		want, ok := wantStatuses[c.Agent]
+		if !ok {
+			continue
+		}
+		if c.Status != want {
+			t.Errorf("agent %q status = %q (detail=%q), want %q", c.Agent, c.Status, c.ErrorDetail, want)
+		}
+	}
+}
+
+func TestBuildMatrix_PinMaxVersionAndStrictSemverValidation(t *testing.T) {
+	now := time.Date(2026, 11, 24, 7, 45, 0, 0, time.UTC)
+
+	// 1. Pinned host holds the highest version -> unpinned host MUST be detected as lagging.
+	cfgPinMax := &config.Config{
+		InstanceID: "test",
+		Hosts: map[string]config.HostConfig{
+			"ubuntu":   {},
+			"home-win": {Agents: map[string]config.HostAgentOverride{"codex": {Pin: "0.172.0"}}},
+		},
+		Agents: map[string]config.AgentConfig{"codex": {}},
+	}
+	rowsPinMax := []*store.AgentVersion{
+		{Host: "ubuntu", Agent: "codex", Version: "0.171.0", Status: store.AgentVersionStatusOK, CheckedAt: now},
+		{Host: "home-win", Agent: "codex", Version: "0.172.0", Status: store.AgentVersionStatusOK, CheckedAt: now},
+	}
+	mPinMax := BuildMatrix(cfgPinMax, rowsPinMax)
+	if !mPinMax.HasDrift || len(mPinMax.Summaries) != 1 {
+		t.Fatalf("expected HasDrift=true with 1 summary, got %+v", mPinMax)
+	}
+	s := mPinMax.Summaries[0]
+	if !s.Drifted || !s.Comparable || s.MaxVersion != "0.172.0" {
+		t.Errorf("unexpected summary when pinned host is max: %+v", s)
+	}
+	if len(s.LaggingHosts) != 1 || s.LaggingHosts[0] != "ubuntu" {
+		t.Errorf("expected ubuntu to lag behind pinned max 0.172.0, got lagging=%v", s.LaggingHosts)
+	}
+
+	// 2. Strict SemVer 2.0.0 rejection cases: invalid semver must NEVER be ordered.
+	invalidSemvers := []string{
+		"01.2.3",
+		"1.02.3",
+		"1.2.03",
+		"1.2.3-",
+		"1.2.3-01",
+		"1.2.3-alpha.01",
+		"1.2.3-alpha..1",
+		"1.2.3-.alpha",
+		"1.2.3-alpha.",
+		"1.2.3+",
+		"1.2.3+build..1",
+		"1.2.3+.build",
+		"1.2.3+build.",
+	}
+	for _, bad := range invalidSemvers {
+		if _, ok := ParseSemver(bad); ok {
+			t.Errorf("ParseSemver(%q) = true, want false (invalid SemVer 2.0.0)", bad)
+		}
+		if norm := NormalizeVersion("tool " + bad); norm == "1.2.3" {
+			t.Errorf("NormalizeVersion(%q) must not strip invalid suffix to 1.2.3, got %q", "tool "+bad, norm)
+		}
+		cfgBad := &config.Config{
+			InstanceID: "test",
+			Hosts:      map[string]config.HostConfig{"h1": {}, "h2": {}},
+			Agents:     map[string]config.AgentConfig{"tool": {}},
+		}
+		rowsBad := []*store.AgentVersion{
+			{Host: "h1", Agent: "tool", Version: bad, Status: store.AgentVersionStatusOK, CheckedAt: now},
+			{Host: "h2", Agent: "tool", Version: "1.2.4", Status: store.AgentVersionStatusOK, CheckedAt: now},
+		}
+		mb := BuildMatrix(cfgBad, rowsBad)
+		sum := mb.Summaries[0]
+		if !sum.Drifted || sum.Comparable || sum.MaxVersion != "" || len(sum.LaggingHosts) != 0 {
+			t.Errorf("invalid semver %q vs 1.2.4 must be drifted+incomparable without lagging hosts, got %+v", bad, sum)
+		}
+		for _, c := range mb.Entries {
+			if c.Behind {
+				t.Errorf("invalid semver %q must not mark any cell Behind, got %+v", bad, c)
+			}
+		}
+	}
+
+	// 3. Valid SemVer 2.0.0 boundary cases.
+	validSemvers := []string{
+		"0.0.0",
+		"1.2.3-0",
+		"1.2.3-01a",
+		"1.2.3+001",
+		"v1.2.3-alpha.1+build.007",
+	}
+	for _, good := range validSemvers {
+		if _, ok := ParseSemver(good); !ok {
+			t.Errorf("ParseSemver(%q) = false, want true", good)
+		}
+	}
+}
+
+func TestChecker_EventPersistenceAtomicityAndConcurrency(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "atomic.db")
+	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: "test"})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		InstanceID: "test",
+		Hosts: map[string]config.HostConfig{
+			"h1": {},
+			"h2": {Agents: map[string]config.HostAgentOverride{"codex": {Pin: "0.169.0"}}},
+		},
+		Agents: map[string]config.AgentConfig{"codex": {}},
+	}
+
+	h1Ver := "0.169.0"
+	h2Ver := "0.169.0"
+	var mu sync.Mutex
+	provider := &fakeHostProvider{
+		hosts: map[string]adapter.FileAccess{
+			"h1": &fakeFileAccess{runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+				mu.Lock()
+				v := h1Ver
+				mu.Unlock()
+				return adapter.ExecResult{ExitCode: 0, Output: "codex-cli " + v + "\n"}, nil
+			}},
+			"h2": &fakeFileAccess{runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+				mu.Lock()
+				v := h2Ver
+				mu.Unlock()
+				return adapter.ExecResult{ExitCode: 0, Output: "codex-cli " + v + "\n"}, nil
+			}},
+		},
+	}
+
+	now := time.Date(2026, 11, 24, 8, 0, 0, 0, time.UTC)
+	var hooked int
+	checker, err := NewChecker(CheckerOptions{
+		Store:    st,
+		Config:   cfg,
+		Provider: provider,
+		Now:      func() time.Time { return now },
+		OnEvent:  func(ctx context.Context, ev *store.AgentVersionEvent) { hooked++ },
+	})
+	if err != nil {
+		t.Fatalf("NewChecker: %v", err)
+	}
+
+	// Initial aligned check: both hosts at 0.169.0 (no drift, 0 events).
+	if res, err := checker.Check(ctx); err != nil {
+		t.Fatalf("initial Check: %v", err)
+	} else if len(res.Events) != 0 {
+		t.Fatalf("expected 0 initial events, got %+v", res.Events)
+	}
+
+	// Inject a SQLite trigger that aborts INSERT into agent_version_events to simulate
+	// an interruption/failure after agent_versions upsert before event persistence completes.
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	defer rawDB.Close()
+	if _, err := rawDB.ExecContext(ctx, `
+		CREATE TRIGGER fail_event_insert BEFORE INSERT ON agent_version_events
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated event write failure');
+		END;
+	`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	// Bump h1 to 0.171.0 (h2 remains pinned at 0.169.0 -> should produce version_changed + drift_started).
+	mu.Lock()
+	h1Ver = "0.171.0"
+	mu.Unlock()
+	now = now.Add(time.Minute)
+
+	if _, err := checker.Check(ctx); err == nil {
+		t.Fatal("expected Check to fail while event insert trigger is active")
+	}
+	if hooked != 0 {
+		t.Errorf("OnEvent must not be called when transaction rolls back, got %d calls", hooked)
+	}
+
+	// Verify agent_versions rolled back to 0.169.0 so the transition is NOT lost.
+	gotH1, err := st.GetAgentVersion(ctx, "h1", "codex")
+	if err != nil {
+		t.Fatalf("GetAgentVersion: %v", err)
+	}
+	if gotH1.Version != "0.169.0" {
+		t.Fatalf("agent_versions must roll back on event write failure, got %q want 0.169.0", gotH1.Version)
+	}
+
+	// Remove trigger and retry: BOTH agent_versions and events (version_changed + drift_started) must commit.
+	if _, err := rawDB.ExecContext(ctx, `DROP TRIGGER fail_event_insert`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	now = now.Add(time.Minute)
+	res, err := checker.Check(ctx)
+	if err != nil {
+		t.Fatalf("Check after recovery: %v", err)
+	}
+	var sawVerChanged, sawDriftStarted bool
+	for _, ev := range res.Events {
+		if ev.EventType == store.AgentEventVersionChanged && ev.Host == "h1" && ev.OldVersion == "0.169.0" && ev.NewVersion == "0.171.0" {
+			sawVerChanged = true
+		}
+		if ev.EventType == store.AgentEventDriftStarted && ev.Agent == "codex" {
+			sawDriftStarted = true
+		}
+	}
+	if !sawVerChanged || !sawDriftStarted {
+		t.Fatalf("expected both version_changed and drift_started after retry, got %+v", res.Events)
+	}
+	if hooked != len(res.Events) {
+		t.Errorf("expected OnEvent called %d times after commit, got %d", len(res.Events), hooked)
+	}
+
+	// Concurrency check: two separate Checkers racing on the same transition (0.171.0 -> 0.172.0)
+	// must record the version_changed event exactly once.
+	mu.Lock()
+	h1Ver = "0.172.0"
+	mu.Unlock()
+	now = now.Add(time.Minute)
+
+	checker2, err := NewChecker(CheckerOptions{
+		Store:    st,
+		Config:   cfg,
+		Provider: provider,
+		Now:      func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewChecker 2: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, e := checker.Check(ctx)
+		errs <- e
+	}()
+	go func() {
+		defer wg.Done()
+		_, e := checker2.Check(ctx)
+		errs <- e
+	}()
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if e != nil {
+			t.Fatalf("concurrent Check error: %v", e)
+		}
+	}
+
+	allEvents, err := st.ListAgentVersionEvents(ctx, store.AgentVersionEventsFilter{
+		Agent:     "codex",
+		Host:      "h1",
+		EventType: store.AgentEventVersionChanged,
+	})
+	if err != nil {
+		t.Fatalf("ListAgentVersionEvents: %v", err)
+	}
+	count172 := 0
+	for _, ev := range allEvents {
+		if ev.OldVersion == "0.171.0" && ev.NewVersion == "0.172.0" {
+			count172++
+		}
+	}
+	if count172 != 1 {
+		t.Errorf("expected exactly 1 version_changed event for 0.171.0->0.172.0 under concurrent checks, got %d", count172)
 	}
 }
