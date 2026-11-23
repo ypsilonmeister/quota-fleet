@@ -525,6 +525,9 @@
     if (p === "/ui/deliveries") {
       return { name: "deliveries", search: urlObj.searchParams };
     }
+    if (p === "/ui/agents") {
+      return { name: "agents" };
+    }
     return { name: "not-found", path: p };
   }
 
@@ -587,6 +590,9 @@
           break;
         case "deliveries":
           await renderDeliveries(route.search);
+          break;
+        case "agents":
+          await renderAgentVersions();
           break;
         default:
           dom.app.replaceChildren(
@@ -2276,6 +2282,293 @@
             el("th", { text: "結果 / エラー抜粋" }),
             el("th", { text: "更新時刻" }),
             el("th", { text: "納品操作 / 時刻" })
+          ])
+        ]),
+        el("tbody", null, rows)
+      ])
+    ]);
+  }
+
+  // ==================== 8. Agent Versions (/ui/agents) ====================
+  async function renderAgentVersions() {
+    setLoading("エージェント版数");
+    const [agentsRes, eventsRes] = await Promise.all([
+      apiFetch("/agents"),
+      apiFetch("/agents/events?limit=50")
+    ]);
+    if (!agentsRes.ok) {
+      throw new Error(errorMessageFromResp(agentsRes, "エージェント版数の取得に失敗しました"));
+    }
+    const matrix = agentsRes.data || {};
+    const events = (eventsRes.ok && eventsRes.data && Array.isArray(eventsRes.data.events))
+      ? eventsRes.data.events
+      : [];
+
+    const checkBtn = el("button", {
+      type: "button",
+      className: "btn btn-primary btn-sm",
+      text: "今すぐ確認",
+      onClick: async function () {
+        checkBtn.disabled = true;
+        checkBtn.textContent = "確認中...";
+        try {
+          const res = await apiFetch("/agents/check", { method: "POST" });
+          if (!res.ok) {
+            showBanner("error", errorMessageFromResp(res, "プローブ実行に失敗しました"));
+            checkBtn.disabled = false;
+            checkBtn.textContent = "今すぐ確認";
+            return;
+          }
+          const newEvents = (res.data && Array.isArray(res.data.events)) ? res.data.events : [];
+          showBanner(
+            res.data && res.data.has_drift ? "warn" : "success",
+            "プローブが完了しました（新規イベント: " + newEvents.length + "件）。"
+          );
+          await renderAgentVersions();
+        } catch (err) {
+          if (!err || err.status !== 401) {
+            showBanner("error", "プローブエラー: " + (err ? err.message : String(err)));
+            checkBtn.disabled = false;
+            checkBtn.textContent = "今すぐ確認";
+          }
+        }
+      }
+    });
+
+    const sections = [
+      el("div", { className: "page-header" }, [
+        el("h1", { text: "エージェント版数" }),
+        el("div", { className: "btn-row" }, [checkBtn])
+      ])
+    ];
+
+    const summaries = Array.isArray(matrix.summaries) ? matrix.summaries : [];
+    const driftedAgents = summaries.filter(function (s) { return s && s.drifted; });
+    if (matrix.has_drift && driftedAgents.length > 0) {
+      const driftNames = driftedAgents.map(function (s) { return s.agent; }).join(", ");
+      const manualHosts = [];
+      for (const s of driftedAgents) {
+        if (Array.isArray(s.manual_update_hosts)) {
+          for (const h of s.manual_update_hosts) {
+            manualHosts.push(s.agent + "@" + h);
+          }
+        }
+      }
+      let alertMsg = "ドリフトを検出しています: " + driftNames;
+      if (manualHosts.length > 0) {
+        alertMsg += "（自動更新不可・手作業が必要: " + manualHosts.join(", ") + "）";
+      }
+      sections.push(el("div", { className: "alert alert-warn agent-drift-alert", text: alertMsg }));
+    }
+
+    if (summaries.length > 0) {
+      sections.push(
+        el("section", { className: "section" }, [
+          el("h2", { className: "section-title", text: "ドリフト要約" }),
+          buildAgentSummaryCards(summaries)
+        ])
+      );
+    }
+
+    sections.push(
+      el("section", { className: "section" }, [
+        el("h2", { className: "section-title", text: "ホスト × エージェント 版マトリクス" }),
+        buildAgentMatrixTable(matrix)
+      ])
+    );
+
+    if (matrix.limitation_note) {
+      sections.push(el("p", { className: "muted small", text: matrix.limitation_note }));
+    }
+
+    sections.push(
+      el("section", { className: "section" }, [
+        el("h2", { className: "section-title", text: "変化イベント履歴（直近50件）" }),
+        buildAgentEventsTable(events)
+      ])
+    );
+
+    dom.app.replaceChildren.apply(dom.app, sections);
+  }
+
+  function buildAgentSummaryCards(summaries) {
+    const cards = summaries.map(function (s) {
+      const cardClass = "card agent-card" + (s.drifted ? " agent-card-drift" : "");
+      const badges = [
+        el("span", {
+          className: "badge " + (s.drifted ? "badge-drift" : "badge-ok"),
+          text: s.drifted ? "DRIFT" : "OK"
+        })
+      ];
+      if (!s.comparable && Array.isArray(s.versions) && s.versions.length > 0) {
+        badges.push(el("span", { className: "badge badge-warn", text: "比較不能" }));
+      }
+
+      const details = [];
+      if (s.max_version) {
+        details.push(el("div", { className: "small mono", text: "最大版: " + s.max_version }));
+      }
+      if (Array.isArray(s.lagging_hosts) && s.lagging_hosts.length > 0) {
+        details.push(el("div", { className: "small", text: "遅れ: " + s.lagging_hosts.join(", ") }));
+      }
+      if (Array.isArray(s.manual_update_hosts) && s.manual_update_hosts.length > 0) {
+        details.push(el("div", {
+          className: "small agent-manual-note",
+          text: "要手作業: " + s.manual_update_hosts.join(", ")
+        }));
+      }
+      if (Array.isArray(s.pinned_hosts) && s.pinned_hosts.length > 0) {
+        details.push(el("div", { className: "small muted", text: "pinned: " + s.pinned_hosts.join(", ") }));
+      }
+      if (Array.isArray(s.failed_hosts) && s.failed_hosts.length > 0) {
+        details.push(el("div", { className: "small agent-error-note", text: "失敗: " + s.failed_hosts.join(", ") }));
+      }
+      if (details.length === 0) {
+        details.push(el("div", { className: "small muted", text: "未取得または差異なし" }));
+      }
+
+      return el("div", { className: cardClass }, [
+        el("div", { className: "agent-card-header" }, [
+          el("span", { className: "mono agent-card-name", text: s.agent }),
+          el("span", { className: "agent-card-badges" }, badges)
+        ]),
+        el("div", { className: "agent-card-body" }, details)
+      ]);
+    });
+    return el("div", { className: "agent-summary-grid" }, cards);
+  }
+
+  function buildAgentMatrixTable(matrix) {
+    const hosts = Array.isArray(matrix.hosts) ? matrix.hosts : [];
+    const agents = Array.isArray(matrix.agents) ? matrix.agents : [];
+    const entries = Array.isArray(matrix.entries) ? matrix.entries : [];
+
+    if (hosts.length === 0 || agents.length === 0) {
+      return el("div", { className: "card empty-state", text: "ホストまたはエージェントが設定されていません。" });
+    }
+
+    const cellMap = new Map();
+    for (const entry of entries) {
+      if (entry) {
+        cellMap.set(entry.host + "\x00" + entry.agent, entry);
+      }
+    }
+
+    const headerCells = [el("th", { text: "ホスト" })];
+    for (const a of agents) {
+      headerCells.push(el("th", { className: "mono", text: a }));
+    }
+
+    const rows = hosts.map(function (h) {
+      const tds = [el("td", { className: "mono", text: h })];
+      for (const a of agents) {
+        const c = cellMap.get(h + "\x00" + a);
+        tds.push(buildAgentMatrixCell(c));
+      }
+      return el("tr", null, tds);
+    });
+
+    return el("div", { className: "table-wrap" }, [
+      el("table", null, [
+        el("thead", null, [el("tr", null, headerCells)]),
+        el("tbody", null, rows)
+      ])
+    ]);
+  }
+
+  function buildAgentMatrixCell(c) {
+    if (!c || !c.status) {
+      const notes = [el("span", { className: "muted", text: "未確認" })];
+      if (c && c.pinned) {
+        notes.push(el("span", { className: "badge badge-pinned", text: "pinned: " + c.pin }));
+      }
+      if (c && c.manual_update) {
+        notes.push(el("span", { className: "badge badge-manual", text: "要手作業" }));
+      }
+      return el("td", { className: "agent-cell" }, [el("div", { className: "agent-cell-main" }, notes)]);
+    }
+
+    let tdClass = "agent-cell";
+    if (c.behind) {
+      tdClass += " agent-cell-drift";
+    } else if (c.pinned) {
+      tdClass += " agent-cell-pinned";
+    } else if (c.status === "error" || c.status === "not_found") {
+      tdClass += " agent-cell-error";
+    }
+
+    const topNodes = [];
+    if (c.status === "ok") {
+      topNodes.push(el("span", { className: "mono agent-ver-text", text: c.version || "-" }));
+    } else {
+      topNodes.push(el("span", {
+        className: "badge badge-" + String(c.status).replace(/[^a-zA-Z0-9_-]/g, ""),
+        text: c.status
+      }));
+    }
+
+    if (c.pinned) {
+      const pinText = c.pin_mismatch ? ("pinned: " + c.pin + " (不一致)") : ("pinned: " + c.pin);
+      topNodes.push(el("span", { className: "badge badge-pinned", text: pinText }));
+    }
+    if (c.behind) {
+      topNodes.push(el("span", { className: "badge badge-behind", text: "遅れ" }));
+    }
+    if (c.status === "ok" && !c.comparable) {
+      topNodes.push(el("span", { className: "badge badge-warn", text: "比較不能" }));
+    }
+    if (c.manual_update) {
+      topNodes.push(el("span", { className: "badge badge-manual", text: "要手作業" }));
+    }
+
+    const cellChildren = [el("div", { className: "agent-cell-main" }, topNodes)];
+    if (c.status !== "ok" && c.error_detail) {
+      cellChildren.push(el("div", { className: "small agent-error-note", text: c.error_detail }));
+    } else if (c.version_raw && c.version_raw !== c.version) {
+      cellChildren.push(el("div", { className: "small muted mono", text: c.version_raw }));
+    }
+    if (c.checked_at) {
+      cellChildren.push(el("div", { className: "small muted", text: formatTime(c.checked_at) }));
+    }
+
+    return el("td", { className: tdClass }, cellChildren);
+  }
+
+  function buildAgentEventsTable(events) {
+    if (!events || events.length === 0) {
+      return el("div", { className: "card empty-state", text: "記録されたエージェント版数イベントはありません。" });
+    }
+    const rows = events.map(function (ev) {
+      let changeText = "-";
+      if (ev.old_version || ev.new_version) {
+        changeText = (ev.old_version || "-") + " -> " + (ev.new_version || "-");
+      }
+      const detailNodes = [el("span", { text: ev.detail || "-" })];
+      if (ev.manual_update) {
+        detailNodes.push(document.createTextNode(" "));
+        detailNodes.push(el("span", { className: "badge badge-manual", text: "要手作業" }));
+      }
+      return el("tr", null, [
+        el("td", { className: "mono small", text: "#" + ev.id }),
+        el("td", { className: "small muted", text: formatTime(ev.created_at) }),
+        el("td", null, [statusBadge(ev.event_type)]),
+        el("td", { className: "mono small", text: ev.agent || "-" }),
+        el("td", { className: "mono small", text: ev.host || "-" }),
+        el("td", { className: "mono small", text: changeText }),
+        el("td", { className: "small" }, detailNodes)
+      ]);
+    });
+    return el("div", { className: "table-wrap" }, [
+      el("table", null, [
+        el("thead", null, [
+          el("tr", null, [
+            el("th", { text: "ID" }),
+            el("th", { text: "時刻" }),
+            el("th", { text: "種別" }),
+            el("th", { text: "エージェント" }),
+            el("th", { text: "ホスト" }),
+            el("th", { text: "変化" }),
+            el("th", { text: "詳細" })
           ])
         ]),
         el("tbody", null, rows)

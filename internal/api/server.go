@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/agentver"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
@@ -38,6 +39,11 @@ type GateReleaser interface {
 	ReleaseHeld(ctx context.Context, heldID string) (*GateReleaseResult, error)
 }
 
+// AgentChecker decouples the HTTP API server from the concrete agent version prober.
+type AgentChecker interface {
+	CheckOnce(ctx context.Context) (*agentver.CheckResult, error)
+}
+
 // Options configures the HTTP API Server.
 type Options struct {
 	InstanceID  string
@@ -55,8 +61,12 @@ type Options struct {
 	// Non-sensitive configured names exposed by GET /meta.
 	Hosts  []string
 	Agents []string
+	// Config provides host/agent pin and manual_update policies for GET /agents.
+	Config *config.Config
 	// GateReleaser handles POST /gate/held/{id}/release via immediate quota re-evaluation.
 	GateReleaser GateReleaser
+	// AgentChecker handles POST /agents/check via immediate host×agent version probing.
+	AgentChecker AgentChecker
 	// Now overrides the evaluation clock in tests when non-nil.
 	Now func() time.Time
 	// SnapshotLoader optionally overrides loading usage snapshots from QuotaUsageFile in tests.
@@ -78,7 +88,9 @@ type Server struct {
 	pools           map[string]config.PoolConfig
 	hosts           []string
 	agents          []string
+	cfg             *config.Config
 	gateReleaser    GateReleaser
+	agentChecker    AgentChecker
 	nowFn           func() time.Time
 	snapshotLoader  func() (*quota.Snapshot, error)
 	handler         http.Handler
@@ -125,7 +137,9 @@ func NewServer(st *store.Store, opts Options) *Server {
 		pools:           opts.Pools,
 		hosts:           normalizeSortedNames(opts.Hosts),
 		agents:          normalizeSortedNames(opts.Agents),
+		cfg:             opts.Config,
 		gateReleaser:    opts.GateReleaser,
+		agentChecker:    opts.AgentChecker,
 		nowFn:           nowFn,
 		snapshotLoader:  opts.SnapshotLoader,
 	}
@@ -154,6 +168,9 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("POST /gate/held/{id}/release", s.handleReleaseHeldJob)
 	mux.HandleFunc("DELETE /gate/held/{id}", s.handleCancelHeldJob)
 	mux.HandleFunc("GET /gate/decisions", s.handleListGateDecisions)
+	mux.HandleFunc("GET /agents", s.handleGetAgents)
+	mux.HandleFunc("GET /agents/events", s.handleListAgentEvents)
+	mux.HandleFunc("POST /agents/check", s.handleCheckAgents)
 
 	apiHandler := s.authMiddleware(mux)
 	uiHandler := ui.NewHandler()
@@ -1151,6 +1168,83 @@ func (s *Server) handleDeliveries(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, DeliveriesResponse{
 		Jobs: toJobDTOs(jobs),
+	})
+}
+
+func (s *Server) handleGetAgents(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.store.ListAgentVersions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	matrix := agentver.BuildMatrix(s.cfg, rows)
+	writeJSON(w, http.StatusOK, AgentsResponse{Matrix: matrix})
+}
+
+func (s *Server) handleListAgentEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var filter store.AgentVersionEventsFilter
+
+	if v := strings.TrimSpace(q.Get("since")); v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid since timestamp %q (expected RFC3339)", v))
+			return
+		}
+		t = t.UTC()
+		filter.Since = &t
+	}
+	if v := strings.TrimSpace(q.Get("agent")); v != "" {
+		filter.Agent = v
+	}
+	if v := strings.TrimSpace(q.Get("host")); v != "" {
+		filter.Host = v
+	}
+	if v := strings.TrimSpace(q.Get("type")); v != "" {
+		et := store.AgentVersionEventType(v)
+		if !et.Valid() {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid event type %q", v))
+			return
+		}
+		filter.EventType = et
+	}
+	if v := strings.TrimSpace(q.Get("limit")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid limit %q", v))
+			return
+		}
+		filter.Limit = n
+	}
+
+	events, err := s.store.ListAgentVersionEvents(r.Context(), filter)
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidInput) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AgentEventsResponse{
+		Events: toAgentVersionEventDTOs(events),
+	})
+}
+
+func (s *Server) handleCheckAgents(w http.ResponseWriter, r *http.Request) {
+	if s.agentChecker == nil {
+		writeError(w, http.StatusServiceUnavailable, "agent version checker is not configured")
+		return
+	}
+	res, err := s.agentChecker.CheckOnce(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, AgentCheckResponse{
+		Matrix: res.Matrix,
+		Events: toAgentVersionEventDTOs(res.Events),
 	})
 }
 

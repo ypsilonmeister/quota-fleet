@@ -37,6 +37,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runJob(args[1:], stdout, stderr)
 	case "gate":
 		return runGate(args[1:], stdout, stderr)
+	case "agents":
+		return runAgents(args[1:], stdout, stderr)
 	case "mcp":
 		return runMCP(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
@@ -55,6 +57,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  quota-fleet serve [--config fleet.yaml] [--db path/to/fleet.db] [--listen 127.0.0.1:8737]")
 	fmt.Fprintln(w, "  quota-fleet job <create|list|get|cancel|requeue> [options]")
 	fmt.Fprintln(w, "  quota-fleet gate <check|decisions|held|release> [options]")
+	fmt.Fprintln(w, "  quota-fleet agents [check|events] [options]")
 	fmt.Fprintln(w, "  quota-fleet mcp config [--format all|claude-code|json] [--url http://127.0.0.1:8737] [--binary quota-fleet]")
 	fmt.Fprintln(w, "  quota-fleet config check [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet status [--config fleet.yaml] [--db path/to/fleet.db]")

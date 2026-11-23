@@ -190,6 +190,63 @@ func (d AgentDriver) BuildWindowsPreflightCommand() (string, error) {
 	return wrapPowerShellCommand(strings.Join(stmts, "; ")), nil
 }
 
+// ResolveBaseCommand returns the executable name/path for this agent driver,
+// honoring per-host CommandOverride first, then Launch, Preflight, or Name.
+func (d AgentDriver) ResolveBaseCommand() string {
+	if cmd := strings.TrimSpace(d.CommandOverride); cmd != "" {
+		return cmd
+	}
+	if fields := strings.Fields(strings.TrimSpace(d.Launch)); len(fields) > 0 {
+		return fields[0]
+	}
+	if fields := strings.Fields(strings.TrimSpace(d.Preflight)); len(fields) > 0 {
+		return fields[0]
+	}
+	return strings.TrimSpace(d.Name)
+}
+
+// BuildVersionCommand builds the shell command passed to FileAccess.RunCommand
+// to query the agent's version (`<command> <version_args...>`), defaulting to `--version`.
+// On Windows, it returns PowerShell statements suitable for windowsFileAccess.RunCommand.
+func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (string, error) {
+	exe := d.ResolveBaseCommand()
+	if exe == "" {
+		return "", fmt.Errorf("adapter: agent %q has no executable command configured", d.Name)
+	}
+	args := versionArgs
+	if len(args) == 0 {
+		args = []string{"--version"}
+	}
+
+	if isWindows {
+		var stmts []string
+		stmts = append(stmts, formatPowerShellEnvAssigns(d.Env)...)
+		psTokens := make([]string, 0, 1+len(args))
+		psTokens = append(psTokens, psExpr(exe))
+		for _, a := range args {
+			psTokens = append(psTokens, psExpr(a))
+		}
+		stmts = append(stmts, "& "+strings.Join(psTokens, " "))
+		return strings.Join(stmts, "; "), nil
+	}
+
+	parts := make([]string, 0, 1+len(args))
+	parts = append(parts, formatRemoteCommandToken(exe))
+	for _, a := range args {
+		if isSafeBareToken(a) {
+			parts = append(parts, a)
+		} else {
+			parts = append(parts, shellQuote(a))
+		}
+	}
+	cmd := strings.Join(parts, " ")
+	if len(d.Env) == 0 {
+		return cmd, nil
+	}
+	lines := append(formatEnvExports(d.Env), cmd)
+	return strings.Join(lines, "; "), nil
+}
+
 // selectLaunchTemplate chooses the resume template when job.SessionID is set and the driver
 // supports resume, otherwise falling back to the standard launch template.
 func (d AgentDriver) selectLaunchTemplate(job *store.Job) (string, bool) {

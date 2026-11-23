@@ -20,6 +20,7 @@ func TestUIShellRoutesReturn200WithStrictCSP(t *testing.T) {
 		"/ui/gate/held",
 		"/ui/gate/decisions",
 		"/ui/deliveries",
+		"/ui/agents",
 	}
 
 	for _, path := range routes {
@@ -153,6 +154,45 @@ func TestUIChainViewAndMiniTreeAssetsPresent(t *testing.T) {
 	} {
 		if !strings.Contains(css, cls) {
 			t.Errorf("style.css missing expected chain UI selector %q", cls)
+		}
+	}
+}
+
+func TestUIAgentVersionsAssetsPresent(t *testing.T) {
+	html := string(indexHTML)
+	if !strings.Contains(html, `href="/ui/agents"`) || !strings.Contains(html, "エージェント版数") {
+		t.Errorf("index.html missing navigation link for /ui/agents")
+	}
+
+	js := string(appJS)
+	for _, token := range []string{
+		"renderAgentVersions",
+		"buildAgentSummaryCards",
+		"buildAgentMatrixTable",
+		"buildAgentEventsTable",
+		"/agents/check",
+		"/agents/events",
+		"エージェント版数",
+		"今すぐ確認",
+		"pinned:",
+		"要手作業",
+	} {
+		if !strings.Contains(js, token) {
+			t.Errorf("app.js missing expected agent versions UI token %q", token)
+		}
+	}
+
+	css := string(styleCSS)
+	for _, cls := range []string{
+		".agent-summary-grid",
+		".agent-card-drift",
+		".agent-cell-drift",
+		".agent-cell-pinned",
+		".badge-pinned",
+		".badge-manual",
+	} {
+		if !strings.Contains(css, cls) {
+			t.Errorf("style.css missing expected agent versions UI selector %q", cls)
 		}
 	}
 }

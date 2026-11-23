@@ -139,6 +139,19 @@ func (a *SSHAdapter) FileAccessFor(job *store.Job) (FileAccess, error) {
 	return NewRemoteFileAccess(a.transport, host, workdir)
 }
 
+// FileAccessForHost returns a host-appropriate FileAccess for hostName without requiring a job workdir.
+// It reuses the exact same LocalFileAccess / NewRemoteFileAccess paths as FileAccessFor.
+func (a *SSHAdapter) FileAccessForHost(hostName string) (FileAccess, error) {
+	host, err := a.lookupHost(hostName)
+	if err != nil {
+		return nil, err
+	}
+	if isLocalTarget(a.transport, host) {
+		return newLocalFileAccess("", host.DenyPaths), nil
+	}
+	return NewRemoteFileAccess(a.transport, host, "")
+}
+
 // Preflight runs the configured agent preflight command on hostName via the adapter's Transport.
 func (a *SSHAdapter) Preflight(ctx context.Context, hostName, agentName string) (CommandResult, error) {
 	if err := ctx.Err(); err != nil {

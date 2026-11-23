@@ -3,6 +3,7 @@ package api
 import (
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/agentver"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -379,4 +380,58 @@ type MetaResponse struct {
 	GateMode      string           `json:"gate_mode"`
 	EvaluatorMode string           `json:"evaluator_mode"`
 	PoolSummaries []PoolSummaryDTO `json:"pool_summaries"`
+}
+
+// AgentVersionEventDTO is the JSON representation of an agent_version_events entry.
+type AgentVersionEventDTO struct {
+	ID           int64     `json:"id"`
+	EventType    string    `json:"event_type"`
+	Agent        string    `json:"agent"`
+	Host         string    `json:"host,omitempty"`
+	OldVersion   string    `json:"old_version,omitempty"`
+	NewVersion   string    `json:"new_version,omitempty"`
+	Detail       string    `json:"detail,omitempty"`
+	ManualUpdate bool      `json:"manual_update,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func toAgentVersionEventDTO(ev *store.AgentVersionEvent) *AgentVersionEventDTO {
+	if ev == nil {
+		return nil
+	}
+	return &AgentVersionEventDTO{
+		ID:           ev.ID,
+		EventType:    string(ev.EventType),
+		Agent:        ev.Agent,
+		Host:         ev.Host,
+		OldVersion:   ev.OldVersion,
+		NewVersion:   ev.NewVersion,
+		Detail:       ev.Detail,
+		ManualUpdate: ev.ManualUpdate,
+		CreatedAt:    ev.CreatedAt,
+	}
+}
+
+func toAgentVersionEventDTOs(items []*store.AgentVersionEvent) []*AgentVersionEventDTO {
+	out := make([]*AgentVersionEventDTO, 0, len(items))
+	for _, ev := range items {
+		out = append(out, toAgentVersionEventDTO(ev))
+	}
+	return out
+}
+
+// AgentsResponse is returned by GET /agents with the latest version matrix and drift summaries.
+type AgentsResponse struct {
+	agentver.Matrix
+}
+
+// AgentEventsResponse is returned by GET /agents/events.
+type AgentEventsResponse struct {
+	Events []*AgentVersionEventDTO `json:"events"`
+}
+
+// AgentCheckResponse is returned by POST /agents/check with the updated matrix and newly recorded events.
+type AgentCheckResponse struct {
+	agentver.Matrix
+	Events []*AgentVersionEventDTO `json:"events"`
 }

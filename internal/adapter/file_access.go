@@ -65,6 +65,12 @@ type FileAccessProvider interface {
 	FileAccessFor(job *store.Job) (FileAccess, error)
 }
 
+// HostFileAccessProvider is an optional interface implemented by adapters that can construct
+// a host-appropriate FileAccess for a named host without requiring a job workdir.
+type HostFileAccessProvider interface {
+	FileAccessForHost(hostName string) (FileAccess, error)
+}
+
 // LocalFileAccess implements FileAccess directly against the serve host's local filesystem and shell.
 type LocalFileAccess struct {
 	workdir   string

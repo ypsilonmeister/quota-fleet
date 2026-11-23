@@ -800,6 +800,125 @@ tbody .chain-root-row:first-child td {
   color: #ffffff;
 }
 
+/* Agent versions screen */
+.agent-drift-alert {
+  margin-bottom: 16px;
+  font-weight: 600;
+}
+
+.agent-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.agent-card {
+  padding: 12px 14px;
+}
+
+.agent-card-drift {
+  border-color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.agent-card-name {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.agent-card-badges {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.agent-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.agent-cell {
+  vertical-align: top;
+}
+
+.agent-cell-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.agent-ver-text {
+  font-weight: 600;
+}
+
+.agent-cell-drift {
+  background: var(--warn-bg);
+}
+
+.agent-cell-pinned {
+  background: var(--info-bg);
+}
+
+.agent-cell-error {
+  background: var(--danger-bg);
+}
+
+.agent-manual-note {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.agent-error-note {
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.badge-ok {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.badge-drift,
+.badge-behind,
+.badge-warn,
+.badge-drift_started {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.badge-pinned {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.badge-manual {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+
+.badge-not_found,
+.badge-error,
+.badge-probe_failed {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.badge-drift_resolved,
+.badge-version_changed {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
 [hidden] {
   display: none !important;
 }

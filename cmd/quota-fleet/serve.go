@@ -123,27 +123,29 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 	}
 
 	rt, err := runtime.New(runtime.Options{
-		Store:             st,
-		Adapter:           execAdapter,
-		Evaluator:         jobEvaluator,
-		Notifier:          jobNotifier,
-		InstanceID:        cfg.InstanceID,
-		StateDir:          stateDir,
-		DeliveriesDir:     deliveriesDir,
-		MaxClaimed:        cfg.Limits.MaxClaimed,
-		AttemptsCap:       cfg.Limits.AttemptsCap,
-		MaxEvalRetries:    cfg.Evaluator.EffectiveMaxEvalRetries(),
-		DispatchInterval:  cfg.Runtime.EffectiveDispatchInterval(),
-		ShepherdInterval:  cfg.Runtime.EffectiveShepherdInterval(),
-		ReconcileInterval: cfg.Runtime.EffectiveReconcileInterval(),
-		StaleClaimedAfter: cfg.Runtime.EffectiveStaleClaimedAfter(),
-		SignalMaxBytes:    cfg.Runtime.EffectiveSignalMaxBytes(),
-		GateMode:          cfg.Quota.EffectiveGateMode(),
-		QuotaUsageFile:    cfg.Quota.UsageFile,
-		QuotaStaleAfter:   cfg.Quota.EffectiveStaleAfter(),
-		GateCheckInterval: cfg.Quota.EffectiveGateCheckInterval(),
-		Pools:             cfg.Pools,
-		Logger:            logger,
+		Store:               st,
+		Adapter:             execAdapter,
+		Evaluator:           jobEvaluator,
+		Notifier:            jobNotifier,
+		Config:              cfg,
+		InstanceID:          cfg.InstanceID,
+		StateDir:            stateDir,
+		DeliveriesDir:       deliveriesDir,
+		MaxClaimed:          cfg.Limits.MaxClaimed,
+		AttemptsCap:         cfg.Limits.AttemptsCap,
+		MaxEvalRetries:      cfg.Evaluator.EffectiveMaxEvalRetries(),
+		DispatchInterval:    cfg.Runtime.EffectiveDispatchInterval(),
+		ShepherdInterval:    cfg.Runtime.EffectiveShepherdInterval(),
+		ReconcileInterval:   cfg.Runtime.EffectiveReconcileInterval(),
+		StaleClaimedAfter:   cfg.Runtime.EffectiveStaleClaimedAfter(),
+		SignalMaxBytes:      cfg.Runtime.EffectiveSignalMaxBytes(),
+		GateMode:            cfg.Quota.EffectiveGateMode(),
+		QuotaUsageFile:      cfg.Quota.UsageFile,
+		QuotaStaleAfter:     cfg.Quota.EffectiveStaleAfter(),
+		GateCheckInterval:   cfg.Quota.EffectiveGateCheckInterval(),
+		AgentsCheckInterval: cfg.EffectiveAgentsCheckInterval(),
+		Pools:               cfg.Pools,
+		Logger:              logger,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "init runtime failed: %v\n", err)
@@ -169,7 +171,9 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		Pools:           cfg.Pools,
 		Hosts:           sortedMapKeys(cfg.Hosts),
 		Agents:          sortedMapKeys(cfg.Agents),
+		Config:          cfg,
 		GateReleaser:    gateReleaserAdapter{checker: rt.GateChecker},
+		AgentChecker:    rt.AgentChecker,
 	})
 
 	httpSrv := &http.Server{
@@ -230,6 +234,17 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 		apiAuthSummary = "enabled (require_auth=true, token unset)"
 	}
 
+	agentsCheckInterval := cfg.EffectiveAgentsCheckInterval()
+	var agentsCheckSummary string
+	switch {
+	case agentsCheckInterval <= 0:
+		agentsCheckSummary = "disabled (agents_check_interval=0)"
+	case adapterName == config.DefaultRuntimeAdapter:
+		agentsCheckSummary = fmt.Sprintf("disabled (adapter=%s)", adapterName)
+	default:
+		agentsCheckSummary = fmt.Sprintf("every %s", agentsCheckInterval)
+	}
+
 	fmt.Fprintf(w, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s, evaluator=%s, gate_mode=%s)\n",
 		listen, cfg.InstanceID, dbPath, adapterName, evalMode, gateMode)
 	fmt.Fprintf(w, "  adapter:   %s\n", adapterName)
@@ -237,6 +252,7 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 	fmt.Fprintf(w, "  evaluator: %s\n", evalMode)
 	fmt.Fprintf(w, "  notifier:  %s\n", notifierSummary)
 	fmt.Fprintf(w, "  api_auth:  %s\n", apiAuthSummary)
+	fmt.Fprintf(w, "  agents_check: %s\n", agentsCheckSummary)
 	fmt.Fprintf(w, "  ui_url:    %s\n", formatPlannedUIURL(listen))
 
 	if evalMode == config.EvaluatorModeTypedDecision && strings.TrimSpace(os.Getenv(apiKeyEnv)) == "" {

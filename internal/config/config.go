@@ -27,6 +27,7 @@ const (
 	DefaultSignalMaxBytes         = int64(1 << 20) // 1 MiB
 	DefaultQuotaStaleAfter        = 45 * time.Minute
 	DefaultQuotaGateCheckInterval = 1 * time.Minute
+	DefaultAgentsCheckInterval    = 6 * time.Hour
 
 	// GateModeOff disables Quota Gate checks on job registration.
 	GateModeOff = "off"
@@ -66,17 +67,33 @@ const (
 
 // Config represents the quota-fleet configuration loaded from fleet.yaml.
 type Config struct {
-	InstanceID string                 `yaml:"instance_id"`
-	StateDir   string                 `yaml:"state_dir"`
-	API        APIConfig              `yaml:"api"`
-	Runtime    RuntimeConfig          `yaml:"runtime"`
-	Limits     LimitsConfig           `yaml:"limits"`
-	Hosts      map[string]HostConfig  `yaml:"hosts"`
-	Agents     map[string]AgentConfig `yaml:"agents"`
-	Pools      map[string]PoolConfig  `yaml:"pools"`
-	Quota      QuotaConfig            `yaml:"quota"`
-	Evaluator  EvaluatorConfig        `yaml:"evaluator"`
-	Notifier   NotifierConfig         `yaml:"notifier"`
+	InstanceID          string                 `yaml:"instance_id"`
+	StateDir            string                 `yaml:"state_dir"`
+	AgentsCheckInterval string                 `yaml:"agents_check_interval"`
+	API                 APIConfig              `yaml:"api"`
+	Runtime             RuntimeConfig          `yaml:"runtime"`
+	Limits              LimitsConfig           `yaml:"limits"`
+	Hosts               map[string]HostConfig  `yaml:"hosts"`
+	Agents              map[string]AgentConfig `yaml:"agents"`
+	Pools               map[string]PoolConfig  `yaml:"pools"`
+	Quota               QuotaConfig            `yaml:"quota"`
+	Evaluator           EvaluatorConfig        `yaml:"evaluator"`
+	Notifier            NotifierConfig         `yaml:"notifier"`
+}
+
+// EffectiveAgentsCheckInterval returns the configured periodic agent version probe interval.
+// It checks runtime.agents_check_interval first, then top-level agents_check_interval.
+// When omitted, it defaults to DefaultAgentsCheckInterval (6h).
+// When explicitly set to "0" (or "0s"), it returns 0 (disabled).
+func (c *Config) EffectiveAgentsCheckInterval() time.Duration {
+	if c == nil {
+		return DefaultAgentsCheckInterval
+	}
+	raw := strings.TrimSpace(c.Runtime.AgentsCheckInterval)
+	if raw == "" {
+		raw = strings.TrimSpace(c.AgentsCheckInterval)
+	}
+	return parseNonNegativeDurationOrDefault(raw, DefaultAgentsCheckInterval)
 }
 
 // NotifierConfig holds delivery and report notification settings.
@@ -181,13 +198,14 @@ func (q QuotaConfig) EffectiveGateMode() string {
 // Launcher, Shepherd, Reconciler).
 type RuntimeConfig struct {
 	// Adapter selects the host/agent adapter ("mock" or "ssh").
-	Adapter           string `yaml:"adapter"`
-	DispatchInterval  string `yaml:"dispatch_interval"`
-	ShepherdInterval  string `yaml:"shepherd_interval"`
-	ReconcileInterval string `yaml:"reconcile_interval"`
-	StaleClaimedAfter string `yaml:"stale_claimed_after"`
-	SignalMaxBytes    int64  `yaml:"signal_max_bytes"`
-	DeliveriesDir     string `yaml:"deliveries_dir"`
+	Adapter             string `yaml:"adapter"`
+	DispatchInterval    string `yaml:"dispatch_interval"`
+	ShepherdInterval    string `yaml:"shepherd_interval"`
+	ReconcileInterval   string `yaml:"reconcile_interval"`
+	StaleClaimedAfter   string `yaml:"stale_claimed_after"`
+	AgentsCheckInterval string `yaml:"agents_check_interval"`
+	SignalMaxBytes      int64  `yaml:"signal_max_bytes"`
+	DeliveriesDir       string `yaml:"deliveries_dir"`
 }
 
 // EffectiveAdapter returns the configured adapter name, defaulting to "mock".
@@ -254,6 +272,46 @@ func parseDurationOrDefault(raw string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func parseNonNegativeDurationOrDefault(raw string, def time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def
+	}
+	if raw == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return def
+	}
+	return d
+}
+
+// StringList unmarshals either a YAML sequence of strings or a single whitespace-delimited string.
+type StringList []string
+
+// UnmarshalYAML decodes a scalar string (split by whitespace) or a sequence of strings.
+func (s *StringList) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		if value.Tag == "!!null" {
+			*s = nil
+			return nil
+		}
+		var str string
+		if err := value.Decode(&str); err != nil {
+			return err
+		}
+		*s = strings.Fields(str)
+		return nil
+	}
+	var list []string
+	if err := value.Decode(&list); err != nil {
+		return err
+	}
+	*s = list
+	return nil
 }
 
 // APIConfig holds HTTP API server settings.
@@ -334,18 +392,23 @@ type HostConfig struct {
 
 // HostAgentOverride overrides agent execution settings on a specific host.
 type HostAgentOverride struct {
-	Command string            `yaml:"command"`
-	Env     map[string]string `yaml:"env"`
+	Command      string            `yaml:"command"`
+	Env          map[string]string `yaml:"env"`
+	VersionArgs  StringList        `yaml:"version_args"`
+	Pin          string            `yaml:"pin"`
+	ManualUpdate bool              `yaml:"manual_update"`
 }
 
 // AgentConfig defines an agent driver configuration.
 type AgentConfig struct {
-	Preflight      string `yaml:"preflight"`
-	Launch         string `yaml:"launch"`
-	Resume         string `yaml:"resume"`
-	SessionLogGlob string `yaml:"session_log_glob"`
-	SandboxFlag    string `yaml:"sandbox_flag"`
-	PromptStyle    string `yaml:"prompt_style"`
+	Preflight      string     `yaml:"preflight"`
+	Launch         string     `yaml:"launch"`
+	Resume         string     `yaml:"resume"`
+	SessionLogGlob string     `yaml:"session_log_glob"`
+	SandboxFlag    string     `yaml:"sandbox_flag"`
+	PromptStyle    string     `yaml:"prompt_style"`
+	VersionArgs    StringList `yaml:"version_args"`
+	ManualUpdate   bool       `yaml:"manual_update"`
 }
 
 // PoolConfig defines a quota pool.
@@ -451,6 +514,12 @@ func (c *Config) Validate() error {
 	if err := validatePositiveDuration("runtime.stale_claimed_after", c.Runtime.StaleClaimedAfter); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateNonNegativeDuration("runtime.agents_check_interval", c.Runtime.AgentsCheckInterval); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateNonNegativeDuration("agents_check_interval", c.AgentsCheckInterval); err != nil {
+		errs = append(errs, err)
+	}
 	if c.Runtime.SignalMaxBytes < 0 {
 		errs = append(errs, fmt.Errorf("runtime.signal_max_bytes must be >= 0 (got %d)", c.Runtime.SignalMaxBytes))
 	}
@@ -505,6 +574,21 @@ func validatePositiveDuration(field, raw string) error {
 	}
 	if d <= 0 {
 		return fmt.Errorf("%s must be > 0 (got %q)", field, raw)
+	}
+	return nil
+}
+
+func validateNonNegativeDuration(field, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "0" {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid duration (%q): %w", field, raw, err)
+	}
+	if d < 0 {
+		return fmt.Errorf("%s must be >= 0 (got %q)", field, raw)
 	}
 	return nil
 }

@@ -16,40 +16,43 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
-// Options configures the resident Runtime bundle (Dispatcher, Launcher, Shepherd, Reconciler, GateChecker).
+// Options configures the resident Runtime bundle (Dispatcher, Launcher, Shepherd, Reconciler, GateChecker, AgentChecker).
 type Options struct {
-	Store             *store.Store
-	Adapter           adapter.Adapter
-	Evaluator         evaluator.Evaluator
-	Notifier          Notifier
-	InstanceID        string
-	StateDir          string
-	DeliveriesDir     string
-	MaxClaimed        int
-	AttemptsCap       int
-	MaxEvalRetries    int
-	DispatchInterval  time.Duration
-	ShepherdInterval  time.Duration
-	ReconcileInterval time.Duration
-	StaleClaimedAfter time.Duration
-	SignalMaxBytes    int64
-	GateMode          string
-	QuotaUsageFile    string
-	QuotaStaleAfter   time.Duration
-	GateCheckInterval time.Duration
-	Pools             map[string]config.PoolConfig
-	SnapshotLoader    func() (*quota.Snapshot, error)
-	Now               func() time.Time
-	Logger            *log.Logger
+	Store               *store.Store
+	Adapter             adapter.Adapter
+	Evaluator           evaluator.Evaluator
+	Notifier            Notifier
+	Config              *config.Config
+	InstanceID          string
+	StateDir            string
+	DeliveriesDir       string
+	MaxClaimed          int
+	AttemptsCap         int
+	MaxEvalRetries      int
+	DispatchInterval    time.Duration
+	ShepherdInterval    time.Duration
+	ReconcileInterval   time.Duration
+	StaleClaimedAfter   time.Duration
+	SignalMaxBytes      int64
+	GateMode            string
+	QuotaUsageFile      string
+	QuotaStaleAfter     time.Duration
+	GateCheckInterval   time.Duration
+	AgentsCheckInterval time.Duration
+	Pools               map[string]config.PoolConfig
+	SnapshotLoader      func() (*quota.Snapshot, error)
+	Now                 func() time.Time
+	Logger              *log.Logger
 }
 
 // Runtime bundles and coordinates the lifecycle of all resident components.
 type Runtime struct {
-	Dispatcher  *Dispatcher
-	Launcher    *Launcher
-	Shepherd    *Shepherd
-	Reconciler  *Reconciler
-	GateChecker *GateChecker
+	Dispatcher   *Dispatcher
+	Launcher     *Launcher
+	Shepherd     *Shepherd
+	Reconciler   *Reconciler
+	GateChecker  *GateChecker
+	AgentChecker *AgentVersionChecker
 
 	notifyCh chan struct{}
 	logger   *log.Logger
@@ -175,14 +178,29 @@ func New(opts Options) (*Runtime, error) {
 		SnapshotLoader: opts.SnapshotLoader,
 	})
 
+	var hostFAProvider adapter.HostFileAccessProvider
+	if p, ok := opts.Adapter.(adapter.HostFileAccessProvider); ok {
+		hostFAProvider = p
+	}
+	agentChecker := NewAgentVersionChecker(AgentVersionCheckerOptions{
+		Store:    opts.Store,
+		Config:   opts.Config,
+		Provider: hostFAProvider,
+		Notifier: notifier,
+		Interval: opts.AgentsCheckInterval,
+		Now:      opts.Now,
+		Logger:   logger,
+	})
+
 	return &Runtime{
-		Dispatcher:  dispatcher,
-		Launcher:    launcher,
-		Shepherd:    shepherd,
-		Reconciler:  reconciler,
-		GateChecker: gateChecker,
-		notifyCh:    notifyCh,
-		logger:      logger,
+		Dispatcher:   dispatcher,
+		Launcher:     launcher,
+		Shepherd:     shepherd,
+		Reconciler:   reconciler,
+		GateChecker:  gateChecker,
+		AgentChecker: agentChecker,
+		notifyCh:     notifyCh,
+		logger:       logger,
 	}, nil
 }
 
@@ -213,6 +231,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 			name string
 			fn   func(context.Context) error
 		}{"gate", r.GateChecker.Run})
+	}
+	if r.AgentChecker != nil && r.AgentChecker.Enabled() {
+		components = append(components, struct {
+			name string
+			fn   func(context.Context) error
+		}{"agent-versions", r.AgentChecker.Run})
 	}
 
 	for _, comp := range components {

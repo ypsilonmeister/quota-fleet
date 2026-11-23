@@ -128,4 +128,30 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_gate_decisions_id_desc ON gate_decisions(id DESC);
 CREATE INDEX IF NOT EXISTS idx_gate_decisions_job_id ON gate_decisions(job_id);
+
+CREATE TABLE IF NOT EXISTS agent_versions (
+    host TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    version_raw TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('ok','not_found','error')),
+    error_detail TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (host, agent)
+);
+
+CREATE TABLE IF NOT EXISTS agent_version_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL CHECK(event_type IN ('version_changed','drift_started','drift_resolved','probe_failed')),
+    agent TEXT NOT NULL,
+    host TEXT NOT NULL DEFAULT '',
+    old_version TEXT NOT NULL DEFAULT '',
+    new_version TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    manual_update INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_version_events_created_at ON agent_version_events(created_at, id);
+CREATE INDEX IF NOT EXISTS idx_agent_version_events_agent ON agent_version_events(agent, id DESC);
 `

@@ -57,6 +57,7 @@ func NewHandler() http.Handler {
 	mux.HandleFunc("GET /ui/gate/held", serveShell)
 	mux.HandleFunc("GET /ui/gate/decisions", serveShell)
 	mux.HandleFunc("GET /ui/deliveries", serveShell)
+	mux.HandleFunc("GET /ui/agents", serveShell)
 
 	mux.HandleFunc("GET /ui/assets/style.css", func(w http.ResponseWriter, r *http.Request) {
 		setCommonHeaders(w)
