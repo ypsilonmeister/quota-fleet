@@ -497,6 +497,7 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 // BuildWindowsRunScript generates the CRLF batch wrapper (agent-run.cmd) executed via WMI.
 // It applies per-host env vars, enters workdir, invokes the agent command, and records
 // agent.exit + EXIT:<code> whenever control returns to the wrapper.
+// The final output is normalized to strict CRLF regardless of any line endings in launchCmd.
 func BuildWindowsRunScript(workdir string, driver AgentDriver, launchCmd string) string {
 	winWorkdir := normalizeWindowsPath(workdir)
 
@@ -512,7 +513,17 @@ func BuildWindowsRunScript(workdir string, driver AgentDriver, launchCmd string)
 	lines = append(lines, fmt.Sprintf(`move /y "%s" "%s" >nul`, exitTmpFileName, exitFileName))
 	lines = append(lines, fmt.Sprintf(`>> "%s" echo EXIT:%%QF_RC%%`, logFileName))
 	lines = append(lines, `exit /b %QF_RC%`)
-	return strings.Join(lines, "\r\n") + "\r\n"
+	return normalizeCRLF(strings.Join(lines, "\n") + "\n")
+}
+
+// normalizeCRLF converts all line endings (CRLF, bare LF, bare CR, and repeated CR before LF)
+// to strict CRLF without introducing double \r\r\n sequences.
+func normalizeCRLF(s string) string {
+	for strings.Contains(s, "\r\n") {
+		s = strings.ReplaceAll(s, "\r\n", "\n")
+	}
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
 func isWindowsHost(host config.HostConfig) bool {

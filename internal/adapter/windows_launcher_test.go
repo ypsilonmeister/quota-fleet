@@ -343,6 +343,7 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 		if !strings.Contains(runCmd, "\r\n") {
 			t.Errorf("agent-run.cmd must use CRLF line endings:\n%q", runCmd)
 		}
+		assertStrictCRLF(t, runCmd)
 		for _, want := range []string{
 			"@echo off\r\n",
 			`cd /d "C:\Users\worker\agent-work\job-201" || exit /b 1`,
@@ -432,6 +433,7 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 		}
 
 		_, runCmd := extractWindowsBase64Payloads(t, fake.Calls()[0].Command)
+		assertStrictCRLF(t, runCmd)
 		wantLine := `C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --dangerously-bypass-approvals-and-sandbox - < prompt.txt > agent.log 2> agent.err.log`
 		if !strings.Contains(runCmd, wantLine) {
 			t.Errorf("codex agent-run.cmd missing %q:\n%s", wantLine, runCmd)
@@ -837,4 +839,68 @@ func TestWindowsAdapterPreflight(t *testing.T) {
 		!strings.Contains(cmd, `& 'C:\Users\worker\.local\bin\claude.exe' '--version'`) {
 		t.Errorf("unexpected windows preflight command:\n%s", cmd)
 	}
+}
+
+func assertStrictCRLF(t *testing.T, script string) {
+	t.Helper()
+	if script == "" {
+		t.Fatalf("expected non-empty script")
+	}
+	if !strings.HasSuffix(script, "\r\n") {
+		t.Errorf("script must end with CRLF, got %q", script)
+	}
+	if strings.Contains(script, "\r\r\n") {
+		t.Errorf("script must not contain doubled CR (\\r\\r\\n): %q", script)
+	}
+	for i := 0; i < len(script); i++ {
+		if script[i] == '\n' && (i == 0 || script[i-1] != '\r') {
+			t.Errorf("script contains bare LF at byte %d: %q", i, script)
+		}
+		if script[i] == '\r' && (i+1 >= len(script) || script[i+1] != '\n') {
+			t.Errorf("script contains bare CR at byte %d: %q", i, script)
+		}
+	}
+}
+
+func TestBuildWindowsRunScriptCRLFNormalization(t *testing.T) {
+	baseDriver := AgentDriver{
+		Name: "codex",
+		Env: map[string]string{
+			"FOO": "bar",
+		},
+	}
+
+	t.Run("standard single-line launchCmd has no bare LF and ends every line with CRLF", func(t *testing.T) {
+		script := BuildWindowsRunScript(
+			`C:\Users\worker\agent-work\job-900`,
+			baseDriver,
+			`C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < prompt.txt > agent.log 2> agent.err.log`,
+		)
+		assertStrictCRLF(t, script)
+		if !strings.Contains(script, "@echo off\r\nsetlocal\r\nset \"FOO=bar\"\r\ncd /d \"C:\\Users\\worker\\agent-work\\job-900\" || exit /b 1\r\n") {
+			t.Errorf("unexpected script header:\n%q", script)
+		}
+	})
+
+	t.Run("launchCmd containing bare LF and mixed CRLF is normalized without double CR", func(t *testing.T) {
+		mixedLaunch := "echo step1\necho step2\r\necho step3\nC:\\tools\\codex.cmd exec - < prompt.txt > agent.log 2> agent.err.log\r\n"
+		script := BuildWindowsRunScript(`C:\Users\worker\agent-work\job-901`, baseDriver, mixedLaunch)
+		assertStrictCRLF(t, script)
+
+		want := "echo step1\r\necho step2\r\necho step3\r\nC:\\tools\\codex.cmd exec - < prompt.txt > agent.log 2> agent.err.log\r\n"
+		if !strings.Contains(script, want) {
+			t.Errorf("normalized launchCmd not found in script:\nwant substring: %q\ngot script: %q", want, script)
+		}
+	})
+
+	t.Run("launchCmd containing bare CR or double CR before LF is normalized to strict CRLF", func(t *testing.T) {
+		weirdLaunch := "echo a\recho b\r\r\necho c"
+		script := BuildWindowsRunScript(`C:\Users\worker\agent-work\job-902`, AgentDriver{Name: "codex"}, weirdLaunch)
+		assertStrictCRLF(t, script)
+
+		want := "echo a\r\necho b\r\necho c\r\n"
+		if !strings.Contains(script, want) {
+			t.Errorf("normalized launchCmd not found in script:\nwant substring: %q\ngot script: %q", want, script)
+		}
+	})
 }
