@@ -1083,3 +1083,47 @@ func TestMarkOutboxDispatchedAndReconcilerDedupAndFailWithResult(t *testing.T) {
 		t.Fatalf("FailWithResult job = %+v", failRes.Job)
 	}
 }
+
+func TestWorktreeSpecPersistence(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	j, created, err := st.CreateJob(ctx, CreateJobParams{
+		RequestID: "wt-spec-1",
+		Title:     "Job with worktree spec",
+		Host:      "penguin",
+		Workdir:   "/home/worker/worktrees/wt-1",
+		WorktreeSpec: &WorktreeSpec{
+			RepoPath: "/home/worker/repos/quota-fleet",
+			BaseRef:  "main",
+			Branch:   "feat/wt",
+		},
+	})
+	if err != nil || !created {
+		t.Fatalf("CreateJob: created=%v err=%v", created, err)
+	}
+	if j.WorktreeSpec == nil || j.WorktreeSpec.RepoPath != "/home/worker/repos/quota-fleet" ||
+		j.WorktreeSpec.BaseRef != "main" || j.WorktreeSpec.Branch != "feat/wt" {
+		t.Fatalf("CreateJob WorktreeSpec = %+v", j.WorktreeSpec)
+	}
+
+	got, err := st.GetJob(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.WorktreeSpec == nil || *got.WorktreeSpec != *j.WorktreeSpec {
+		t.Fatalf("GetJob WorktreeSpec = %+v, want %+v", got.WorktreeSpec, j.WorktreeSpec)
+	}
+
+	// Job without worktree_spec persists nil.
+	plain, _, err := st.CreateJob(ctx, CreateJobParams{
+		RequestID: "wt-spec-nil",
+		Title:     "Plain job",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob plain: %v", err)
+	}
+	if plain.WorktreeSpec != nil {
+		t.Fatalf("plain WorktreeSpec = %+v, want nil", plain.WorktreeSpec)
+	}
+}

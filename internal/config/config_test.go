@@ -361,6 +361,44 @@ runtime:
 		t.Errorf("EffectiveSignalMaxBytes() = %d, want 4096", got)
 	}
 
+	// Explicit valid runtime section with ssh adapter and host SSH options.
+	cfgSSH, err := Parse([]byte(`
+instance_id: "inst-rt-ssh"
+state_dir: "/var/lib/qf"
+limits:
+  max_claimed: 2
+  attempts_cap: 3
+runtime:
+  adapter: "ssh"
+hosts:
+  ubuntu:
+    transport: ssh
+    ssh: user@ubuntu.example.ts.net
+    os: linux
+    key_file: ~/.ssh/id_ed25519
+    proxy_command: "nc -X connect -x 127.0.0.1:8080 %h %p"
+    known_hosts_file: ~/.ssh/known_hosts
+    strict_host_key_checking: accept-new
+`))
+	if err != nil {
+		t.Fatalf("Parse ssh runtime: %v", err)
+	}
+	if err := cfgSSH.Validate(); err != nil {
+		t.Fatalf("Validate ssh runtime: %v", err)
+	}
+	if got := cfgSSH.Runtime.EffectiveAdapter(); got != RuntimeAdapterSSH {
+		t.Errorf("EffectiveAdapter() = %q, want %q", got, RuntimeAdapterSSH)
+	}
+	if cfgSSH.Hosts["ubuntu"].ProxyCommand == nil || !strings.Contains(*cfgSSH.Hosts["ubuntu"].ProxyCommand, "127.0.0.1:8080") {
+		t.Errorf("ProxyCommand = %v, want non-nil proxy command", cfgSSH.Hosts["ubuntu"].ProxyCommand)
+	}
+	if cfgSSH.Hosts["ubuntu"].KnownHostsFile != "~/.ssh/known_hosts" {
+		t.Errorf("KnownHostsFile = %q", cfgSSH.Hosts["ubuntu"].KnownHostsFile)
+	}
+	if cfgSSH.Hosts["ubuntu"].StrictHostKeyChecking != "accept-new" {
+		t.Errorf("StrictHostKeyChecking = %q", cfgSSH.Hosts["ubuntu"].StrictHostKeyChecking)
+	}
+
 	// Invalid runtime configs.
 	invalidCases := []struct {
 		name    string
@@ -373,9 +411,21 @@ runtime:
 instance_id: "inst"
 limits: { max_claimed: 1, attempts_cap: 1 }
 runtime:
-  adapter: "ssh"
+  adapter: "unknown-adapter"
 `,
-			wantErr: "Phase 2",
+			wantErr: "runtime.adapter",
+		},
+		{
+			name: "invalid strict_host_key_checking",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+hosts:
+  bad:
+    transport: ssh
+    strict_host_key_checking: maybe
+`,
+			wantErr: "strict_host_key_checking",
 		},
 		{
 			name: "bad duration",

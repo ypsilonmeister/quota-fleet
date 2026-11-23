@@ -132,6 +132,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Agent:              req.Agent,
 		Host:               req.Host,
 		Workdir:            req.Workdir,
+		WorktreeSpec:       req.WorktreeSpec,
 		TargetRef:          req.TargetRef,
 		Instructions:       req.Instructions,
 		AcceptanceCriteria: req.AcceptanceCriteria,

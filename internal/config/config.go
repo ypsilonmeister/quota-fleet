@@ -14,8 +14,10 @@ import (
 const (
 	// DefaultAPIListen is the default listen address for quota-fleet serve.
 	DefaultAPIListen = "127.0.0.1:8737"
-	// DefaultRuntimeAdapter is the default adapter for Phase 1. Real SSH/local adapters are planned for Phase 2.
-	DefaultRuntimeAdapter    = "mock"
+	// DefaultRuntimeAdapter is the default adapter ("mock").
+	DefaultRuntimeAdapter = "mock"
+	// RuntimeAdapterSSH selects the real SSH/local host adapter.
+	RuntimeAdapterSSH        = "ssh"
 	DefaultDispatchInterval  = 1 * time.Second
 	DefaultShepherdInterval  = 5 * time.Second
 	DefaultReconcileInterval = 30 * time.Second
@@ -38,8 +40,7 @@ type Config struct {
 // RuntimeConfig holds settings for resident runtime components (Dispatcher,
 // Launcher, Shepherd, Reconciler).
 type RuntimeConfig struct {
-	// Adapter selects the host/agent adapter. Currently only "mock" is valid;
-	// real SSH/local adapters will be implemented in Phase 2.
+	// Adapter selects the host/agent adapter ("mock" or "ssh").
 	Adapter           string `yaml:"adapter"`
 	DispatchInterval  string `yaml:"dispatch_interval"`
 	ShepherdInterval  string `yaml:"shepherd_interval"`
@@ -138,15 +139,17 @@ type LimitsConfig struct {
 
 // HostConfig defines a worker host and optional per-host agent overrides.
 type HostConfig struct {
-	Transport    string                       `yaml:"transport"`
-	SSH          string                       `yaml:"ssh"`
-	OS           string                       `yaml:"os"`
-	ProxyCommand *string                      `yaml:"proxy_command"`
-	KeyFile      string                       `yaml:"key_file"`
-	WorkdirRoot  string                       `yaml:"workdir_root"`
-	OwnerFixup   bool                         `yaml:"owner_fixup"`
-	DenyPaths    []string                     `yaml:"deny_paths"`
-	Agents       map[string]HostAgentOverride `yaml:"agents"`
+	Transport             string                       `yaml:"transport"`
+	SSH                   string                       `yaml:"ssh"`
+	OS                    string                       `yaml:"os"`
+	ProxyCommand          *string                      `yaml:"proxy_command"`
+	KeyFile               string                       `yaml:"key_file"`
+	KnownHostsFile        string                       `yaml:"known_hosts_file"`
+	StrictHostKeyChecking string                       `yaml:"strict_host_key_checking"`
+	WorkdirRoot           string                       `yaml:"workdir_root"`
+	OwnerFixup            bool                         `yaml:"owner_fixup"`
+	DenyPaths             []string                     `yaml:"deny_paths"`
+	Agents                map[string]HostAgentOverride `yaml:"agents"`
 }
 
 // HostAgentOverride overrides agent execution settings on a specific host.
@@ -227,10 +230,13 @@ func (c *Config) Validate() error {
 		if h.OS != "" && h.OS != "linux" && h.OS != "windows" {
 			errs = append(errs, fmt.Errorf("hosts.%s.os must be \"linux\" or \"windows\" (got %q)", name, h.OS))
 		}
+		if sk := strings.TrimSpace(h.StrictHostKeyChecking); sk != "" && sk != "yes" && sk != "accept-new" && sk != "no" {
+			errs = append(errs, fmt.Errorf("hosts.%s.strict_host_key_checking must be \"yes\", \"accept-new\", or \"no\" (got %q)", name, h.StrictHostKeyChecking))
+		}
 	}
 
-	if adapter := strings.TrimSpace(c.Runtime.Adapter); adapter != "" && adapter != DefaultRuntimeAdapter {
-		errs = append(errs, fmt.Errorf("runtime.adapter %q is not supported yet (only %q is available; real host adapters are planned for Phase 2)", adapter, DefaultRuntimeAdapter))
+	if adapter := strings.TrimSpace(c.Runtime.Adapter); adapter != "" && adapter != DefaultRuntimeAdapter && adapter != RuntimeAdapterSSH {
+		errs = append(errs, fmt.Errorf("runtime.adapter %q is not supported (allowed: %q, %q)", adapter, DefaultRuntimeAdapter, RuntimeAdapterSSH))
 	}
 	if err := validatePositiveDuration("runtime.dispatch_interval", c.Runtime.DispatchInterval); err != nil {
 		errs = append(errs, err)

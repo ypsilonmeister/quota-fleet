@@ -86,6 +86,10 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := ensureWorktreeSpecColumn(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs.worktree_spec: %w", err)
+	}
 
 	var readDB *sql.DB
 	shared := isMem
@@ -258,6 +262,10 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: encode alt_pools: %v", ErrInvalidInput, err)
 	}
+	worktreeSpecJSON, err := encodeWorktreeSpec(p.WorktreeSpec)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: encode worktree_spec: %v", ErrInvalidInput, err)
+	}
 
 	var (
 		result  *Job
@@ -314,18 +322,18 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 
 		res, err := conn.ExecContext(ctx, `
 			INSERT INTO jobs (
-				request_id, title, status, agent, host, workdir, target_ref,
+				request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 				instructions, acceptance_criteria, parent_id,
 				claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
 				created_at, updated_at, model, pool, alt_pools, session_id
 			) VALUES (
-				?, ?, ?, ?, ?, ?, ?,
+				?, ?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?,
 				'', NULL, 0, '', '', NULL,
 				?, ?, ?, ?, ?, ?
 			)
 		`,
-			p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, p.TargetRef,
+			p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
 			p.Instructions, p.AcceptanceCriteria, parentArg,
 			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID,
 		)
@@ -1165,7 +1173,7 @@ type rowScanner interface {
 }
 
 const jobColumns = `
-	id, request_id, title, status, agent, host, workdir, target_ref,
+	id, request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 	instructions, acceptance_criteria, parent_id,
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
 	created_at, updated_at, model, pool, alt_pools, session_id
@@ -1191,18 +1199,19 @@ func queryJobByRequestID(ctx context.Context, q queryRower, requestID string) (*
 
 func scanJob(s rowScanner) (*Job, error) {
 	var (
-		j           Job
-		statusStr   string
-		parentID    sql.NullInt64
-		claimedAt   sql.NullString
-		deliveredAt sql.NullString
-		createdAt   string
-		updatedAt   string
-		altPoolsStr string
+		j               Job
+		statusStr       string
+		worktreeSpecStr string
+		parentID        sql.NullInt64
+		claimedAt       sql.NullString
+		deliveredAt     sql.NullString
+		createdAt       string
+		updatedAt       string
+		altPoolsStr     string
 	)
 	err := s.Scan(
 		&j.ID, &j.RequestID, &j.Title, &statusStr,
-		&j.Agent, &j.Host, &j.Workdir, &j.TargetRef,
+		&j.Agent, &j.Host, &j.Workdir, &worktreeSpecStr, &j.TargetRef,
 		&j.Instructions, &j.AcceptanceCriteria, &parentID,
 		&j.ClaimedBy, &claimedAt, &j.Attempts, &j.ResultText, &j.LastError, &deliveredAt,
 		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID,
@@ -1245,6 +1254,12 @@ func scanJob(s rowScanner) (*Job, error) {
 		return nil, fmt.Errorf("decode alt_pools: %w", err)
 	}
 	j.AltPools = altPools
+
+	wtSpec, err := decodeWorktreeSpec(worktreeSpecStr)
+	if err != nil {
+		return nil, fmt.Errorf("decode worktree_spec: %w", err)
+	}
+	j.WorktreeSpec = wtSpec
 	return &j, nil
 }
 
@@ -1439,6 +1454,61 @@ func decodeAltPools(raw string) ([]string, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func encodeWorktreeSpec(spec *WorktreeSpec) (string, error) {
+	if spec == nil {
+		return "", nil
+	}
+	if strings.TrimSpace(spec.RepoPath) == "" && strings.TrimSpace(spec.BaseRef) == "" && strings.TrimSpace(spec.Branch) == "" {
+		return "", nil
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func decodeWorktreeSpec(raw string) (*WorktreeSpec, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var spec WorktreeSpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		return nil, err
+	}
+	return &spec, nil
+}
+
+func ensureWorktreeSpecColumn(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(jobs)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			colType   string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		if name == "worktree_spec" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN worktree_spec TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func formatTime(t time.Time) string {

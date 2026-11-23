@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     agent TEXT NOT NULL DEFAULT '',
     host TEXT NOT NULL DEFAULT '',
     workdir TEXT NOT NULL DEFAULT '',
+    worktree_spec TEXT NOT NULL DEFAULT '',
     target_ref TEXT NOT NULL DEFAULT '',
     instructions TEXT NOT NULL DEFAULT '',
     acceptance_criteria TEXT NOT NULL DEFAULT '',

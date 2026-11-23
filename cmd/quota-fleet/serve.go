@@ -66,8 +66,15 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 	switch cfg.Runtime.EffectiveAdapter() {
 	case config.DefaultRuntimeAdapter:
 		execAdapter = adapter.NewMock(adapter.MockOptions{})
+	case config.RuntimeAdapterSSH:
+		execAdapter = adapter.NewSSHAdapter(cfg, adapter.SSHAdapterOptions{
+			Transport: adapter.NewRoutingTransport(
+				adapter.NewSSHTransport(adapter.SSHTransportOptions{}),
+				adapter.NewLocalTransport(adapter.LocalTransportOptions{}),
+			),
+		})
 	default:
-		fmt.Fprintf(stderr, "serve failed: unsupported runtime.adapter %q (real host adapters are planned for Phase 2)\n", cfg.Runtime.Adapter)
+		fmt.Fprintf(stderr, "serve failed: unsupported runtime.adapter %q\n", cfg.Runtime.Adapter)
 		return 1
 	}
 

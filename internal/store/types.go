@@ -55,6 +55,13 @@ var (
 	ErrInstanceIDMismatch = errors.New("instance_id mismatch")
 )
 
+// WorktreeSpec defines optional git worktree creation parameters for a job.
+type WorktreeSpec struct {
+	RepoPath string `json:"repo_path"`
+	BaseRef  string `json:"base_ref,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+}
+
 // Job represents a single row in the jobs table.
 type Job struct {
 	ID                 int64
@@ -64,6 +71,7 @@ type Job struct {
 	Agent              string
 	Host               string
 	Workdir            string
+	WorktreeSpec       *WorktreeSpec
 	TargetRef          string
 	Instructions       string
 	AcceptanceCriteria string
@@ -90,6 +98,7 @@ type CreateJobParams struct {
 	Agent              string
 	Host               string
 	Workdir            string
+	WorktreeSpec       *WorktreeSpec
 	TargetRef          string
 	Instructions       string
 	AcceptanceCriteria string

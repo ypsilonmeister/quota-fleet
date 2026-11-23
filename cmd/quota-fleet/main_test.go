@@ -292,3 +292,84 @@ limits:
 		t.Fatalf("serve did not shut down gracefully within timeout")
 	}
 }
+
+func TestServeWiringWithSSHAdapter(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	cfgPath := filepath.Join(dir, "fleet.yaml")
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cfgYAML := fmt.Sprintf(`
+instance_id: "serve-ssh-wiring-inst"
+state_dir: "%s"
+api:
+  listen: "%s"
+runtime:
+  adapter: "ssh"
+  dispatch_interval: "25ms"
+  shepherd_interval: "25ms"
+  reconcile_interval: "50ms"
+limits:
+  max_claimed: 1
+  attempts_cap: 3
+hosts:
+  ubuntu:
+    transport: ssh
+    ssh: worker@ubuntu.example.ts.net
+    os: linux
+    key_file: ~/.ssh/id_ed25519
+    workdir_root: ~/agent-work
+agents:
+  claude:
+    launch: "claude -p --model {model}"
+`, filepath.ToSlash(stateDir), addr)
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var out, errBuf bytes.Buffer
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runServeContext(ctx, []string{"--config", cfgPath}, &out, &errBuf)
+	}()
+
+	client := &http.Client{
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	baseURL := "http://" + addr
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := client.Get(baseURL + "/status")
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("serve(ssh) did not become ready on %s; stderr=%s", addr, errBuf.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case code := <-doneCh:
+		if code != 0 {
+			t.Fatalf("serve(ssh) exit code = %d, want 0; stderr=%s", code, errBuf.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("serve(ssh) did not shut down gracefully within timeout")
+	}
+	if !strings.Contains(out.String(), "adapter=ssh") {
+		t.Errorf("expected stdout to log adapter=ssh, got %q", out.String())
+	}
+}

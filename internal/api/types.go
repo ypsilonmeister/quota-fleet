@@ -14,8 +14,9 @@ type JobDTO struct {
 	Status             string     `json:"status"`
 	Agent              string     `json:"agent"`
 	Host               string     `json:"host"`
-	Workdir            string     `json:"workdir"`
-	TargetRef          string     `json:"target_ref"`
+	Workdir            string              `json:"workdir"`
+	WorktreeSpec       *store.WorktreeSpec `json:"worktree_spec,omitempty"`
+	TargetRef          string              `json:"target_ref"`
 	Instructions       string     `json:"instructions"`
 	AcceptanceCriteria string     `json:"acceptance_criteria"`
 	ParentID           *int64     `json:"parent_id,omitempty"`
@@ -45,6 +46,7 @@ func toJobDTO(j *store.Job) *JobDTO {
 		Agent:              j.Agent,
 		Host:               j.Host,
 		Workdir:            j.Workdir,
+		WorktreeSpec:       cloneWorktreeSpec(j.WorktreeSpec),
 		TargetRef:          j.TargetRef,
 		Instructions:       j.Instructions,
 		AcceptanceCriteria: j.AcceptanceCriteria,
@@ -75,6 +77,14 @@ func toJobDTOs(jobs []*store.Job) []*JobDTO {
 	return out
 }
 
+func cloneWorktreeSpec(spec *store.WorktreeSpec) *store.WorktreeSpec {
+	if spec == nil {
+		return nil
+	}
+	cp := *spec
+	return &cp
+}
+
 // CreateJobRequest is the JSON request body for POST /jobs.
 type CreateJobRequest struct {
 	RequestID          string   `json:"request_id"`
@@ -82,8 +92,9 @@ type CreateJobRequest struct {
 	Draft              bool     `json:"draft"`
 	Agent              string   `json:"agent"`
 	Host               string   `json:"host"`
-	Workdir            string   `json:"workdir"`
-	TargetRef          string   `json:"target_ref"`
+	Workdir            string              `json:"workdir"`
+	WorktreeSpec       *store.WorktreeSpec `json:"worktree_spec,omitempty"`
+	TargetRef          string              `json:"target_ref"`
 	Instructions       string   `json:"instructions"`
 	AcceptanceCriteria string   `json:"acceptance_criteria"`
 	ParentID           *int64   `json:"parent_id"`
