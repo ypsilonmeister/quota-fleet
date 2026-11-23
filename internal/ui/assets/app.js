@@ -237,13 +237,257 @@
     return walk(rootNode);
   }
 
+  const CHAIN_PAGE_LIMIT = 200;
+  const DEFAULT_MAX_UP_STEPS = 50;
+  const DEFAULT_MAX_EXPAND_NODES = 50;
+  const DEFAULT_MAX_PAGES_PER_STATUS = 50;
+  const DEFAULT_EXPAND_BATCH_SIZE = 10;
+
+  async function fetchChildrenAcrossStatuses(parentID, fetcher, options) {
+    const opts = options || {};
+    const pageLimit = opts.pageLimit || CHAIN_PAGE_LIMIT;
+    const maxPages = opts.maxPagesPerStatus || DEFAULT_MAX_PAGES_PER_STATUS;
+
+    const statusResults = await Promise.all(ALL_STATUSES.map(async function (st) {
+      const jobs = [];
+      let cursor = 0;
+      let pages = 0;
+      let truncated = false;
+
+      while (pages < maxPages) {
+        pages += 1;
+        let path = "/jobs?status=" + encodeURIComponent(st) +
+          "&parent_id=" + encodeURIComponent(String(parentID)) +
+          "&limit=" + encodeURIComponent(String(pageLimit));
+        if (cursor > 0) {
+          path += "&cursor=" + encodeURIComponent(String(cursor));
+        }
+        const cr = await fetcher(path);
+        if (!cr || !cr.ok || !cr.data || !Array.isArray(cr.data.jobs)) {
+          break;
+        }
+        for (const cj of cr.data.jobs) {
+          jobs.push(cj);
+        }
+        const hasMore = Boolean(cr.data.has_more);
+        const nextCursor = Number(cr.data.next_cursor || 0);
+        if (!hasMore) {
+          break;
+        }
+        if (!Number.isInteger(nextCursor) || nextCursor <= cursor) {
+          truncated = true;
+          break;
+        }
+        cursor = nextCursor;
+        if (pages >= maxPages) {
+          truncated = true;
+        }
+      }
+
+      return { jobs: jobs, truncated: truncated };
+    }));
+
+    const seen = new Set();
+    const children = [];
+    let truncated = false;
+    for (const sr of statusResults) {
+      if (sr.truncated) {
+        truncated = true;
+      }
+      for (const cj of sr.jobs) {
+        if (!cj || typeof cj.id !== "number" || seen.has(cj.id)) {
+          continue;
+        }
+        seen.add(cj.id);
+        children.push(cj);
+      }
+    }
+    return { jobs: children, truncated: truncated };
+  }
+
+  async function fetchFullJobChain(job, fetcher, options) {
+    const opts = options || {};
+    const maxUpSteps = opts.maxUpSteps || DEFAULT_MAX_UP_STEPS;
+    const maxExpandNodes = opts.maxExpandNodes || DEFAULT_MAX_EXPAND_NODES;
+    const batchSize = opts.batchSize || DEFAULT_EXPAND_BATCH_SIZE;
+
+    const knownJobs = new Map();
+    knownJobs.set(job.id, job);
+
+    // 1. Walk upward via parent_id to locate the chain root (cycle-safe).
+    let current = job;
+    const seenUp = new Set([job.id]);
+    const ancestorPath = [job.id];
+    let steps = 0;
+    let upTruncated = false;
+    while (current.parent_id && Number.isInteger(current.parent_id) && current.parent_id > 0) {
+      if (seenUp.has(current.parent_id)) {
+        break;
+      }
+      if (steps >= maxUpSteps) {
+        upTruncated = true;
+        break;
+      }
+      seenUp.add(current.parent_id);
+      steps += 1;
+      const parentRes = await fetcher("/jobs/" + current.parent_id);
+      if (!parentRes || !parentRes.ok || !parentRes.data || typeof parentRes.data.id !== "number") {
+        break;
+      }
+      knownJobs.set(parentRes.data.id, parentRes.data);
+      ancestorPath.push(parentRes.data.id);
+      current = parentRes.data;
+    }
+    ancestorPath.reverse(); // [root, ..., parent, job]
+
+    const expanded = new Set();
+    let pagesTruncated = false;
+    let currentJobChildrenTruncated = false;
+
+    const priorityQueue = [];
+    const priorityQueued = new Set();
+    const siblingQueue = [];
+    const siblingQueued = new Set();
+
+    function enqueuePriority(id) {
+      if (!expanded.has(id) && !priorityQueued.has(id)) {
+        priorityQueued.add(id);
+        priorityQueue.push(id);
+      }
+    }
+
+    function enqueueSibling(id) {
+      if (!expanded.has(id) && !priorityQueued.has(id) && !siblingQueued.has(id)) {
+        siblingQueued.add(id);
+        siblingQueue.push(id);
+      }
+    }
+
+    async function expandBatch(ids, targetQueueKind) {
+      const results = await Promise.all(ids.map(function (id) {
+        return fetchChildrenAcrossStatuses(id, fetcher, opts).then(function (res) {
+          return { id: id, res: res };
+        });
+      }));
+      for (const item of results) {
+        if (item.res.truncated) {
+          pagesTruncated = true;
+          if (item.id === job.id) {
+            currentJobChildrenTruncated = true;
+          }
+        }
+        for (const cj of item.res.jobs) {
+          if (!cj || typeof cj.id !== "number") {
+            continue;
+          }
+          if (!knownJobs.has(cj.id)) {
+            knownJobs.set(cj.id, cj);
+          }
+          if (targetQueueKind === "priority") {
+            enqueuePriority(cj.id);
+          } else {
+            enqueueSibling(cj.id);
+          }
+        }
+      }
+    }
+
+    // 2. Always expand the currently displayed job first so its direct children
+    //    are guaranteed to be fetched regardless of sibling count or BFS budget.
+    expanded.add(job.id);
+    await expandBatch([job.id], "priority");
+
+    // 3. Expand the ancestor spine (root -> ... -> parent) so the path to the
+    //    current job and its siblings are included in the mini-tree.
+    const ancestorsToExpand = ancestorPath.filter(function (id) {
+      return !expanded.has(id);
+    });
+    for (let i = 0; i < ancestorsToExpand.length && expanded.size < maxExpandNodes; ) {
+      const budget = Math.min(batchSize, maxExpandNodes - expanded.size);
+      const batch = [];
+      while (i < ancestorsToExpand.length && batch.length < budget) {
+        const aid = ancestorsToExpand[i];
+        i += 1;
+        if (!expanded.has(aid)) {
+          expanded.add(aid);
+          batch.push(aid);
+        }
+      }
+      if (batch.length > 0) {
+        await expandBatch(batch, "sibling");
+      }
+    }
+    for (const aid of ancestorsToExpand) {
+      if (!expanded.has(aid)) {
+        enqueueSibling(aid);
+      }
+    }
+
+    // 4. BFS downward: prioritize descendants of the current job first,
+    //    then expand remaining siblings/branches within maxExpandNodes.
+    while (expanded.size < maxExpandNodes && (priorityQueue.length > 0 || siblingQueue.length > 0)) {
+      const budget = Math.min(batchSize, maxExpandNodes - expanded.size);
+      const priorityBatch = [];
+      while (priorityQueue.length > 0 && priorityBatch.length < budget) {
+        const nextID = priorityQueue.shift();
+        if (!expanded.has(nextID)) {
+          expanded.add(nextID);
+          priorityBatch.push(nextID);
+        }
+      }
+      if (priorityBatch.length > 0) {
+        await expandBatch(priorityBatch, "priority");
+        continue;
+      }
+
+      const siblingBatch = [];
+      while (siblingQueue.length > 0 && siblingBatch.length < budget) {
+        const nextID = siblingQueue.shift();
+        if (!expanded.has(nextID)) {
+          expanded.add(nextID);
+          siblingBatch.push(nextID);
+        }
+      }
+      if (siblingBatch.length > 0) {
+        await expandBatch(siblingBatch, "sibling");
+      }
+    }
+
+    const unexpandedIDs = new Set();
+    for (const id of priorityQueue) {
+      if (!expanded.has(id)) {
+        unexpandedIDs.add(id);
+      }
+    }
+    for (const id of siblingQueue) {
+      if (!expanded.has(id)) {
+        unexpandedIDs.add(id);
+      }
+    }
+
+    const expandTruncated = unexpandedIDs.size > 0;
+    const truncated = upTruncated || pagesTruncated || expandTruncated;
+
+    return {
+      jobs: Array.from(knownJobs.values()),
+      truncated: truncated,
+      upTruncated: upTruncated,
+      pagesTruncated: pagesTruncated,
+      currentJobChildrenTruncated: currentJobChildrenTruncated,
+      expandTruncated: expandTruncated,
+      unexpandedCount: unexpandedIDs.size
+    };
+  }
+
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       buildJobForest: buildJobForest,
       summarizeChainProgress: summarizeChainProgress,
       formatChainProgressSummary: formatChainProgressSummary,
       flattenChainTree: flattenChainTree,
-      treeContainsStatus: treeContainsStatus
+      treeContainsStatus: treeContainsStatus,
+      fetchChildrenAcrossStatuses: fetchChildrenAcrossStatuses,
+      fetchFullJobChain: fetchFullJobChain
     };
   }
 
@@ -1178,82 +1422,7 @@
     dom.app.replaceChildren.apply(dom.app, pageNodes);
   }
 
-  async function fetchChildrenAcrossStatuses(parentID) {
-    const results = await Promise.all(ALL_STATUSES.map(function (st) {
-      return apiFetch("/jobs?status=" + encodeURIComponent(st) + "&parent_id=" + parentID + "&limit=100");
-    }));
-    const children = [];
-    for (const cr of results) {
-      if (cr.ok && cr.data && Array.isArray(cr.data.jobs)) {
-        for (const cj of cr.data.jobs) {
-          children.push(cj);
-        }
-      }
-    }
-    return children;
-  }
-
-  async function fetchFullJobChain(job) {
-    const MAX_UP_STEPS = 50;
-    const MAX_EXPAND_NODES = 50;
-
-    const knownJobs = new Map();
-    knownJobs.set(job.id, job);
-
-    // 1. Walk upward via parent_id to locate the chain root (cycle-safe).
-    let current = job;
-    const seenUp = new Set([job.id]);
-    let steps = 0;
-    while (current.parent_id && Number.isInteger(current.parent_id) && current.parent_id > 0 && steps < MAX_UP_STEPS) {
-      if (seenUp.has(current.parent_id)) {
-        break;
-      }
-      seenUp.add(current.parent_id);
-      steps += 1;
-      const parentRes = await apiFetch("/jobs/" + current.parent_id);
-      if (!parentRes.ok || !parentRes.data || typeof parentRes.data.id !== "number") {
-        break;
-      }
-      knownJobs.set(parentRes.data.id, parentRes.data);
-      current = parentRes.data;
-    }
-
-    // 2. Walk downward (BFS) from the discovered root across all statuses.
-    const queue = [current.id];
-    const expanded = new Set();
-    while (queue.length > 0 && expanded.size < MAX_EXPAND_NODES) {
-      const budget = MAX_EXPAND_NODES - expanded.size;
-      const batch = [];
-      while (queue.length > 0 && batch.length < budget) {
-        const nextID = queue.shift();
-        if (!expanded.has(nextID)) {
-          expanded.add(nextID);
-          batch.push(nextID);
-        }
-      }
-      if (batch.length === 0) {
-        break;
-      }
-      const batchResults = await Promise.all(batch.map(fetchChildrenAcrossStatuses));
-      for (const kids of batchResults) {
-        for (const cj of kids) {
-          if (!cj || typeof cj.id !== "number") {
-            continue;
-          }
-          if (!knownJobs.has(cj.id)) {
-            knownJobs.set(cj.id, cj);
-          }
-          if (!expanded.has(cj.id)) {
-            queue.push(cj.id);
-          }
-        }
-      }
-    }
-
-    return Array.from(knownJobs.values());
-  }
-
-  function buildMiniChainSection(chainJobs, currentJobID) {
+  function buildMiniChainSection(chainJobs, currentJobID, chainMeta) {
     const forest = buildJobForest(chainJobs);
     let primaryRoot = null;
     for (const rootNode of forest) {
@@ -1327,13 +1496,40 @@
 
     const rootLi = renderTreeItem(primaryRoot);
 
-    return el("section", { className: "section card" }, [
+    const sectionChildren = [
       el("div", { className: "mini-tree-header" }, [
         el("h2", { className: "section-title", text: "チェーン構成" }),
         el("span", { className: "chain-summary", text: formatChainProgressSummary(summary) })
-      ]),
+      ])
+    ];
+
+    if (chainMeta && chainMeta.truncated) {
+      const reasons = [];
+      if (chainMeta.expandTruncated) {
+        reasons.push("他 " + chainMeta.unexpandedCount + " 件のノード配下の探索を上限で打ち切りました");
+      }
+      if (chainMeta.upTruncated) {
+        reasons.push("祖先の探索を上限で打ち切りました");
+      }
+      if (chainMeta.pagesTruncated) {
+        reasons.push("一部の子ジョブ一覧がページ取得上限に達しました");
+      }
+      const directNote = chainMeta.currentJobChildrenTruncated
+        ? ""
+        : "表示中ジョブの直下の子ジョブは全件取得済みです。";
+      const noticeText = "チェーンが大きいため一部省略されています（" +
+        (reasons.length > 0 ? reasons.join("・") : "探索上限に到達") +
+        "）。" + directNote;
+      sectionChildren.push(
+        el("div", { className: "alert alert-info small", text: noticeText })
+      );
+    }
+
+    sectionChildren.push(
       el("ul", { className: "mini-tree", role: "list" }, rootLi ? [rootLi] : [])
-    ]);
+    );
+
+    return el("section", { className: "section card" }, sectionChildren);
   }
 
   // ==================== 3. Job Detail (/ui/jobs/{id}) ====================
@@ -1355,10 +1551,11 @@
     }
     const job = jobRes.data;
 
-    const [decisionsRes, chainJobs] = await Promise.all([
+    const [decisionsRes, chainResult] = await Promise.all([
       apiFetch("/gate/decisions?job_id=" + jobID + "&limit=50"),
-      fetchFullJobChain(job)
+      fetchFullJobChain(job, apiFetch)
     ]);
+    const chainJobs = chainResult.jobs;
 
     const children = chainJobs
       .filter(function (cj) { return cj.parent_id === jobID; })
@@ -1499,7 +1696,7 @@
       ]);
     })();
 
-    const miniChainSection = buildMiniChainSection(chainJobs, job.id);
+    const miniChainSection = buildMiniChainSection(chainJobs, job.id, chainResult);
 
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [

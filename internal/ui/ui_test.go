@@ -330,7 +330,162 @@ const chain = require("./assets/app.js");
   );
 }
 
-console.log("ALL_CHAIN_JS_TESTS_PASSED");
+// Helper: in-memory API mock implementing GET /jobs/{id} and paginated GET /jobs
+function makeMockFetcher(allJobs, serverMaxLimit) {
+  const maxLim = serverMaxLimit || 200;
+  const byId = new Map(allJobs.map(j => [j.id, j]));
+  return async function mockFetch(path) {
+    const u = new URL("http://localhost" + path);
+    const detailMatch = u.pathname.match(/^\/jobs\/(\d+)$/);
+    if (detailMatch) {
+      const id = Number(detailMatch[1]);
+      const found = byId.get(id);
+      if (!found) {
+        return { ok: false, status: 404, data: { error: "not found" } };
+      }
+      return { ok: true, status: 200, data: found };
+    }
+    if (u.pathname === "/jobs") {
+      const status = u.searchParams.get("status");
+      const parentID = Number(u.searchParams.get("parent_id") || 0);
+      const cursor = Number(u.searchParams.get("cursor") || 0);
+      const reqLimit = Number(u.searchParams.get("limit") || 50);
+      const limit = Math.min(reqLimit, maxLim);
+      const matched = allJobs
+        .filter(j => j.status === status && j.parent_id === parentID && j.id > cursor)
+        .sort((a, b) => a.id - b.id);
+      const hasMore = matched.length > limit;
+      const pageJobs = hasMore ? matched.slice(0, limit) : matched;
+      const nextCursor = hasMore ? pageJobs[pageJobs.length - 1].id : 0;
+      return {
+        ok: true,
+        status: 200,
+        data: { jobs: pageJobs, next_cursor: nextCursor, has_more: hasMore }
+      };
+    }
+    return { ok: false, status: 404, data: { error: "unknown path" } };
+  };
+}
+
+(async function runAsyncChainTests() {
+  // 5. Reproduction case: root has 51 children (#2..#52); viewing #52 which has direct children (#53, #54) and grandchild (#55)
+  {
+    const jobs = [{ id: 1, title: "Root", status: "done", parent_id: null }];
+    for (let i = 2; i <= 52; i += 1) {
+      jobs.push({ id: i, title: "Sibling " + i, status: "done", parent_id: 1 });
+    }
+    jobs.push({ id: 53, title: "Direct Child 1", status: "claimed", parent_id: 52 });
+    jobs.push({ id: 54, title: "Direct Child 2", status: "waiting", parent_id: 52 });
+    jobs.push({ id: 55, title: "Grandchild 1", status: "draft", parent_id: 53 });
+
+    const fetcher = makeMockFetcher(jobs, 200);
+    const currentJob = jobs.find(j => j.id === 52);
+    const res = await chain.fetchFullJobChain(currentJob, fetcher);
+
+    const directChildren = res.jobs
+      .filter(j => j.parent_id === 52)
+      .map(j => j.id)
+      .sort((a, b) => a - b);
+    assert.deepStrictEqual(directChildren, [53, 54], "direct children of #52 must not be dropped");
+
+    const ids = new Set(res.jobs.map(j => j.id));
+    assert.strictEqual(ids.has(1), true, "root must be present");
+    assert.strictEqual(ids.has(52), true, "current job must be present");
+    assert.strictEqual(ids.has(55), true, "grandchild of current job should be prioritized and present");
+    for (let i = 2; i <= 52; i += 1) {
+      assert.strictEqual(ids.has(i), true, "sibling #" + i + " must be present");
+    }
+
+    // Mini-tree structure check
+    const forest = chain.buildJobForest(res.jobs);
+    assert.strictEqual(forest.length, 1);
+    const node52 = forest[0].children.find(c => c.job.id === 52);
+    assert.ok(node52, "#52 must be in mini-tree");
+    assert.deepStrictEqual(node52.children.map(c => c.job.id), [53, 54]);
+    assert.deepStrictEqual(node52.children[0].children.map(c => c.job.id), [55]);
+
+    // Truncation metadata check (some other siblings beyond MAX_EXPAND_NODES=50 were not expanded)
+    assert.strictEqual(res.truncated, true, "should report truncation when siblings exceed expand limit");
+    assert.strictEqual(res.expandTruncated, true);
+    assert.ok(res.unexpandedCount > 0);
+    assert.strictEqual(res.currentJobChildrenTruncated, false);
+  }
+
+  // 6. Cursor pagination case: >200 children under both root and current job
+  {
+    const jobs = [{ id: 1, title: "Big Root", status: "done", parent_id: null }];
+    for (let i = 2; i <= 251; i += 1) {
+      jobs.push({ id: i, title: "Root Child " + i, status: "done", parent_id: 1 });
+    }
+    for (let i = 300; i < 505; i += 1) {
+      jobs.push({ id: i, title: "Current Direct Child " + i, status: "queued", parent_id: 251 });
+    }
+
+    const fetcher = makeMockFetcher(jobs, 100); // enforce 100 per page to exercise multi-page cursor pagination
+    const currentJob = jobs.find(j => j.id === 251);
+    const res = await chain.fetchFullJobChain(currentJob, fetcher, { pageLimit: 100, maxExpandNodes: 10 });
+
+    const directChildren = res.jobs.filter(j => j.parent_id === 251);
+    assert.strictEqual(directChildren.length, 205, "all 205 paginated direct children must be fetched");
+    const rootChildren = res.jobs.filter(j => j.parent_id === 1);
+    assert.strictEqual(rootChildren.length, 250, "all 250 paginated siblings under root must be fetched");
+    assert.strictEqual(res.pagesTruncated, false);
+    assert.strictEqual(res.currentJobChildrenTruncated, false);
+    assert.strictEqual(res.expandTruncated, true);
+    assert.strictEqual(res.truncated, true);
+  }
+
+  // 7. Deep chain exceeding maxUpSteps still fetches current job's direct children and reports upTruncated
+  {
+    const jobs = [];
+    for (let i = 1; i <= 15; i += 1) {
+      jobs.push({ id: i, title: "Node " + i, status: "done", parent_id: i === 1 ? null : i - 1 });
+    }
+    jobs.push({ id: 16, title: "Leaf Child A", status: "waiting", parent_id: 15 });
+    jobs.push({ id: 17, title: "Leaf Child B", status: "queued", parent_id: 15 });
+
+    const fetcher = makeMockFetcher(jobs, 200);
+    const res = await chain.fetchFullJobChain(jobs[14], fetcher, { maxUpSteps: 5, maxExpandNodes: 50 });
+    assert.strictEqual(res.upTruncated, true);
+    assert.strictEqual(res.truncated, true);
+    assert.strictEqual(res.currentJobChildrenTruncated, false);
+    const directChildren = res.jobs.filter(j => j.parent_id === 15).map(j => j.id).sort((a, b) => a - b);
+    assert.deepStrictEqual(directChildren, [16, 17]);
+  }
+
+  // 8. Small chain reports truncated === false
+  {
+    const jobs = [
+      { id: 1, title: "R", status: "done", parent_id: null },
+      { id: 2, title: "C", status: "claimed", parent_id: 1 },
+      { id: 3, title: "G", status: "waiting", parent_id: 2 }
+    ];
+    const fetcher = makeMockFetcher(jobs, 200);
+    const res = await chain.fetchFullJobChain(jobs[1], fetcher);
+    assert.strictEqual(res.truncated, false);
+    assert.strictEqual(res.unexpandedCount, 0);
+    assert.deepStrictEqual(res.jobs.map(j => j.id).sort((a, b) => a - b), [1, 2, 3]);
+  }
+
+  // 9. Non-advancing cursor guard prevents infinite loops and marks pagesTruncated
+  {
+    const badFetcher = async function () {
+      return {
+        ok: true,
+        status: 200,
+        data: { jobs: [{ id: 2, title: "Dup", status: "done", parent_id: 1 }], has_more: true, next_cursor: 0 }
+      };
+    };
+    const res = await chain.fetchChildrenAcrossStatuses(1, badFetcher, { maxPagesPerStatus: 5 });
+    assert.strictEqual(res.truncated, true);
+    assert.deepStrictEqual(res.jobs.map(j => j.id), [2]);
+  }
+
+  console.log("ALL_CHAIN_JS_TESTS_PASSED");
+})().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
 `
 	cmd := exec.Command(nodeBin, "-e", script)
 	out, err := cmd.CombinedOutput()
