@@ -917,6 +917,53 @@ func TestShepherdNonZeroExitFailsWithoutEvaluator(t *testing.T) {
 	if gotOK.Status != store.StatusDone {
 		t.Fatalf("jOK status = %s, want done", gotOK.Status)
 	}
+
+	// 3. Unknown exit code (e.g. Windows Codex .cmd wrapper without agent.exit):
+	// must NOT short-circuit fail as non-zero exit; must pass ExitCodeUnknown=true to Evaluator.
+	jUnk, _, err := st.CreateJob(ctx, store.CreateJobParams{
+		RequestID:          "unknown-exit-1",
+		Title:              "Windows Codex unknown exit code job",
+		AcceptanceCriteria: "passes via evaluator evidence",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob jUnk: %v", err)
+	}
+	claimedUnk, ok, err := st.Claim(ctx, 2)
+	if err != nil || !ok || claimedUnk.ID != jUnk.ID {
+		t.Fatalf("Claim jUnk: ok=%v err=%v", ok, err)
+	}
+	mockAdapter.SetJobBehavior(jUnk.ID, adapter.MockBehavior{
+		ExitAfterPolls:  1,
+		ExitCode:        0,
+		ExitCodeUnknown: true,
+		Evidence: &adapter.Evidence{
+			FinalReport:     "Final answer\ntokens used: 5000",
+			ErrLogTail:      "Final answer\ntokens used: 5000",
+			ExitCodeUnknown: true,
+			Notes:           []string{"exit code unknown"},
+		},
+	})
+	if _, err := mockAdapter.Launch(ctx, claimedUnk); err != nil {
+		t.Fatalf("Launch jUnk: %v", err)
+	}
+
+	if err := shepherd.SweepOnce(ctx); err != nil {
+		t.Fatalf("SweepOnce (unknown exit): %v", err)
+	}
+
+	if spyEval.Calls() != 2 {
+		t.Fatalf("Evaluator.Evaluate calls = %d, want 2 for unknown exit code", spyEval.Calls())
+	}
+	if !spyEval.LastEvidence().ExitCodeUnknown {
+		t.Errorf("Evaluator received ExitCodeUnknown = false, want true")
+	}
+	gotUnk, err := st.GetJob(ctx, jUnk.ID)
+	if err != nil {
+		t.Fatalf("GetJob jUnk: %v", err)
+	}
+	if gotUnk.Status != store.StatusDone {
+		t.Fatalf("jUnk status = %s, want done", gotUnk.Status)
+	}
 }
 
 func TestE2ENonZeroExitFailsJobAndCancelsChild(t *testing.T) {

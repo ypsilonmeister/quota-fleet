@@ -33,6 +33,7 @@ type AgentDriver struct {
 	CommandOverride     string
 	Env                 map[string]string
 	ForceStdinNoDevNull bool
+	WindowsStdinArg     string
 }
 
 // defaultDriverSpec provides minimal fallback metadata for the 3 built-in agent families
@@ -41,15 +42,18 @@ type AgentDriver struct {
 type defaultDriverSpec struct {
 	preflight           string
 	launch              string
+	resume              string
 	sessionLogGlob      string
 	promptStyle         PromptStyle
 	forceStdinNoDevNull bool
+	windowsStdinArg     string
 }
 
 var builtinDriverDefaults = map[string]defaultDriverSpec{
 	"claude": {
 		preflight:      "claude --version",
 		launch:         "claude -p --model {model}",
+		resume:         "claude -p --resume {session_id}",
 		sessionLogGlob: "~/.claude/projects/*/*.jsonl",
 		promptStyle:    PromptStyleStdin,
 	},
@@ -59,6 +63,7 @@ var builtinDriverDefaults = map[string]defaultDriverSpec{
 		sessionLogGlob:      "~/.codex/sessions/*/*.jsonl",
 		promptStyle:         PromptStyleStdin,
 		forceStdinNoDevNull: true,
+		windowsStdinArg:     "-",
 	},
 	"agy": {
 		preflight:   "agy --version",
@@ -83,11 +88,13 @@ func ResolveDriver(cfg *config.Config, host config.HostConfig, agentName string)
 	if def, ok := builtinDriverDefaults[name]; ok {
 		drv.Preflight = def.preflight
 		drv.Launch = def.launch
+		drv.Resume = def.resume
 		drv.SessionLogGlob = def.sessionLogGlob
 		if def.promptStyle != "" {
 			drv.PromptStyle = def.promptStyle
 		}
 		drv.ForceStdinNoDevNull = def.forceStdinNoDevNull
+		drv.WindowsStdinArg = def.windowsStdinArg
 	}
 
 	if cfg != nil {
@@ -157,9 +164,45 @@ func (d AgentDriver) BuildPreflightCommand() (string, error) {
 	return strings.Join(lines, "; "), nil
 }
 
+// BuildWindowsPreflightCommand renders the preflight check command for a Windows host
+// wrapped in a non-interactive PowerShell invocation.
+func (d AgentDriver) BuildWindowsPreflightCommand() (string, error) {
+	tmpl := strings.TrimSpace(d.Preflight)
+	if tmpl == "" {
+		return "", fmt.Errorf("adapter: agent %q has no preflight command configured", d.Name)
+	}
+	tokens := strings.Fields(tmpl)
+	if len(tokens) == 0 {
+		return "", fmt.Errorf("adapter: agent %q has no preflight command configured", d.Name)
+	}
+	exe := tokens[0]
+	if strings.TrimSpace(d.CommandOverride) != "" {
+		exe = strings.TrimSpace(d.CommandOverride)
+	}
+	var stmts []string
+	stmts = append(stmts, formatPowerShellEnvAssigns(d.Env)...)
+	psTokens := make([]string, 0, len(tokens))
+	psTokens = append(psTokens, psExpr(exe))
+	for _, arg := range tokens[1:] {
+		psTokens = append(psTokens, psExpr(arg))
+	}
+	stmts = append(stmts, "& "+strings.Join(psTokens, " ")+"; exit $LASTEXITCODE")
+	return wrapPowerShellCommand(strings.Join(stmts, "; ")), nil
+}
+
+// selectLaunchTemplate chooses the resume template when job.SessionID is set and the driver
+// supports resume, otherwise falling back to the standard launch template.
+func (d AgentDriver) selectLaunchTemplate(job *store.Job) (string, bool) {
+	if job != nil && strings.TrimSpace(job.SessionID) != "" && strings.TrimSpace(d.Resume) != "" {
+		return strings.TrimSpace(d.Resume), true
+	}
+	return strings.TrimSpace(d.Launch), false
+}
+
 // BuildLaunchCommand constructs the agent invocation line placed inside run.sh.
-// It applies per-host command overrides, template placeholders ({model}, {workdir}, {prompt_file}),
+// It applies per-host command overrides, template placeholders ({model}, {workdir}, {prompt_file}, {session_id}),
 // conditional sandbox_flag attachment, and stdin/stdout redirections.
+// On resume (when job.SessionID is set and Resume is configured), --model/-m flags are omitted.
 //
 // Codex gotcha (design §5): Codex reads its prompt from stdin via `< prompt.txt` and MUST NOT
 // have `</dev/null` appended (which would override stdin and feed an empty prompt).
@@ -167,11 +210,12 @@ func (d AgentDriver) BuildLaunchCommand(job *store.Job, workdir, promptFile, log
 	if job == nil {
 		return "", ErrNilJob
 	}
-	if strings.TrimSpace(d.Launch) == "" {
+	tmpl, isResume := d.selectLaunchTemplate(job)
+	if tmpl == "" {
 		return "", fmt.Errorf("adapter: agent %q has empty launch template", d.Name)
 	}
 
-	tokens := strings.Fields(d.Launch)
+	tokens := strings.Fields(tmpl)
 	if len(tokens) == 0 {
 		return "", fmt.Errorf("adapter: agent %q has empty launch template", d.Name)
 	}
@@ -184,13 +228,17 @@ func (d AgentDriver) BuildLaunchCommand(job *store.Job, workdir, promptFile, log
 	}
 
 	model := strings.TrimSpace(job.Model)
+	if isResume {
+		model = ""
+	}
+	sessionID := strings.TrimSpace(job.SessionID)
 	usedPromptPlaceholder := false
 
 	var expanded []string
 	for i := 0; i < len(tokens); i++ {
 		tok := tokens[i]
 
-		// Drop `--model {model}` or `-m {model}` cleanly when job.Model is empty.
+		// Drop `--model {model}` or `-m {model}` cleanly when job.Model is empty or on resume.
 		if (tok == "--model" || tok == "-m") && i+1 < len(tokens) && tokens[i+1] == "{model}" {
 			if model == "" {
 				i++
@@ -215,10 +263,10 @@ func (d AgentDriver) BuildLaunchCommand(job *store.Job, workdir, promptFile, log
 			tok = strings.ReplaceAll(tok, "{prompt_file}", shellPath(promptFile))
 		}
 		if strings.Contains(tok, "{session_id}") {
-			if strings.TrimSpace(job.SessionID) == "" {
+			if sessionID == "" {
 				continue
 			}
-			tok = strings.ReplaceAll(tok, "{session_id}", shellQuote(strings.TrimSpace(job.SessionID)))
+			tok = strings.ReplaceAll(tok, "{session_id}", shellQuote(sessionID))
 		}
 
 		expanded = append(expanded, tok)
@@ -248,6 +296,114 @@ func (d AgentDriver) BuildLaunchCommand(job *store.Job, workdir, promptFile, log
 		}
 	}
 	return cmd, nil
+}
+
+// BuildWindowsLaunchCommand constructs the agent invocation line placed inside agent-run.cmd.
+// It uses the same config-driven driver fields as BuildLaunchCommand while applying Windows
+// cmd.exe syntax, separate stdout/stderr log redirections (agent.log and agent.err.log),
+// Codex's stdin `-` argument (without `</dev/null` or `< NUL`), and omitting `--model` on resume.
+func (d AgentDriver) BuildWindowsLaunchCommand(job *store.Job, workdir, promptFile, logFile, errLogFile string, allowSandbox bool) (string, error) {
+	if job == nil {
+		return "", ErrNilJob
+	}
+	tmpl, isResume := d.selectLaunchTemplate(job)
+	if tmpl == "" {
+		return "", fmt.Errorf("adapter: agent %q has empty launch template", d.Name)
+	}
+
+	tokens := strings.Fields(tmpl)
+	if len(tokens) == 0 {
+		return "", fmt.Errorf("adapter: agent %q has empty launch template", d.Name)
+	}
+
+	exeRaw := tokens[0]
+	if strings.TrimSpace(d.CommandOverride) != "" {
+		exeRaw = strings.TrimSpace(d.CommandOverride)
+	}
+
+	model := strings.TrimSpace(job.Model)
+	if isResume {
+		model = ""
+	}
+	sessionID := strings.TrimSpace(job.SessionID)
+	winWorkdir := normalizeWindowsPath(workdir)
+	winPrompt := normalizeWindowsPath(promptFile)
+	winLog := normalizeWindowsPath(logFile)
+	winErrLog := normalizeWindowsPath(errLogFile)
+	usedPromptPlaceholder := false
+
+	rawTokens := make([]string, 0, len(tokens)+4)
+	rawTokens = append(rawTokens, exeRaw)
+
+	for i := 1; i < len(tokens); i++ {
+		tok := tokens[i]
+
+		// Drop `--model {model}` or `-m {model}` cleanly when job.Model is empty or on resume.
+		if (tok == "--model" || tok == "-m") && i+1 < len(tokens) && tokens[i+1] == "{model}" {
+			if model == "" {
+				i++
+				continue
+			}
+			rawTokens = append(rawTokens, tok, model)
+			i++
+			continue
+		}
+
+		if strings.Contains(tok, "{model}") {
+			if model == "" {
+				continue
+			}
+			tok = strings.ReplaceAll(tok, "{model}", model)
+		}
+		if strings.Contains(tok, "{workdir}") {
+			tok = strings.ReplaceAll(tok, "{workdir}", winWorkdir)
+		}
+		if strings.Contains(tok, "{prompt_file}") {
+			usedPromptPlaceholder = true
+			tok = strings.ReplaceAll(tok, "{prompt_file}", winPrompt)
+		}
+		if strings.Contains(tok, "{session_id}") {
+			if sessionID == "" {
+				continue
+			}
+			tok = strings.ReplaceAll(tok, "{session_id}", sessionID)
+		}
+
+		rawTokens = append(rawTokens, tok)
+	}
+
+	if allowSandbox && strings.TrimSpace(d.SandboxFlag) != "" {
+		rawTokens = append(rawTokens, strings.Fields(d.SandboxFlag)...)
+	}
+
+	switch d.effectivePromptStyle() {
+	case PromptStyleArgument:
+		if usedPromptPlaceholder {
+			cmd := formatWindowsCommandLine(rawTokens)
+			return fmt.Sprintf("%s < NUL > %s 2> %s", cmd, cmdQuoteArg(winLog), cmdQuoteArg(winErrLog)), nil
+		}
+		// cmd.exe cannot safely pass multi-line UTF-8 file contents as a single argument;
+		// delegate argument reading to PowerShell so prompt.txt is passed verbatim.
+		psArgs := make([]string, 0, len(rawTokens)+1)
+		for _, t := range rawTokens {
+			psArgs = append(psArgs, psExpr(t))
+		}
+		psArgs = append(psArgs, fmt.Sprintf("([System.IO.File]::ReadAllText(%s, [System.Text.Encoding]::UTF8))", psExpr(winPrompt)))
+		psCmd := wrapPowerShellCommand("& " + strings.Join(psArgs, " ") + "; exit $LASTEXITCODE")
+		return fmt.Sprintf("%s < NUL > %s 2> %s", psCmd, cmdQuoteArg(winLog), cmdQuoteArg(winErrLog)), nil
+	default:
+		if d.WindowsStdinArg != "" && !usedPromptPlaceholder {
+			if len(rawTokens) == 0 || rawTokens[len(rawTokens)-1] != d.WindowsStdinArg {
+				rawTokens = append(rawTokens, d.WindowsStdinArg)
+			}
+		}
+		cmd := formatWindowsCommandLine(rawTokens)
+		// Codex always receives prompt.txt on stdin and must NEVER get `</dev/null` or `< NUL`.
+		if d.ForceStdinNoDevNull || !usedPromptPlaceholder {
+			return fmt.Sprintf("%s < %s > %s 2> %s", cmd, cmdQuoteArg(winPrompt), cmdQuoteArg(winLog), cmdQuoteArg(winErrLog)), nil
+		}
+		return fmt.Sprintf("%s < NUL > %s 2> %s", cmd, cmdQuoteArg(winLog), cmdQuoteArg(winErrLog)), nil
+	}
 }
 
 func (d AgentDriver) effectivePromptStyle() PromptStyle {
@@ -403,7 +559,9 @@ func shellEnvValue(v string) string {
 	return `"` + v + `"`
 }
 
-// normalizeRemotePath cleans a POSIX or tilde-prefixed path for prefix/containment checks.
+// normalizeRemotePath cleans a POSIX, tilde-prefixed, or Windows path for prefix/containment checks.
+// Windows drive paths (e.g. `H:\a`) and UNC paths (`\\server\share`) are normalized to lowercase
+// forward-slash form with traversal clamped to the drive/UNC root.
 func normalizeRemotePath(p string) string {
 	p = strings.TrimSpace(p)
 	if p == "" {
@@ -420,7 +578,28 @@ func normalizeRemotePath(p string) string {
 		}
 		return "~" + cleaned
 	}
+	if len(p) >= 2 && isASCIILetter(p[0]) && p[1] == ':' {
+		drive := strings.ToLower(p[:2])
+		rest := p[2:]
+		if rest == "" || rest == "/" {
+			return drive + "/"
+		}
+		cleaned := path.Clean("/" + rest)
+		return drive + strings.ToLower(cleaned)
+	}
+	if strings.HasPrefix(p, "//") {
+		rest := strings.TrimLeft(p, "/")
+		if rest == "" {
+			return "//"
+		}
+		cleaned := path.Clean("/" + rest)
+		return "/" + strings.ToLower(cleaned)
+	}
 	return path.Clean(p)
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // isSubpath reports whether target is strictly inside root after cleaning both paths.
@@ -433,8 +612,8 @@ func isSubpath(target, root string) bool {
 	if nt == nr {
 		return false
 	}
-	if nr == "/" {
-		return strings.HasPrefix(nt, "/")
+	if strings.HasSuffix(nr, "/") {
+		return strings.HasPrefix(nt, nr)
 	}
 	return strings.HasPrefix(nt, nr+"/")
 }
@@ -450,7 +629,16 @@ func isPathDenied(target string, denyPaths []string) bool {
 		if nd == "" {
 			continue
 		}
-		if nt == nd || strings.HasPrefix(nt, nd+"/") {
+		if nt == nd {
+			return true
+		}
+		if strings.HasSuffix(nd, "/") {
+			if strings.HasPrefix(nt, nd) {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(nt, nd+"/") {
 			return true
 		}
 	}

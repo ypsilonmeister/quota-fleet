@@ -20,12 +20,12 @@ type SSHAdapterOptions struct {
 	LogTailLines int
 	// LogMaxBytes caps Evidence.FinalReport byte length.
 	LogMaxBytes int
-	// WindowsLauncher optionally overrides the default unimplemented Windows stub.
+	// WindowsLauncher optionally overrides the default Windows WMI launcher.
 	WindowsLauncher OSLauncher
 }
 
 // SSHAdapter is the real Host/Agent Adapter backed by a Transport (SSH or Local)
-// and OS-specific launchers (Linux implemented; Windows stubbed for future WMI support).
+// and OS-specific launchers (Linux setsid/nohup and Windows WMI Win32_Process.Create).
 type SSHAdapter struct {
 	cfg       *config.Config
 	transport Transport
@@ -44,7 +44,7 @@ func NewSSHAdapter(cfg *config.Config, opts SSHAdapterOptions) *SSHAdapter {
 	}
 	win := opts.WindowsLauncher
 	if win == nil {
-		win = newWindowsLauncher()
+		win = newWindowsLauncher(tr, opts.ArtifactFiles, opts.LogTailLines, opts.LogMaxBytes)
 	}
 	return &SSHAdapter{
 		cfg:       cfg,
@@ -101,6 +101,9 @@ func (a *SSHAdapter) Status(ctx context.Context, job *store.Job) (RunState, erro
 	if err != nil {
 		return RunState{}, err
 	}
+	if err := checkDeniedPaths(host, job, workdir); err != nil {
+		return RunState{}, err
+	}
 	return launcher.Status(ctx, host, job, workdir)
 }
 
@@ -111,6 +114,9 @@ func (a *SSHAdapter) CollectEvidence(ctx context.Context, job *store.Job) (Evide
 	}
 	host, launcher, workdir, err := a.resolveTarget(job)
 	if err != nil {
+		return Evidence{}, err
+	}
+	if err := checkDeniedPaths(host, job, workdir); err != nil {
 		return Evidence{}, err
 	}
 	return launcher.CollectEvidence(ctx, host, job, workdir)
@@ -125,14 +131,19 @@ func (a *SSHAdapter) Preflight(ctx context.Context, hostName, agentName string) 
 	if err != nil {
 		return CommandResult{}, err
 	}
-	if strings.EqualFold(strings.TrimSpace(host.OS), "windows") {
-		return CommandResult{}, fmt.Errorf("%w: windows preflight is not yet implemented", ErrUnsupportedOS)
+	if _, err := a.launcherForOS(host.OS); err != nil {
+		return CommandResult{}, err
 	}
 	driver, err := ResolveDriver(a.cfg, host, agentName)
 	if err != nil {
 		return CommandResult{}, err
 	}
-	cmd, err := driver.BuildPreflightCommand()
+	var cmd string
+	if isWindowsHost(host) {
+		cmd, err = driver.BuildWindowsPreflightCommand()
+	} else {
+		cmd, err = driver.BuildPreflightCommand()
+	}
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -189,6 +200,9 @@ func resolveWorkdir(host config.HostConfig, job *store.Job) (string, error) {
 		return wd, nil
 	}
 	if root := strings.TrimSpace(host.WorkdirRoot); root != "" && job.ID > 0 {
+		if isWindowsHost(host) {
+			return joinWindowsPath(root, fmt.Sprintf("job-%d", job.ID)), nil
+		}
 		return joinRemotePath(root, fmt.Sprintf("job-%d", job.ID)), nil
 	}
 	return "", errors.New("adapter: job workdir must not be empty")

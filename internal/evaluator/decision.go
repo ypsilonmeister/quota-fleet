@@ -481,6 +481,21 @@ func buildDecisionSharedInput(ctx context.Context, job *store.Job, ev adapter.Ev
 	appendSection("Job Title", truncateHeadRunes(job.Title, maxTitleRunes))
 	appendSection("Job Instructions", truncateHeadRunes(job.Instructions, maxInstructionsRunes))
 	appendSection("Agent Final Report (agent.log tail)", truncateTailRunes(ev.FinalReport, maxFinalReportRunes))
+	if strings.TrimSpace(ev.ErrLogTail) != "" && strings.TrimSpace(ev.ErrLogTail) != strings.TrimSpace(ev.FinalReport) {
+		appendSection("Agent Stderr Log (agent.err.log tail)", truncateTailRunes(ev.ErrLogTail, maxFinalReportRunes))
+	}
+	if ev.ExitCodeUnknown || len(ev.Notes) > 0 {
+		var notes []string
+		if ev.ExitCodeUnknown {
+			notes = append(notes, "exit_code_unknown: true (exit code could not be captured; rely on logs, artifacts, and git status)")
+		}
+		for _, n := range ev.Notes {
+			if t := strings.TrimSpace(n); t != "" {
+				notes = append(notes, t)
+			}
+		}
+		appendSection("Execution Notes", strings.Join(notes, "\n"))
+	}
 	appendSection("Diff Summary", truncateHeadRunes(ev.DiffSummary, maxDiffSummaryRunes))
 
 	if len(ev.Artifacts) > 0 {

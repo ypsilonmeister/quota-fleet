@@ -43,6 +43,7 @@ hosts:
     os: windows
     workdir_root: 'C:\Users\user\agent-work'
     owner_fixup: true
+    owner_fixup_user: 'HOME-WIN\user'
   local-node:
     transport: local
     os: linux
@@ -115,6 +116,9 @@ future_unknown_key:
 	}
 	if !cfg.Hosts["home-win"].OwnerFixup {
 		t.Errorf("home-win owner_fixup = false, want true")
+	}
+	if got := cfg.Hosts["home-win"].OwnerFixupUser; got != `HOME-WIN\user` {
+		t.Errorf("home-win owner_fixup_user = %q, want %q", got, `HOME-WIN\user`)
 	}
 	if cfg.Agents["claude"].Resume != "claude -p --resume {session_id}" {
 		t.Errorf("claude resume = %q", cfg.Agents["claude"].Resume)
@@ -218,6 +222,37 @@ agents:
     prompt_style: env
 `,
 			wantErr: "prompt_style",
+		},
+		{
+			name: "owner_fixup_user on linux host",
+			yaml: `
+instance_id: "inst-1"
+limits:
+  max_claimed: 1
+  attempts_cap: 1
+hosts:
+  ubuntu:
+    transport: ssh
+    os: linux
+    owner_fixup_user: "HOST\\worker"
+`,
+			wantErr: "owner_fixup_user",
+		},
+		{
+			name: "owner_fixup_user with disallowed shell characters",
+			yaml: `
+instance_id: "inst-1"
+limits:
+  max_claimed: 1
+  attempts_cap: 1
+hosts:
+  win:
+    transport: ssh
+    os: windows
+    owner_fixup: true
+    owner_fixup_user: "HOST\\worker; whoami"
+`,
+			wantErr: "owner_fixup_user",
 		},
 	}
 

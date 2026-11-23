@@ -32,6 +32,8 @@ type MockBehavior struct {
 	ExitAfterPolls int
 	// ExitCode is the exit code reported once the job transitions to StateExited.
 	ExitCode int
+	// ExitCodeUnknown marks StateExited as having an unknown exit code (e.g. Windows Codex .cmd wrapper).
+	ExitCodeUnknown bool
 	// Evidence, if non-nil, overrides the default Evidence returned by CollectEvidence.
 	Evidence *Evidence
 }
@@ -42,11 +44,12 @@ type MockOptions struct {
 }
 
 type mockRun struct {
-	pid         int
-	sessionID   string
-	state       StateKind
-	exitCode    int
-	statusPolls int
+	pid             int
+	sessionID       string
+	state           StateKind
+	exitCode        int
+	exitCodeUnknown bool
+	statusPolls     int
 }
 
 // MockAdapter is a thread-safe in-memory Adapter implementation for testing and Phase 1 serve.
@@ -217,7 +220,7 @@ func (m *MockAdapter) Status(ctx context.Context, job *store.Job) (RunState, err
 		return RunState{State: StateMissing, Detail: "no active mock run"}, nil
 	}
 	if run.state == StateExited {
-		return RunState{State: StateExited, ExitCode: run.exitCode}, nil
+		return RunState{State: StateExited, ExitCode: run.exitCode, ExitCodeUnknown: run.exitCodeUnknown}, nil
 	}
 
 	run.statusPolls++
@@ -229,8 +232,9 @@ func (m *MockAdapter) Status(ctx context.Context, job *store.Job) (RunState, err
 		if run.statusPolls >= threshold {
 			run.state = StateExited
 			run.exitCode = beh.ExitCode
+			run.exitCodeUnknown = beh.ExitCodeUnknown
 			m.activeRunning--
-			return RunState{State: StateExited, ExitCode: run.exitCode}, nil
+			return RunState{State: StateExited, ExitCode: run.exitCode, ExitCodeUnknown: run.exitCodeUnknown}, nil
 		}
 	}
 

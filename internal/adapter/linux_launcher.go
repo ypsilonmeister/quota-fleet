@@ -14,12 +14,15 @@ import (
 )
 
 const (
-	promptFileName  = "prompt.txt"
-	runScriptName   = "run.sh"
-	pidFileName     = "agent.pid"
-	exitFileName    = "agent.exit"
-	exitTmpFileName = "agent.exit.tmp"
-	logFileName     = "agent.log"
+	promptFileName   = "prompt.txt"
+	runScriptName    = "run.sh"
+	winRunScriptName = "agent-run.cmd"
+	legacyLaunchPS1  = "launch.ps1"
+	pidFileName      = "agent.pid"
+	exitFileName     = "agent.exit"
+	exitTmpFileName  = "agent.exit.tmp"
+	logFileName      = "agent.log"
+	errLogFileName   = "agent.err.log"
 
 	defaultLogTailLines = 100
 	defaultLogMaxBytes  = 16 * 1024
@@ -35,12 +38,15 @@ var DefaultArtifactFiles = []string{
 
 // adapterControlFiles are ignored when determining whether git status --porcelain shows real diffs.
 var adapterControlFiles = map[string]bool{
-	promptFileName:  true,
-	runScriptName:   true,
-	pidFileName:     true,
-	exitFileName:    true,
-	exitTmpFileName: true,
-	logFileName:     true,
+	promptFileName:   true,
+	runScriptName:    true,
+	winRunScriptName: true,
+	legacyLaunchPS1:  true,
+	pidFileName:      true,
+	exitFileName:     true,
+	exitTmpFileName:  true,
+	logFileName:      true,
+	errLogFileName:   true,
 }
 
 // ErrUnsupportedOS is returned when a host's OS has no OSLauncher implementation yet.

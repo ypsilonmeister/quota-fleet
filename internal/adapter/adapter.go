@@ -34,17 +34,21 @@ const (
 
 // RunState represents the observed runtime state of a job on its worker host.
 type RunState struct {
-	State    StateKind `json:"state"`
-	ExitCode int       `json:"exit_code"`
-	Detail   string    `json:"detail,omitempty"`
+	State           StateKind `json:"state"`
+	ExitCode        int       `json:"exit_code"`
+	ExitCodeUnknown bool      `json:"exit_code_unknown,omitempty"`
+	Detail          string    `json:"detail,omitempty"`
 }
 
 // Evidence holds generic artifacts collected after a job exits for Evaluator inspection.
 type Evidence struct {
-	HasDiff        bool              `json:"has_diff"`
-	DiffSummary    string            `json:"diff_summary,omitempty"`
-	Artifacts      map[string]bool   `json:"artifacts,omitempty"`
-	CommandOutputs map[string]string `json:"command_outputs,omitempty"`
-	FinalReport    string            `json:"final_report,omitempty"`
-	ExitCode       int               `json:"exit_code"`
+	HasDiff         bool              `json:"has_diff"`
+	DiffSummary     string            `json:"diff_summary,omitempty"`
+	Artifacts       map[string]bool   `json:"artifacts,omitempty"`
+	CommandOutputs  map[string]string `json:"command_outputs,omitempty"`
+	FinalReport     string            `json:"final_report,omitempty"`
+	ErrLogTail      string            `json:"err_log_tail,omitempty"`
+	ExitCode        int               `json:"exit_code"`
+	ExitCodeUnknown bool              `json:"exit_code_unknown,omitempty"`
+	Notes           []string          `json:"notes,omitempty"`
 }

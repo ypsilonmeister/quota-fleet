@@ -722,38 +722,44 @@ func TestSSHAdapterCollectEvidence(t *testing.T) {
 	})
 }
 
-func TestSSHAdapterWindowsReturnsUnsupportedOS(t *testing.T) {
+func TestSSHAdapterUnsupportedOSReturnsError(t *testing.T) {
 	cfg := testFleetConfig()
+	cfg.Hosts["bsd-box"] = config.HostConfig{
+		Transport:   "ssh",
+		SSH:         "worker@bsd.example.ts.net",
+		OS:          "freebsd",
+		WorkdirRoot: "/home/worker/agent-work",
+	}
 	fake := NewFakeTransport()
 	a := NewSSHAdapter(cfg, SSHAdapterOptions{Transport: fake})
 	ctx := context.Background()
 
-	winJob := &store.Job{
+	bsdJob := &store.Job{
 		ID:           50,
-		Title:        "Win job",
+		Title:        "Unsupported OS job",
 		Agent:        "claude",
-		Host:         "home-win",
-		Workdir:      `C:\Users\worker\agent-work\job-50`,
+		Host:         "bsd-box",
+		Workdir:      "/home/worker/agent-work/job-50",
 		Instructions: "hello",
 	}
 
-	if err := a.PrepareWorkdir(ctx, winJob); !errors.Is(err, ErrUnsupportedOS) {
-		t.Errorf("PrepareWorkdir(windows) = %v, want ErrUnsupportedOS", err)
+	if err := a.PrepareWorkdir(ctx, bsdJob); !errors.Is(err, ErrUnsupportedOS) {
+		t.Errorf("PrepareWorkdir(freebsd) = %v, want ErrUnsupportedOS", err)
 	}
-	if _, err := a.Launch(ctx, winJob); !errors.Is(err, ErrUnsupportedOS) {
-		t.Errorf("Launch(windows) = %v, want ErrUnsupportedOS", err)
+	if _, err := a.Launch(ctx, bsdJob); !errors.Is(err, ErrUnsupportedOS) {
+		t.Errorf("Launch(freebsd) = %v, want ErrUnsupportedOS", err)
 	}
-	if _, err := a.Status(ctx, winJob); !errors.Is(err, ErrUnsupportedOS) {
-		t.Errorf("Status(windows) = %v, want ErrUnsupportedOS", err)
+	if _, err := a.Status(ctx, bsdJob); !errors.Is(err, ErrUnsupportedOS) {
+		t.Errorf("Status(freebsd) = %v, want ErrUnsupportedOS", err)
 	}
-	if _, err := a.CollectEvidence(ctx, winJob); !errors.Is(err, ErrUnsupportedOS) {
-		t.Errorf("CollectEvidence(windows) = %v, want ErrUnsupportedOS", err)
+	if _, err := a.CollectEvidence(ctx, bsdJob); !errors.Is(err, ErrUnsupportedOS) {
+		t.Errorf("CollectEvidence(freebsd) = %v, want ErrUnsupportedOS", err)
 	}
-	if _, err := a.Preflight(ctx, "home-win", "claude"); !errors.Is(err, ErrUnsupportedOS) {
-		t.Errorf("Preflight(windows) = %v, want ErrUnsupportedOS", err)
+	if _, err := a.Preflight(ctx, "bsd-box", "claude"); !errors.Is(err, ErrUnsupportedOS) {
+		t.Errorf("Preflight(freebsd) = %v, want ErrUnsupportedOS", err)
 	}
 	if len(fake.Calls()) != 0 {
-		t.Errorf("expected 0 transport calls for unimplemented windows host, got %d", len(fake.Calls()))
+		t.Errorf("expected 0 transport calls for unsupported OS host, got %d", len(fake.Calls()))
 	}
 }
 

@@ -250,6 +250,7 @@ type HostConfig struct {
 	StrictHostKeyChecking string                       `yaml:"strict_host_key_checking"`
 	WorkdirRoot           string                       `yaml:"workdir_root"`
 	OwnerFixup            bool                         `yaml:"owner_fixup"`
+	OwnerFixupUser        string                       `yaml:"owner_fixup_user"`
 	DenyPaths             []string                     `yaml:"deny_paths"`
 	Agents                map[string]HostAgentOverride `yaml:"agents"`
 }
@@ -335,6 +336,14 @@ func (c *Config) Validate() error {
 		}
 		if sk := strings.TrimSpace(h.StrictHostKeyChecking); sk != "" && sk != "yes" && sk != "accept-new" && sk != "no" {
 			errs = append(errs, fmt.Errorf("hosts.%s.strict_host_key_checking must be \"yes\", \"accept-new\", or \"no\" (got %q)", name, h.StrictHostKeyChecking))
+		}
+		if owner := strings.TrimSpace(h.OwnerFixupUser); owner != "" {
+			if h.OS != "" && h.OS != "windows" {
+				errs = append(errs, fmt.Errorf("hosts.%s.owner_fixup_user is only supported on windows hosts (os=%q)", name, h.OS))
+			}
+			if strings.ContainsAny(owner, "\r\n\"'`$;|&<>") {
+				errs = append(errs, fmt.Errorf("hosts.%s.owner_fixup_user contains disallowed characters (got %q)", name, h.OwnerFixupUser))
+			}
 		}
 	}
 

@@ -153,10 +153,14 @@ func (s *Shepherd) finishExitedJob(ctx context.Context, job *store.Job, state ad
 		}
 		return
 	}
-	ev.ExitCode = state.ExitCode
+	if state.ExitCodeUnknown {
+		ev.ExitCodeUnknown = true
+	} else {
+		ev.ExitCode = state.ExitCode
+	}
 
 	var terminalJob *store.Job
-	if state.ExitCode != 0 {
+	if !state.ExitCodeUnknown && state.ExitCode != 0 {
 		s.clearEvalFailure(job.ID)
 		reason, resultText := formatNonZeroExitFailure(state.ExitCode, ev.FinalReport)
 		res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
