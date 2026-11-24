@@ -3,38 +3,13 @@
 
   const TOKEN_KEY = "quota_fleet_token";
   const AUTH_MODE_KEY = "quota_fleet_auth_mode";
-  const DIRECTION_KEY = "qf-direction";
-  const DEFAULT_DIRECTION = "console";
-  const VALID_DIRECTIONS = new Set(["console", "ledger"]);
-
-  function detectPreferredDirection(matchMediaFn) {
-    const mm = typeof matchMediaFn === "function"
-      ? matchMediaFn
-      : (typeof window !== "undefined" && typeof window.matchMedia === "function"
-        ? window.matchMedia.bind(window)
-        : null);
-    if (!mm) {
-      return DEFAULT_DIRECTION;
-    }
-    try {
-      if (mm("(prefers-color-scheme: dark)").matches) {
-        return "console";
-      }
-      if (mm("(prefers-color-scheme: light)").matches) {
-        return "ledger";
-      }
-    } catch (_err) {
-      // Fall through to default direction.
-    }
-    return DEFAULT_DIRECTION;
-  }
-
-  function resolveDirection(value, matchMediaFn) {
-    if (VALID_DIRECTIONS.has(value)) {
-      return value;
-    }
-    return detectPreferredDirection(matchMediaFn);
-  }
+  const directionHelper =
+    (typeof globalThis !== "undefined" && globalThis.__qfDirection) ||
+    (typeof window !== "undefined" && window.__qfDirection) ||
+    (typeof require === "function" ? require("./direction.js") : null);
+  const DIRECTION_KEY = directionHelper ? directionHelper.DIRECTION_KEY : "qf-direction";
+  const detectPreferredDirection = directionHelper.detectPreferredDirection;
+  const resolveDirection = directionHelper.resolveDirection;
   const ALL_STATUSES = [
     "draft",
     "queued",
@@ -682,35 +657,11 @@
   };
 
   function readStoredDirection() {
-    try {
-      return resolveDirection(localStorage.getItem(DIRECTION_KEY));
-    } catch (_err) {
-      return resolveDirection(null);
-    }
+    return directionHelper.readStoredDirection();
   }
 
   function applyDirection(dir, persist) {
-    const next = resolveDirection(dir);
-    document.documentElement.setAttribute("data-direction", next);
-    const schemeMeta = document.querySelector('meta[name="color-scheme"]');
-    if (schemeMeta) {
-      schemeMeta.setAttribute("content", next === "ledger" ? "light" : "dark");
-    }
-    if (dom.directionSwitch) {
-      const buttons = dom.directionSwitch.querySelectorAll("[data-set-direction]");
-      for (const btn of buttons) {
-        const active = btn.getAttribute("data-set-direction") === next;
-        btn.classList.toggle("active", active);
-        btn.setAttribute("aria-pressed", active ? "true" : "false");
-      }
-    }
-    if (persist) {
-      try {
-        localStorage.setItem(DIRECTION_KEY, next);
-      } catch (_err) {
-        // Storage may be unavailable; direction still applies for this session.
-      }
-    }
+    return directionHelper.applyDirection(dir, persist);
   }
 
   applyDirection(readStoredDirection(), false);

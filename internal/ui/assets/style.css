@@ -379,20 +379,29 @@ html[data-direction="ledger"] .nav-link.active {
   color: var(--text-strong);
 }
 
-.direction-btn.active {
+.direction-btn.active,
+html[data-direction="console"] .direction-btn[data-set-direction="console"] {
   background: var(--surface-raised);
   color: var(--text-strong);
   font-weight: 600;
 }
 
-html[data-direction="ledger"] .direction-btn.active {
+html[data-direction="ledger"] .direction-btn.active,
+html[data-direction="ledger"] .direction-btn[data-set-direction="ledger"] {
   background: var(--text-strong);
   color: var(--surface);
+  font-weight: 600;
 }
 
 .direction-btn:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
+}
+
+html[data-direction="ledger"] .direction-btn.active:focus-visible,
+html[data-direction="ledger"] .direction-btn[data-set-direction="ledger"]:focus-visible {
+  outline: 2px solid var(--surface);
+  outline-offset: -3px;
 }
 
 /* ==========================================================================

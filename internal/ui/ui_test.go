@@ -39,6 +39,9 @@ func TestUIShellRoutesReturn200WithStrictCSP(t *testing.T) {
 				t.Errorf("GET %s Content-Type = %q, want text/html", path, ct)
 			}
 			body := rec.Body.String()
+			if !strings.Contains(body, `src="/ui/assets/direction.js"`) {
+				t.Errorf("GET %s body missing direction.js reference", path)
+			}
 			if !strings.Contains(body, `src="/ui/assets/app.js"`) {
 				t.Errorf("GET %s body missing app.js reference", path)
 			}
@@ -69,6 +72,7 @@ func TestUIRedirectAndAssetsAndNotFound(t *testing.T) {
 		wantCT string
 	}{
 		{path: "/ui/assets/style.css", wantCT: "text/css"},
+		{path: "/ui/assets/direction.js", wantCT: "application/javascript"},
 		{path: "/ui/assets/app.js", wantCT: "application/javascript"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
@@ -111,14 +115,21 @@ func TestUIShellAndAssetsFollowSecurityRules(t *testing.T) {
 		t.Errorf("style.css must not reference external resources")
 	}
 
-	js := string(appJS)
-	for _, forbidden := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"} {
-		if strings.Contains(js, forbidden) {
-			t.Errorf("app.js must not use %q (XSS prevention requires textContent)", forbidden)
+	for _, asset := range []struct {
+		name string
+		src  string
+	}{
+		{name: "direction.js", src: string(directionJS)},
+		{name: "app.js", src: string(appJS)},
+	} {
+		for _, forbidden := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"} {
+			if strings.Contains(asset.src, forbidden) {
+				t.Errorf("%s must not use %q (XSS prevention requires textContent)", asset.name, forbidden)
+			}
 		}
-	}
-	if strings.Contains(js, "http://") || strings.Contains(js, "https://") {
-		t.Errorf("app.js must not reference external URLs")
+		if strings.Contains(asset.src, "http://") || strings.Contains(asset.src, "https://") {
+			t.Errorf("%s must not reference external URLs", asset.name)
+		}
 	}
 }
 
@@ -200,7 +211,7 @@ func TestUIAgentVersionsAssetsPresent(t *testing.T) {
 func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
 	html := string(indexHTML)
 	for _, token := range []string{
-		`data-direction="console"`,
+		`<script src="/ui/assets/direction.js"></script>`,
 		`id="direction-switch"`,
 		`data-set-direction="console"`,
 		`data-set-direction="ledger"`,
@@ -211,12 +222,22 @@ func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
 			t.Errorf("index.html missing expected direction switcher token %q", token)
 		}
 	}
+	for _, forbidden := range []string{
+		`data-direction="console"`,
+		`direction-btn active`,
+		`aria-pressed="true"`,
+	} {
+		if strings.Contains(html, forbidden) {
+			t.Errorf("index.html must not hardcode initial direction state %q (prevents FOUC)", forbidden)
+		}
+	}
 
 	css := string(styleCSS)
 	for _, token := range []string{
 		`data-direction="console"`,
 		`data-direction="ledger"`,
 		`.direction-switch`,
+		`html[data-direction="ledger"] .direction-btn.active:focus-visible`,
 		`Hiragino Mincho ProN`,
 	} {
 		if !strings.Contains(css, token) {
@@ -224,7 +245,7 @@ func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
 		}
 	}
 
-	js := string(appJS)
+	dirJS := string(directionJS)
 	for _, token := range []string{
 		`qf-direction`,
 		`data-direction`,
@@ -232,8 +253,19 @@ func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
 		`prefers-color-scheme`,
 		`resolveDirection`,
 	} {
+		if !strings.Contains(dirJS, token) {
+			t.Errorf("direction.js missing expected direction persistence token %q", token)
+		}
+	}
+
+	js := string(appJS)
+	for _, token := range []string{
+		`applyDirection`,
+		`resolveDirection`,
+		`__qfDirection`,
+	} {
 		if !strings.Contains(js, token) {
-			t.Errorf("app.js missing expected direction persistence token %q", token)
+			t.Errorf("app.js missing expected direction helper token %q", token)
 		}
 	}
 }
@@ -245,9 +277,11 @@ func TestChainTreeLogicWithNode(t *testing.T) {
 	}
 
 	// 1. Verify JS syntax is valid.
-	syntaxCmd := exec.Command(nodeBin, "--check", "assets/app.js")
-	if out, err := syntaxCmd.CombinedOutput(); err != nil {
-		t.Fatalf("node --check assets/app.js failed: %v\n%s", err, string(out))
+	for _, assetPath := range []string{"assets/direction.js", "assets/app.js"} {
+		syntaxCmd := exec.Command(nodeBin, "--check", assetPath)
+		if out, err := syntaxCmd.CombinedOutput(); err != nil {
+			t.Fatalf("node --check %s failed: %v\n%s", assetPath, err, string(out))
+		}
 	}
 
 	// 2. Run unit tests against exported pure chain helpers in assets/app.js.
