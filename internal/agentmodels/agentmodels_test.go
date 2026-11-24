@@ -53,7 +53,7 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		"claude-opus-5-5-high           Claude Opus 5.5 (High)\n" +
 		"gpt-oss-120b-medium            GPT-OSS 120B (Medium)\n" +
 		"custom-local-model             Custom Local\n" +
-		"gemini-4-neon-medium           Duplicate Should Be Ignored\n"
+		"gemini-4-neon-medium           Gemini 4 Neon (Medium) Duplicate\n"
 
 	items, err := ParseAgyModelsOutput(raw)
 	if err != nil {
@@ -128,10 +128,10 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		"Fetching available models...\nerror-code  authentication required\n",
 		"gemini-4-neon-medium\tAuthentication required\n",
 		"gemini-4-neon-medium  Authentication required\n",
-		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\n",
-		"new-provider-v1\tNew Provider V1\n",
+		"gemini-4-neon-high\tCatalog retrieval interrupted\n",
 		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nerror-code\tAuthentication required\n",
 		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tAuthentication required\n",
+		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tCatalog retrieval interrupted\n",
 		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\nWarning: incomplete catalog\n",
 		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high  Claude Opus 5.5 (High)\n",
 		"err-401\n",
@@ -160,6 +160,33 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		if unknownItems[i] != w {
 			t.Errorf("unknownItems[%d] = %+v, want %+v", i, unknownItems[i], w)
 		}
+	}
+
+	// Single-model valid lists (known and unknown prefix) must be accepted (docs/11 §3).
+	singleKnown, err := ParseAgyModelsOutput("gemini-4-neon-medium\tGemini 4 Neon (Medium)\n")
+	if err != nil {
+		t.Fatalf("ParseAgyModelsOutput(single known) failed: %v", err)
+	}
+	if len(singleKnown) != 1 || singleKnown[0].ID != "gemini-4-neon-medium" || singleKnown[0].DisplayName != "Gemini 4 Neon (Medium)" {
+		t.Fatalf("unexpected singleKnown: %+v", singleKnown)
+	}
+
+	singleUnknown, err := ParseAgyModelsOutput("new-provider-v1\tNew Provider V1\n")
+	if err != nil {
+		t.Fatalf("ParseAgyModelsOutput(single unknown) failed: %v", err)
+	}
+	if len(singleUnknown) != 1 || singleUnknown[0].ID != "new-provider-v1" || singleUnknown[0].Family != quota.ModelFamilyUnknown {
+		t.Fatalf("unexpected singleUnknown: %+v", singleUnknown)
+	}
+
+	// Tab-separated display names must preserve internal consecutive spaces.
+	doubleSpaceRaw := "gemini-4-neon-medium\tGemini 4  Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n"
+	doubleSpaceItems, err := ParseAgyModelsOutput(doubleSpaceRaw)
+	if err != nil {
+		t.Fatalf("ParseAgyModelsOutput(tab with double space) failed: %v", err)
+	}
+	if len(doubleSpaceItems) != 2 || doubleSpaceItems[0].DisplayName != "Gemini 4  Neon (Medium)" {
+		t.Fatalf("unexpected doubleSpaceItems: %+v", doubleSpaceItems)
 	}
 }
 
@@ -315,6 +342,36 @@ func TestProberImportsRealAgySamplesAndUnknownFamilyCatalog(t *testing.T) {
 	if unkCat.Models[0].ID != "new-provider-v1" || unkCat.Models[0].Family != quota.ModelFamilyUnknown ||
 		unkCat.Models[1].ID != "new-provider-v2" || unkCat.Models[1].DisplayName != "new-provider-v2" || unkCat.Models[1].Family != quota.ModelFamilyUnknown {
 		t.Errorf("unexpected unknown-family models: %+v", unkCat.Models)
+	}
+
+	// 4. Single-model valid catalog (known ID) and tab-separated display name with consecutive spaces.
+	output = "gemini-4-neon-medium\tGemini 4  Neon (Medium)\n"
+	now = t1.Add(3 * time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("single-model Probe: %v", err)
+	}
+	singleCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels(single): %v", err)
+	}
+	if singleCat.Status != store.AgentModelStatusOK || len(singleCat.Models) != 1 ||
+		singleCat.Models[0].ID != "gemini-4-neon-medium" || singleCat.Models[0].DisplayName != "Gemini 4  Neon (Medium)" {
+		t.Errorf("unexpected single-model catalog: %+v", singleCat)
+	}
+
+	// 5. Single-model unknown-prefix catalog: saved as ok with family=unknown.
+	output = "new-provider-v1\tNew Provider V1\n"
+	now = t1.Add(4 * time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("single unknown-family Probe: %v", err)
+	}
+	singleUnkCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels(single unknown): %v", err)
+	}
+	if singleUnkCat.Status != store.AgentModelStatusOK || len(singleUnkCat.Models) != 1 ||
+		singleUnkCat.Models[0].ID != "new-provider-v1" || singleUnkCat.Models[0].Family != quota.ModelFamilyUnknown {
+		t.Errorf("unexpected single unknown-family catalog: %+v", singleUnkCat)
 	}
 }
 
@@ -541,16 +598,16 @@ func TestProberPreservesAgyCatalogOnDiagnosticMessageWithExitZero(t *testing.T) 
 			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tAuthentication required\n",
 		},
 		{
+			name:   "valid row mixed with unlisted diagnostic text",
+			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tCatalog retrieval interrupted\n",
+		},
+		{
+			name:   "single-line known-ID with unlisted diagnostic text",
+			output: "gemini-4-neon-high\tCatalog retrieval interrupted\n",
+		},
+		{
 			name:   "valid rows mixed with plain-text diagnostic line",
 			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\nWarning: incomplete catalog\n",
-		},
-		{
-			name:   "single-line known model output",
-			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\n",
-		},
-		{
-			name:   "single-line unknown-prefix output",
-			output: "new-provider-v1\tNew Provider V1\n",
 		},
 		{
 			name:   "mixed tab and space separators",
@@ -631,6 +688,113 @@ func TestProberPreservesAgyCatalogOnDiagnosticMessageWithExitZero(t *testing.T) 
 				t.Errorf("updated_at = %v, want preserved %v", got.UpdatedAt, t1)
 			}
 		})
+	}
+}
+
+func TestProberUsesSeparatedAgyStdoutAndStderr(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-streams-test"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		InstanceID: "agy-streams-test",
+		Hosts: map[string]config.HostConfig{
+			"ubuntu": {
+				OS: "linux",
+				Agents: map[string]config.HostAgentOverride{
+					"agy": {},
+				},
+			},
+		},
+	}
+
+	var nextRes adapter.ExecResult
+	provider := &fakeHostProvider{
+		hosts: map[string]adapter.FileAccess{
+			"ubuntu": &fakeFileAccess{
+				runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+					return nextRes, nil
+				},
+			},
+		},
+	}
+
+	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	now := t1
+	prober, err := NewProber(ProberOptions{
+		Store:    st,
+		Config:   cfg,
+		Provider: provider,
+		Now:      func() time.Time { return now },
+		Logger:   log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewProber: %v", err)
+	}
+
+	// 1. Clean non-TTY execution: progress only on stderr, tab-separated models on stdout.
+	nextRes = adapter.ExecResult{
+		ExitCode: 0,
+		Stdout:   "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n",
+		Stderr:   "Fetching available models...\n",
+		Output:   "Fetching available models...\ngemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n",
+	}
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("first Probe: %v", err)
+	}
+	got, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels: %v", err)
+	}
+	if got.Status != store.AgentModelStatusOK || len(got.Models) != 2 {
+		t.Fatalf("first catalog = %+v, want ok with 2 models", got)
+	}
+
+	// 2. Exit 0 with valid stdout row, but unexpected diagnostic text on stderr -> preserve previous catalog.
+	nextRes = adapter.ExecResult{
+		ExitCode: 0,
+		Stdout:   "gemini-4-neon-medium\tGemini 4 Neon (Medium)\n",
+		Stderr:   "Fetching available models...\nCatalog retrieval interrupted\n",
+		Output:   "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nFetching available models...\nCatalog retrieval interrupted\n",
+	}
+	now = t1.Add(24 * time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("second Probe: %v", err)
+	}
+	got, err = st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels after stderr diag: %v", err)
+	}
+	if got.Status != store.AgentModelStatusError || got.ErrorDetail == "" {
+		t.Errorf("expected error status on unexpected stderr, got %+v", got)
+	}
+	if len(got.Models) != 2 || got.Models[1].ID != "claude-opus-5-5-high" {
+		t.Errorf("previous catalog must be preserved on unexpected stderr, got %+v", got.Models)
+	}
+	if got.UpdatedAt == nil || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("updated_at = %v, want preserved %v", got.UpdatedAt, t1)
+	}
+
+	// 3. Exit 0 with empty stdout and progress-only stderr -> preserve previous catalog.
+	nextRes = adapter.ExecResult{
+		ExitCode: 0,
+		Stdout:   "",
+		Stderr:   "Fetching available models...\n",
+		Output:   "Fetching available models...\n",
+	}
+	now = t1.Add(48 * time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("third Probe: %v", err)
+	}
+	got, err = st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels after empty stdout: %v", err)
+	}
+	if got.Status != store.AgentModelStatusError || len(got.Models) != 2 || got.UpdatedAt == nil || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("previous catalog must be preserved on empty stdout, got %+v", got)
 	}
 }
 

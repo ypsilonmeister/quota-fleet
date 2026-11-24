@@ -16,7 +16,7 @@ import (
 var (
 	ansiEscapeRe    = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 	agyModelIDRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*$`)
-	agyColSepRe     = regexp.MustCompile(`(?:\t| {2,})`)
+	agySpaceSepRe   = regexp.MustCompile(` {2,}`)
 	agySlugMarkerRe = regexp.MustCompile(`[-_./0-9]`)
 
 	agyDiagnosticPrefixes = []string{
@@ -65,7 +65,24 @@ const (
 	agySepSpaces
 )
 
-const minAgyCatalogModels = 2
+// ValidateAgyStderr checks stderr from an `agy models` invocation.
+// Real `agy models` writes only its progress message ("Fetching available models..." / spinner)
+// to stderr on success. Any other non-empty stderr line is treated as a diagnostic/warning so
+// the prober preserves the previously stored catalog even if the command exited with code 0.
+func ValidateAgyStderr(stderr string) error {
+	for _, rawLine := range strings.Split(stderr, "\n") {
+		clean := ansiEscapeRe.ReplaceAllString(rawLine, "")
+		seg := strings.TrimSpace(lastNonEmptyCRSegment(clean))
+		if seg == "" {
+			continue
+		}
+		if isSpinnerOrProgressLine(seg) {
+			continue
+		}
+		return fmt.Errorf("agy models wrote unexpected stderr output: %q", seg)
+	}
+	return nil
+}
 
 // ParseAgyModelsOutput parses the stdout/combined output of `agy models` into a model catalog.
 // Observed `agy models` output formats:
@@ -73,12 +90,12 @@ const minAgyCatalogModels = 2
 //   - TTY (interactive): "\r⠋ Fetching available models...\r\x1b[K<id>  +<display_name>\r\n"
 //
 // List validity is intentionally decoupled from model family classification (docs/11 §3: unknown
-// prefixes are imported with family=unknown). Instead, the entire output must form a consistent
-// multi-row catalog:
+// prefixes are imported with family=unknown) and does not impose an artificial minimum count so
+// hosts exposing a single model are still imported:
 //   - Every non-empty, non-spinner/header line must be a valid two-column model row (no silent skips).
 //   - All rows must share the same column separator style (all tabs or all space-padded).
-//   - Rows containing diagnostic IDs or diagnostic messages are rejected.
-//   - At least two distinct model rows are required so single-line output cannot overwrite a catalog.
+//   - Tab-separated rows preserve internal consecutive spaces in the display name.
+//   - Rows with diagnostic IDs, diagnostic messages, or display names unrelated to the model ID are rejected.
 func ParseAgyModelsOutput(output string) ([]store.AgentModelItem, error) {
 	lines := strings.Split(output, "\n")
 	seen := make(map[string]struct{})
@@ -118,8 +135,8 @@ func ParseAgyModelsOutput(output string) ([]store.AgentModelItem, error) {
 		})
 	}
 
-	if len(items) < minAgyCatalogModels {
-		return nil, fmt.Errorf("agy models output did not contain a valid model list (parsed %d rows, need at least %d)", len(items), minAgyCatalogModels)
+	if len(items) == 0 {
+		return nil, errors.New("agy models output did not contain any valid models")
 	}
 	return items, nil
 }
@@ -137,18 +154,26 @@ func lastNonEmptyCRSegment(s string) string {
 	return ""
 }
 
-func isSpinnerOrHeaderLine(line string) bool {
+func isSpinnerOrProgressLine(line string) bool {
 	lower := strings.ToLower(line)
 	if strings.Contains(lower, "fetching available models") {
-		return true
-	}
-	if strings.HasPrefix(line, "---") || strings.HasPrefix(line, "===") {
 		return true
 	}
 	// Skip non-ASCII leading spinner glyphs (e.g. braille ⠋..⠴).
 	if len(line) > 0 && line[0] >= 0x80 {
 		return true
 	}
+	return false
+}
+
+func isSpinnerOrHeaderLine(line string) bool {
+	if isSpinnerOrProgressLine(line) {
+		return true
+	}
+	if strings.HasPrefix(line, "---") || strings.HasPrefix(line, "===") {
+		return true
+	}
+	lower := strings.ToLower(line)
 	fields := strings.Fields(lower)
 	if len(fields) >= 2 {
 		if (fields[0] == "id" || fields[0] == "model" || fields[0] == "model-id" || fields[0] == "model_id" || fields[0] == "slug") &&
@@ -161,31 +186,46 @@ func isSpinnerOrHeaderLine(line string) bool {
 
 // parseAgyModelRow extracts (id, displayName, sepKind, true) from a single trimmed `agy models` line.
 // Real `agy models` rows are always two-column tabular rows:
-//   - `<slug-id>\t<Display Name>` (non-TTY stdout)
+//   - `<slug-id>\t<Display Name>` (non-TTY stdout; internal spaces in Display Name are preserved)
 //   - `<slug-id>  +<Display Name>` (TTY space-padded table)
 //
 // Bare single-column tokens, single-space prose ("No models available"), multi-column rows,
-// and diagnostic rows (e.g. `error-code\tAuthentication required` or `gemini-4-neon-medium\tAuthentication required`)
-// are rejected.
+// diagnostic rows, and rows whose display name shares no token with the model ID
+// (e.g. `gemini-4-neon-high\tCatalog retrieval interrupted`) are rejected.
 func parseAgyModelRow(line string) (string, string, agySepKind, bool) {
-	loc := agyColSepRe.FindStringIndex(line)
-	if loc == nil {
+	var (
+		id   string
+		rest string
+		sep  agySepKind
+	)
+	if tabIdx := strings.IndexByte(line, '\t'); tabIdx >= 0 {
+		sep = agySepTab
+		id = strings.TrimSpace(line[:tabIdx])
+		rest = strings.TrimSpace(line[tabIdx+1:])
+	} else if loc := agySpaceSepRe.FindStringIndex(line); loc != nil {
+		sep = agySepSpaces
+		id = strings.TrimSpace(line[:loc[0]])
+		rest = strings.TrimSpace(line[loc[1]:])
+	} else {
 		return "", "", agySepNone, false
 	}
-	sep := agySepSpaces
-	if line[loc[0]] == '\t' {
-		sep = agySepTab
+	if !isValidAgyModelID(id) || !isValidAgyDisplayName(rest, sep) {
+		return "", "", agySepNone, false
 	}
-	id := strings.TrimSpace(line[:loc[0]])
-	rest := strings.TrimSpace(line[loc[1]:])
-	if !isValidAgyModelID(id) || !isValidAgyDisplayName(rest) {
+	if !displayNameMatchesModelID(id, rest) {
 		return "", "", agySepNone, false
 	}
 	return id, rest, sep, true
 }
 
-func isValidAgyDisplayName(name string) bool {
-	if name == "" || strings.ContainsRune(name, '\t') || strings.Contains(name, "  ") {
+func isValidAgyDisplayName(name string, sep agySepKind) bool {
+	if name == "" || strings.ContainsRune(name, '\t') {
+		return false
+	}
+	// Space-padded TTY tables use 2+ spaces as column separators, so consecutive spaces
+	// inside the remainder indicate an unexpected third column. Tab-separated non-TTY rows
+	// use '\t' as the sole column delimiter and preserve internal consecutive spaces.
+	if sep == agySepSpaces && strings.Contains(name, "  ") {
 		return false
 	}
 	c := name[0]
@@ -204,6 +244,46 @@ func isValidAgyDisplayName(name string) bool {
 		}
 	}
 	return true
+}
+
+func alphaNumTokens(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
+}
+
+// displayNameMatchesModelID verifies that a row's display name shares at least one token with
+// its model ID. This prevents unlisted diagnostic sentences paired with a valid model ID
+// (e.g. `gemini-4-neon-high\tCatalog retrieval interrupted`) from being mistaken for model rows.
+func displayNameMatchesModelID(id, displayName string) bool {
+	idTokens := alphaNumTokens(id)
+	nameTokens := alphaNumTokens(displayName)
+	if len(idTokens) == 0 || len(nameTokens) == 0 {
+		return false
+	}
+	nameSet := make(map[string]struct{}, len(nameTokens))
+	for _, tok := range nameTokens {
+		nameSet[tok] = struct{}{}
+	}
+	// Prefer matching tokens of length >= 2 so single-letter words like "a" cannot match prose.
+	hasSignificant := false
+	for _, tok := range idTokens {
+		if len(tok) >= 2 {
+			hasSignificant = true
+			if _, ok := nameSet[tok]; ok {
+				return true
+			}
+		}
+	}
+	if hasSignificant {
+		return false
+	}
+	for _, tok := range idTokens {
+		if _, ok := nameSet[tok]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func isValidAgyModelID(id string) bool {

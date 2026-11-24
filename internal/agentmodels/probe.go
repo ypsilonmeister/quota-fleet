@@ -248,6 +248,12 @@ func (p *Prober) probeAgy(ctx context.Context, fa adapter.FileAccess, hostCfg co
 		}
 		return nil, fmt.Errorf("agy models exited with code %d", res.ExitCode)
 	}
+	if res.Stdout != "" || res.Stderr != "" {
+		if err := ValidateAgyStderr(res.Stderr); err != nil {
+			return nil, err
+		}
+		return ParseAgyModelsOutput(res.Stdout)
+	}
 	return ParseAgyModelsOutput(res.Output)
 }
 
