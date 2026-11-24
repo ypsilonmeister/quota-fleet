@@ -89,6 +89,7 @@ type Job struct {
 	Pool               string
 	AltPools           []string
 	SessionID          string
+	CreatedBy          string
 }
 
 // CreateJobParams holds input fields for CreateJob.
@@ -108,6 +109,7 @@ type CreateJobParams struct {
 	Pool               string        `json:"pool,omitempty"`
 	AltPools           []string      `json:"alt_pools,omitempty"`
 	SessionID          string        `json:"session_id,omitempty"`
+	CreatedBy          string        `json:"created_by,omitempty"`
 }
 
 // CompleteResult holds the outcome of Complete.

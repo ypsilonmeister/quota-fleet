@@ -33,6 +33,7 @@ type JobDTO struct {
 	Pool               string     `json:"pool,omitempty"`
 	AltPools           []string   `json:"alt_pools,omitempty"`
 	SessionID          string     `json:"session_id,omitempty"`
+	CreatedBy          string     `json:"created_by,omitempty"`
 }
 
 func toJobDTO(j *store.Job) *JobDTO {
@@ -63,6 +64,7 @@ func toJobDTO(j *store.Job) *JobDTO {
 		Model:              j.Model,
 		Pool:               j.Pool,
 		SessionID:          j.SessionID,
+		CreatedBy:          j.CreatedBy,
 	}
 	if len(j.AltPools) > 0 {
 		dto.AltPools = append([]string(nil), j.AltPools...)
@@ -206,6 +208,12 @@ type DeliveriesResponse struct {
 // ErrorResponse is the uniform JSON error envelope.
 type ErrorResponse struct {
 	Error string `json:"error"`
+}
+
+// ForbiddenResponse is returned on 403 Forbidden when an authenticated token lacks a required scope.
+type ForbiddenResponse struct {
+	Error         string `json:"error"`
+	RequiredScope string `json:"required_scope"`
 }
 
 // ConflictResponse is returned on 409 Conflict with the job's current state.
@@ -380,6 +388,7 @@ type MetaResponse struct {
 	GateMode      string           `json:"gate_mode"`
 	EvaluatorMode string           `json:"evaluator_mode"`
 	PoolSummaries []PoolSummaryDTO `json:"pool_summaries"`
+	Scopes        []string         `json:"scopes"`
 }
 
 // AgentVersionEventDTO is the JSON representation of an agent_version_events entry.

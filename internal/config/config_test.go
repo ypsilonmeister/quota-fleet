@@ -1031,3 +1031,155 @@ func TestLimitsDefaultsAndExplicitOverrides(t *testing.T) {
 		})
 	}
 }
+
+func TestAPITokensConfigParsingAndValidation(t *testing.T) {
+	// Valid multi-token config with legacy token + named tokens.
+	cfg, err := Parse([]byte(`
+instance_id: "inst-tokens"
+api:
+  token: "legacy-secret"
+  tokens:
+    - name: coordinator
+      token: "coord-secret"
+      scopes: [read, register, operate, worker, agents]
+    - name: watch
+      token: "watch-secret"
+      scopes: [read]
+    - name: mcp-register
+      token: "mcp-secret"
+      scopes: [read, register]
+`))
+	if err != nil {
+		t.Fatalf("Parse valid api.tokens: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate valid api.tokens: %v", err)
+	}
+	if !cfg.API.HasAuthTokens() {
+		t.Errorf("HasAuthTokens() = false, want true")
+	}
+	if len(cfg.API.Tokens) != 3 {
+		t.Fatalf("len(API.Tokens) = %d, want 3", len(cfg.API.Tokens))
+	}
+	if cfg.API.Tokens[0].Name != "coordinator" || len(cfg.API.Tokens[0].Scopes) != 5 {
+		t.Errorf("Tokens[0] = %+v", cfg.API.Tokens[0])
+	}
+	if cfg.API.Tokens[2].Name != "mcp-register" || len(cfg.API.Tokens[2].Scopes) != 2 {
+		t.Errorf("Tokens[2] = %+v", cfg.API.Tokens[2])
+	}
+
+	// Valid config with only api.tokens (no legacy api.token).
+	cfgNamedOnly, err := Parse([]byte(`
+instance_id: "inst-named-only"
+api:
+  tokens:
+    - name: legacy
+      token: "named-legacy-ok-when-api-token-empty"
+      scopes: [read]
+`))
+	if err != nil {
+		t.Fatalf("Parse named-only api.tokens: %v", err)
+	}
+	if err := cfgNamedOnly.Validate(); err != nil {
+		t.Fatalf("Validate named-only api.tokens: %v", err)
+	}
+	if !cfgNamedOnly.API.HasAuthTokens() {
+		t.Errorf("HasAuthTokens() = false, want true")
+	}
+
+	// Invalid configs that must fail at startup validation.
+	invalidCases := []struct {
+		name        string
+		yaml        string
+		wantErrPart string
+		noLeak      string
+	}{
+		{
+			name: "duplicate token name",
+			yaml: `
+instance_id: "inst-dup"
+api:
+  tokens:
+    - name: watch
+      token: "secret-a"
+      scopes: [read]
+    - name: watch
+      token: "secret-b"
+      scopes: [read]
+`,
+			wantErrPart: "duplicated",
+			noLeak:      "secret-a",
+		},
+		{
+			name: "legacy name conflict with api.token",
+			yaml: `
+instance_id: "inst-legacy-dup"
+api:
+  token: "legacy-secret-val"
+  tokens:
+    - name: legacy
+      token: "other-secret-val"
+      scopes: [read]
+`,
+			wantErrPart: "conflicts with legacy",
+			noLeak:      "legacy-secret-val",
+		},
+		{
+			name: "unknown scope typo",
+			yaml: `
+instance_id: "inst-typo"
+api:
+  tokens:
+    - name: watch
+      token: "watch-secret-val"
+      scopes: [read, raed]
+`,
+			wantErrPart: `not a valid scope`,
+			noLeak:      "watch-secret-val",
+		},
+		{
+			name: "empty token name",
+			yaml: `
+instance_id: "inst-empty-name"
+api:
+  tokens:
+    - name: ""
+      token: "some-secret-val"
+      scopes: [read]
+`,
+			wantErrPart: "name must not be empty",
+			noLeak:      "some-secret-val",
+		},
+		{
+			name: "empty token value",
+			yaml: `
+instance_id: "inst-empty-val"
+api:
+  tokens:
+    - name: watch
+      token: ""
+      scopes: [read]
+`,
+			wantErrPart: "token must not be empty",
+		},
+	}
+
+	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("Parse() unexpected error: %v", err)
+			}
+			err = c.Validate()
+			if err == nil {
+				t.Fatalf("Validate() succeeded, want error containing %q", tc.wantErrPart)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrPart) {
+				t.Errorf("Validate() error = %q, want substring %q", err.Error(), tc.wantErrPart)
+			}
+			if tc.noLeak != "" && strings.Contains(err.Error(), tc.noLeak) {
+				t.Errorf("Validate() error leaked secret token value: %q", err.Error())
+			}
+		})
+	}
+}

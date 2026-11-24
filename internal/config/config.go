@@ -63,7 +63,36 @@ const (
 	DefaultMaxClaimed = 3
 	// DefaultAttemptsCap is the default maximum number of launch attempts per job.
 	DefaultAttemptsCap = 3
+
+	// API token scopes (see docs/12-api-tokens.md).
+	ScopeRead     = "read"
+	ScopeRegister = "register"
+	ScopeOperate  = "operate"
+	ScopeWorker   = "worker"
+	ScopeAgents   = "agents"
+
+	// LegacyTokenName is the audit name assigned to the legacy single api.token.
+	LegacyTokenName = "legacy"
 )
+
+// AllAPIScopes lists all valid API token scopes in canonical order.
+var AllAPIScopes = []string{
+	ScopeRead,
+	ScopeRegister,
+	ScopeOperate,
+	ScopeWorker,
+	ScopeAgents,
+}
+
+// ValidAPIScope reports whether s is a supported API token scope name.
+func ValidAPIScope(s string) bool {
+	switch s {
+	case ScopeRead, ScopeRegister, ScopeOperate, ScopeWorker, ScopeAgents:
+		return true
+	default:
+		return false
+	}
+}
 
 // Config represents the quota-fleet configuration loaded from fleet.yaml.
 type Config struct {
@@ -314,11 +343,24 @@ func (s *StringList) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// APITokenConfig defines a named bearer token with an explicit set of scopes.
+type APITokenConfig struct {
+	Name   string   `yaml:"name"`
+	Token  string   `yaml:"token"`
+	Scopes []string `yaml:"scopes"`
+}
+
 // APIConfig holds HTTP API server settings.
 type APIConfig struct {
-	Listen      string `yaml:"listen"`
-	Token       string `yaml:"token"`
-	RequireAuth bool   `yaml:"require_auth"`
+	Listen      string           `yaml:"listen"`
+	Token       string           `yaml:"token"`
+	Tokens      []APITokenConfig `yaml:"tokens"`
+	RequireAuth bool             `yaml:"require_auth"`
+}
+
+// HasAuthTokens reports whether any legacy or named API token is configured.
+func (a APIConfig) HasAuthTokens() bool {
+	return strings.TrimSpace(a.Token) != "" || len(a.Tokens) > 0
 }
 
 // ListenAddr returns the configured listen address or DefaultAPIListen if empty.
@@ -558,6 +600,34 @@ func (c *Config) Validate() error {
 	}
 	if c.Notifier.WebhookRetries != nil && *c.Notifier.WebhookRetries < 0 {
 		errs = append(errs, fmt.Errorf("notifier.webhook_retries must be >= 0 (got %d)", *c.Notifier.WebhookRetries))
+	}
+
+	if len(c.API.Tokens) > 0 {
+		seenNames := make(map[string]int, len(c.API.Tokens))
+		hasLegacy := strings.TrimSpace(c.API.Token) != ""
+		for i, tok := range c.API.Tokens {
+			name := strings.TrimSpace(tok.Name)
+			if name == "" {
+				errs = append(errs, fmt.Errorf("api.tokens[%d].name must not be empty", i))
+			} else {
+				if hasLegacy && name == LegacyTokenName {
+					errs = append(errs, fmt.Errorf("api.tokens[%d].name %q conflicts with legacy api.token", i, name))
+				}
+				if prevIdx, dup := seenNames[name]; dup {
+					errs = append(errs, fmt.Errorf("api.tokens[%d].name %q is duplicated (already defined at api.tokens[%d])", i, name, prevIdx))
+				} else {
+					seenNames[name] = i
+				}
+			}
+			if strings.TrimSpace(tok.Token) == "" {
+				errs = append(errs, fmt.Errorf("api.tokens[%d].token must not be empty", i))
+			}
+			for j, sc := range tok.Scopes {
+				if !ValidAPIScope(sc) {
+					errs = append(errs, fmt.Errorf("api.tokens[%d].scopes[%d] %q is not a valid scope (allowed: %s)", i, j, sc, strings.Join(AllAPIScopes, ", ")))
+				}
+			}
+		}
 	}
 
 	return errors.Join(errs...)
