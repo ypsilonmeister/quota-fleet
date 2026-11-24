@@ -18,6 +18,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/ypsilonmeister/quota-fleet/internal/config"
 )
 
 const (
@@ -926,11 +928,18 @@ func (c *Client) doJSONObject(ctx context.Context, method, path string, query ur
 }
 
 func (c *Client) parseAPIError(status int, body []byte) error {
-	// Never echo upstream response bodies for authentication/authorization failures.
+	// Never echo upstream response bodies for authentication/authorization failures. The
+	// only detail taken from a 403 is required_scope, and only if it is a known scope name.
 	switch status {
 	case http.StatusUnauthorized:
 		return &APIError{StatusCode: status, Message: "unauthorized"}
 	case http.StatusForbidden:
+		var denied struct {
+			RequiredScope string `json:"required_scope"`
+		}
+		if json.Unmarshal(body, &denied) == nil && config.ValidAPIScope(denied.RequiredScope) {
+			return &APIError{StatusCode: status, Message: fmt.Sprintf("forbidden: missing required scope %q", denied.RequiredScope)}
+		}
 		return &APIError{StatusCode: status, Message: "forbidden"}
 	}
 

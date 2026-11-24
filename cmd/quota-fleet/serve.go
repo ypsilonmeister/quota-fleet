@@ -161,7 +161,9 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 
 	var mcpHandler func(http.Handler) http.Handler
 	if cfg.API.MCPHTTP {
-		mcpHandler = mcpserver.NewHTTPHandler
+		mcpHandler = func(backend http.Handler) http.Handler {
+			return mcpserver.NewHTTPHandler(backend, cfg.API.MCPAllowedOriginHosts)
+		}
 	}
 	apiSrv := api.NewServer(st, api.Options{
 		MCPHandler:      mcpHandler,
