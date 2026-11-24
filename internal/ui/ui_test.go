@@ -736,3 +736,146 @@ function makeMockFetcher(allJobs, serverMaxLimit) {
 		t.Fatalf("unexpected node test output: %s", string(out))
 	}
 }
+
+func TestUIModelPickerAndPoolAutoAssetsPresent(t *testing.T) {
+	js := string(appJS)
+	for _, token := range []string{
+		"getHostsForAgent",
+		"formatNoMatchingHostNotice",
+		"getModelsForHostAgent",
+		"formatModelOptionLabel",
+		"deriveModelFamily",
+		"derivePoolForSelection",
+		"formatDerivedPoolLabel",
+		"derived-pool-display",
+		"host-empty-notice",
+		"model_select",
+		"Pool（自動判定）",
+	} {
+		if !strings.Contains(js, token) {
+			t.Errorf("app.js missing expected model-picker / pool-auto UI token %q", token)
+		}
+	}
+	if strings.Contains(js, `el("select", { name: "pool" }`) {
+		t.Errorf("app.js must not render a manual pool <select> dropdown in the job form")
+	}
+
+	css := string(styleCSS)
+	for _, cls := range []string{
+		".model-control",
+		".derived-pool-display",
+	} {
+		if !strings.Contains(css, cls) {
+			t.Errorf("style.css missing expected model/pool form selector %q", cls)
+		}
+	}
+}
+
+func TestUIModelPickerAndPoolDerivationWithNode(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available in PATH; skipping JS model/pool form test")
+	}
+
+	script := `
+const assert = require("assert");
+const ui = require("./assets/app.js");
+
+const meta = {
+  hosts: ["home-win", "ubuntu"],
+  agents: ["agy", "claude", "codex"],
+  host_agents: {
+    "ubuntu": ["agy", "claude", "codex"],
+    "home-win": ["claude", "codex"]
+  },
+  models: {
+    "ubuntu": {
+      "agy": [
+        { id: "gemini-4-carbon-medium", display_name: "Gemini 4 Carbon (Medium)", family: "gemini" },
+        { id: "claude-opus-5-5-high", display_name: "Claude Opus 5.5 (High)", family: "claude" },
+        { id: "gpt-oss-120b-medium", display_name: "GPT-OSS 120B (Medium)", family: "gpt" }
+      ],
+      "claude": [
+        { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6", family: "claude" }
+      ]
+    },
+    "home-win": {
+      "codex": [
+        { id: "gpt-6.2-sol", display_name: "GPT-6.2-Sol", family: "gpt" }
+      ]
+    }
+  },
+  pool_rules: {
+    "claude": [{ agent: "claude", model_family: "" }],
+    "codex": [{ agent: "codex", model_family: "" }],
+    "agy-gemini": [{ agent: "agy", model_family: "gemini" }],
+    "agy-3p": [{ agent: "agy", model_family: "claude-gpt" }]
+  }
+};
+
+// 1. Host filtering by agent
+assert.deepStrictEqual(ui.getHostsForAgent(meta, "agy"), ["ubuntu"]);
+assert.deepStrictEqual(ui.getHostsForAgent(meta, "claude"), ["home-win", "ubuntu"]);
+assert.deepStrictEqual(ui.getHostsForAgent(meta, "codex"), ["home-win", "ubuntu"]);
+assert.deepStrictEqual(ui.getHostsForAgent(meta, ""), ["home-win", "ubuntu"]);
+
+// 1b. Zero matching hosts when host_agents is present must stay empty (not fall back to all hosts)
+const agyOnlyMeta = {
+  hosts: ["ubuntu"],
+  agents: ["agy", "claude"],
+  host_agents: { "ubuntu": ["agy"] }
+};
+assert.deepStrictEqual(ui.getHostsForAgent(agyOnlyMeta, "claude"), []);
+assert.strictEqual(ui.formatNoMatchingHostNotice("claude", []), "選択中の agent (claude) に対応するホストがありません。");
+assert.strictEqual(ui.formatNoMatchingHostNotice("agy", ["ubuntu"]), "");
+assert.strictEqual(ui.formatNoMatchingHostNotice("", []), "");
+
+// 2. Model catalog lookup per host x agent (and empty fallback when missing)
+assert.strictEqual(ui.getModelsForHostAgent(meta, "ubuntu", "agy").length, 3);
+assert.strictEqual(ui.getModelsForHostAgent(meta, "home-win", "codex").length, 1);
+assert.deepStrictEqual(ui.getModelsForHostAgent(meta, "ubuntu", "codex"), []);
+assert.deepStrictEqual(ui.getModelsForHostAgent(meta, "home-win", "claude"), []);
+
+// 3. Model option label formatting
+assert.strictEqual(
+  ui.formatModelOptionLabel({ id: "gemini-4-carbon-medium", display_name: "Gemini 4 Carbon (Medium)" }),
+  "Gemini 4 Carbon (Medium) (gemini-4-carbon-medium)"
+);
+assert.strictEqual(
+  ui.formatModelOptionLabel({ id: "claude-sonnet-4-6", display_name: "claude-sonnet-4-6" }),
+  "claude-sonnet-4-6"
+);
+
+// 4. Model family classification
+assert.strictEqual(ui.deriveModelFamily("gemini-4-neon-medium"), "gemini");
+assert.strictEqual(ui.deriveModelFamily("claude-opus-5-5-high"), "claude");
+assert.strictEqual(ui.deriveModelFamily("gpt-oss-120b-medium"), "gpt");
+assert.strictEqual(ui.deriveModelFamily("custom-model"), "unknown");
+
+// 5. Pool auto-derivation (including agy gemini vs claude/gpt branching via canonical family)
+assert.strictEqual(ui.derivePoolForSelection(meta, "claude", "claude-sonnet-4-6"), "claude");
+assert.strictEqual(ui.derivePoolForSelection(meta, "claude", ""), "claude");
+assert.strictEqual(ui.derivePoolForSelection(meta, "codex", "gpt-6.2-sol"), "codex");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "gemini-4-carbon-medium"), "agy-gemini");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "gemini-gpt-preview"), "agy-gemini");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "claude-opus-5-5-high"), "agy-3p");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "gpt-oss-120b-medium"), "agy-3p");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "custom-gpt-model"), "");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "custom-model"), "");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", ""), "");
+
+// 6. Pool display label formatting
+assert.strictEqual(ui.formatDerivedPoolLabel("agy-3p"), "pool: agy-3p（自動）");
+assert.strictEqual(ui.formatDerivedPoolLabel(""), "pool: なし（自動判定対象外）");
+
+console.log("ALL_UI_MODELS_TESTS_PASSED");
+`
+	cmd := exec.Command(nodeBin, "-e", script)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node model/pool unit tests failed: %v\n%s", err, string(out))
+	}
+	if !strings.Contains(string(out), "ALL_UI_MODELS_TESTS_PASSED") {
+		t.Fatalf("unexpected node test output: %s", string(out))
+	}
+}

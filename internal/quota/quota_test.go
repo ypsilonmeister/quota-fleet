@@ -446,9 +446,11 @@ func TestResolvePoolByAppliesTo(t *testing.T) {
 		{"claude", "", "claude"},
 		{"claude", "claude-sonnet-4-5", "claude"},
 		{"agy", "gemini-2.5-pro", "agy-gemini"},
+		{"agy", "gemini-gpt-preview", "agy-gemini"},
 		{"agy", "claude-sonnet-4-5", "agy-3p"},
 		{"agy", "gpt-5", "agy-3p"},
-		{"agy", "opus-4", "agy-3p"},
+		{"agy", "custom-gpt-model", ""},
+		{"agy", "opus-4", ""},
 		{"agy", "", ""},
 		{"codex", "gpt-5", ""},
 	}

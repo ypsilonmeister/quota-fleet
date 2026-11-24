@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -36,9 +37,13 @@ type FileStat struct {
 }
 
 // ExecResult captures the outcome of running a shell command in a job's workdir.
+// Output holds the combined stdout+stderr for backward compatibility; Stdout and Stderr
+// preserve the separated streams when captured by the executor.
 type ExecResult struct {
 	ExitCode int
 	Output   string
+	Stdout   string
+	Stderr   string
 }
 
 // FileAccess abstracts host-aware file inspection, file reading, and command execution
@@ -165,19 +170,26 @@ func (l *LocalFileAccess) RunCommand(ctx context.Context, command string) (ExecR
 	}
 	cmd.WaitDelay = 2 * time.Second
 
-	out, err := cmd.CombinedOutput()
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+	stdout := stdoutBuf.String()
+	stderr := stderrBuf.String()
+	combined := combineOutputs(stdout, stderr)
 	if err == nil {
-		return ExecResult{ExitCode: 0, Output: string(out)}, nil
+		return ExecResult{ExitCode: 0, Output: combined, Stdout: stdout, Stderr: stderr}, nil
 	}
 	if ctx.Err() != nil {
-		return ExecResult{Output: string(out)}, ctx.Err()
+		return ExecResult{Output: combined, Stdout: stdout, Stderr: stderr}, ctx.Err()
 	}
 
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return ExecResult{ExitCode: exitErr.ExitCode(), Output: string(out)}, nil
+		return ExecResult{ExitCode: exitErr.ExitCode(), Output: combined, Stdout: stdout, Stderr: stderr}, nil
 	}
-	return ExecResult{Output: string(out)}, err
+	return ExecResult{Output: combined, Stdout: stdout, Stderr: stderr}, err
 }
 
 // NewRemoteFileAccess constructs a Transport-backed FileAccess matching host.OS (Linux or Windows).
@@ -328,9 +340,9 @@ func (f *linuxFileAccess) RunCommand(ctx context.Context, command string) (ExecR
 	res, err := f.transport.Run(ctx, f.host, shellCmd)
 	combined := combineOutputs(res.Stdout, res.Stderr)
 	if err != nil {
-		return ExecResult{Output: combined}, err
+		return ExecResult{Output: combined, Stdout: res.Stdout, Stderr: res.Stderr}, err
 	}
-	return ExecResult{ExitCode: res.ExitCode, Output: combined}, nil
+	return ExecResult{ExitCode: res.ExitCode, Output: combined, Stdout: res.Stdout, Stderr: res.Stderr}, nil
 }
 
 // --- Windows remote FileAccess (PowerShell over Transport) ---
@@ -454,9 +466,9 @@ func (f *windowsFileAccess) RunCommand(ctx context.Context, command string) (Exe
 	res, err := f.transport.Run(ctx, f.host, wrapPowerShellCommand(strings.Join(stmts, "; ")))
 	combined := combineOutputs(res.Stdout, res.Stderr)
 	if err != nil {
-		return ExecResult{Output: combined}, err
+		return ExecResult{Output: combined, Stdout: res.Stdout, Stderr: res.Stderr}, err
 	}
-	return ExecResult{ExitCode: res.ExitCode, Output: combined}, nil
+	return ExecResult{ExitCode: res.ExitCode, Output: combined, Stdout: res.Stdout, Stderr: res.Stderr}, nil
 }
 
 // --- Shared helpers ---

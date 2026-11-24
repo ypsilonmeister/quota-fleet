@@ -615,6 +615,129 @@
       "）。" + directNote;
   }
 
+  // ==================== Pure Form Helpers (Agent / Host / Model / Pool) ====================
+  function getHostsForAgent(meta, agent) {
+    const allHosts = (meta && Array.isArray(meta.hosts)) ? meta.hosts : [];
+    const target = String(agent || "").trim();
+    if (!target || !meta || !meta.host_agents || typeof meta.host_agents !== "object") {
+      return allHosts.slice();
+    }
+    if (Object.keys(meta.host_agents).length === 0) {
+      return allHosts.slice();
+    }
+    return allHosts.filter(function (h) {
+      const list = meta.host_agents[h];
+      if (!Array.isArray(list) || list.length === 0) {
+        return true;
+      }
+      return list.includes(target);
+    });
+  }
+
+  function formatNoMatchingHostNotice(agent, filteredHosts) {
+    const a = String(agent || "").trim();
+    if (!a || (Array.isArray(filteredHosts) && filteredHosts.length > 0)) {
+      return "";
+    }
+    return "選択中の agent (" + a + ") に対応するホストがありません。";
+  }
+
+  function getModelsForHostAgent(meta, host, agent) {
+    const h = String(host || "").trim();
+    const a = String(agent || "").trim();
+    if (!h || !a || !meta || !meta.models || typeof meta.models !== "object") {
+      return [];
+    }
+    const byAgent = meta.models[h];
+    if (!byAgent || typeof byAgent !== "object") {
+      return [];
+    }
+    const list = byAgent[a];
+    if (!Array.isArray(list)) {
+      return [];
+    }
+    return list.filter(function (m) {
+      return m && typeof m.id === "string" && m.id.trim() !== "";
+    });
+  }
+
+  function formatModelOptionLabel(modelItem) {
+    if (!modelItem) {
+      return "";
+    }
+    const id = String(modelItem.id || "").trim();
+    const dn = String(modelItem.display_name || "").trim();
+    if (dn && dn !== id) {
+      return dn + " (" + id + ")";
+    }
+    return id;
+  }
+
+  function deriveModelFamily(modelID) {
+    const m = String(modelID || "").trim().toLowerCase();
+    if (m === "gemini" || m.startsWith("gemini-")) {
+      return "gemini";
+    }
+    if (m === "claude" || m.startsWith("claude-")) {
+      return "claude";
+    }
+    if (m === "gpt" || m.startsWith("gpt-")) {
+      return "gpt";
+    }
+    return "unknown";
+  }
+
+  function matchesModelFamily(model, family) {
+    const canonical = deriveModelFamily(model);
+    const f = String(family || "").trim().toLowerCase();
+    if (!f || canonical === "unknown") {
+      return false;
+    }
+    if (canonical === f) {
+      return true;
+    }
+    const tokens = f.split(/[-/,_]+/);
+    for (const tok of tokens) {
+      if (tok && tok === canonical) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function derivePoolForSelection(meta, agent, model) {
+    const a = String(agent || "").trim().toLowerCase();
+    const m = String(model || "").trim();
+    if (!a || !meta || !meta.pool_rules || typeof meta.pool_rules !== "object") {
+      return "";
+    }
+    const poolNames = Object.keys(meta.pool_rules).sort();
+    for (const poolName of poolNames) {
+      const rules = meta.pool_rules[poolName];
+      if (!Array.isArray(rules)) {
+        continue;
+      }
+      for (const rule of rules) {
+        if (!rule || String(rule.agent || "").trim().toLowerCase() !== a) {
+          continue;
+        }
+        const fam = String(rule.model_family || "").trim();
+        if (!fam || matchesModelFamily(m, fam)) {
+          return poolName;
+        }
+      }
+    }
+    return "";
+  }
+
+  function formatDerivedPoolLabel(poolName) {
+    const p = String(poolName || "").trim();
+    if (p) {
+      return "pool: " + p + "（自動）";
+    }
+    return "pool: なし（自動判定対象外）";
+  }
+
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       detectPreferredDirection: detectPreferredDirection,
@@ -628,7 +751,15 @@
       fetchFullJobChain: fetchFullJobChain,
       formatChainFetchErrorNotice: formatChainFetchErrorNotice,
       formatDirectChildrenFetchErrorNotice: formatDirectChildrenFetchErrorNotice,
-      formatChainTruncationNotice: formatChainTruncationNotice
+      formatChainTruncationNotice: formatChainTruncationNotice,
+      getHostsForAgent: getHostsForAgent,
+      formatNoMatchingHostNotice: formatNoMatchingHostNotice,
+      getModelsForHostAgent: getModelsForHostAgent,
+      formatModelOptionLabel: formatModelOptionLabel,
+      deriveModelFamily: deriveModelFamily,
+      matchesModelFamily: matchesModelFamily,
+      derivePoolForSelection: derivePoolForSelection,
+      formatDerivedPoolLabel: formatDerivedPoolLabel
     };
   }
 
@@ -1934,7 +2065,6 @@
     });
 
     const agents = Array.isArray(state.meta.agents) ? state.meta.agents : [];
-    const hosts = Array.isArray(state.meta.hosts) ? state.meta.hosts : [];
     const pools = Array.isArray(state.meta.pools) ? state.meta.pools : [];
 
     const requestIDInput = el("input", {
@@ -1966,12 +2096,12 @@
       })
     ]);
 
-    const hostSelect = el("select", { name: "host" }, [
-      el("option", { value: "", text: "-- 選択 --" }),
-      ...hosts.map(function (h, idx) {
-        return el("option", { value: h, text: h, selected: idx === 0 });
-      })
-    ]);
+    const hostSelect = el("select", { name: "host" });
+    const hostNotice = el("div", {
+      className: "host-empty-notice small",
+      "aria-live": "polite",
+      hidden: true
+    });
 
     const workdirInput = el("input", {
       type: "text",
@@ -1979,18 +2109,104 @@
       placeholder: "/path/to/workdir"
     });
 
+    const modelSelect = el("select", { name: "model_select", hidden: true });
     const modelInput = el("input", {
       type: "text",
       name: "model",
       placeholder: "任意（例: claude-sonnet-4-5）"
     });
+    const modelControlWrap = el("div", { className: "model-control" }, [modelSelect, modelInput]);
 
-    const poolSelect = el("select", { name: "pool" }, [
-      el("option", { value: "", text: "（指定なし / 自動解決）" }),
-      ...pools.map(function (p) {
-        return el("option", { value: p, text: p });
-      })
-    ]);
+    const poolDisplay = el("div", {
+      id: "derived-pool-display",
+      className: "derived-pool-display mono",
+      "aria-live": "polite"
+    });
+
+    function getSelectedModelValue() {
+      if (!modelSelect.hidden) {
+        return modelSelect.value.trim();
+      }
+      return modelInput.value.trim();
+    }
+
+    function updateDerivedPoolDisplay() {
+      const derived = derivePoolForSelection(state.meta, agentSelect.value, getSelectedModelValue());
+      poolDisplay.textContent = formatDerivedPoolLabel(derived);
+    }
+
+    function updateModelControl() {
+      const catalog = getModelsForHostAgent(state.meta, hostSelect.value, agentSelect.value);
+      const prevVal = getSelectedModelValue();
+      if (catalog.length > 0) {
+        const opts = [el("option", { value: "", text: "（指定なし / デフォルト）" })];
+        let matchedPrev = false;
+        for (const m of catalog) {
+          const isSelected = prevVal !== "" && m.id === prevVal;
+          if (isSelected) {
+            matchedPrev = true;
+          }
+          opts.push(el("option", {
+            value: m.id,
+            text: formatModelOptionLabel(m),
+            selected: isSelected
+          }));
+        }
+        modelSelect.replaceChildren(...opts);
+        if (!matchedPrev && catalog.length > 0) {
+          modelSelect.value = catalog[0].id;
+        }
+        modelSelect.hidden = false;
+        modelInput.hidden = true;
+      } else {
+        modelSelect.replaceChildren();
+        modelSelect.hidden = true;
+        modelInput.hidden = false;
+      }
+      updateDerivedPoolDisplay();
+    }
+
+    function updateHostOptions() {
+      const selectedAgent = agentSelect.value;
+      const filteredHosts = getHostsForAgent(state.meta, selectedAgent);
+      const notice = formatNoMatchingHostNotice(selectedAgent, filteredHosts);
+      const prevHost = hostSelect.value;
+      if (notice) {
+        hostSelect.replaceChildren(el("option", { value: "", text: "（対応ホストなし）" }));
+        hostSelect.value = "";
+        hostSelect.disabled = true;
+        hostNotice.textContent = notice;
+        hostNotice.hidden = false;
+      } else {
+        const opts = [el("option", { value: "", text: "-- 選択 --" })];
+        let hasPrev = false;
+        for (let i = 0; i < filteredHosts.length; i += 1) {
+          const h = filteredHosts[i];
+          if (h === prevHost) {
+            hasPrev = true;
+          }
+          opts.push(el("option", { value: h, text: h }));
+        }
+        hostSelect.replaceChildren(...opts);
+        hostSelect.disabled = false;
+        if (hasPrev) {
+          hostSelect.value = prevHost;
+        } else if (filteredHosts.length > 0) {
+          hostSelect.value = filteredHosts[0];
+        } else {
+          hostSelect.value = "";
+        }
+        hostNotice.textContent = "";
+        hostNotice.hidden = true;
+      }
+      updateModelControl();
+    }
+
+    agentSelect.addEventListener("change", updateHostOptions);
+    hostSelect.addEventListener("change", updateModelControl);
+    modelSelect.addEventListener("change", updateDerivedPoolDisplay);
+    modelInput.addEventListener("input", updateDerivedPoolDisplay);
+    updateHostOptions();
 
     const altPoolCheckboxes = [];
     const altPoolsGroup = el("div", { className: "checkbox-group" },
@@ -2071,8 +2287,7 @@
           agent: agentSelect.value,
           host: hostSelect.value,
           workdir: workdirInput.value.trim(),
-          model: modelInput.value.trim(),
-          pool: poolSelect.value,
+          model: getSelectedModelValue(),
           instructions: instructionsInput.value,
           acceptance_criteria: acceptanceInput.value
         };
@@ -2190,15 +2405,16 @@
         ]),
         el("label", { className: "field" }, [
           el("span", { className: "field-label", text: "Host" }),
-          hostSelect
+          hostSelect,
+          hostNotice
         ]),
-        el("label", { className: "field" }, [
-          el("span", { className: "field-label", text: "Pool" }),
-          poolSelect
-        ]),
-        el("label", { className: "field" }, [
+        el("div", { className: "field" }, [
           el("span", { className: "field-label", text: "Model" }),
-          modelInput
+          modelControlWrap
+        ]),
+        el("div", { className: "field" }, [
+          el("span", { className: "field-label", text: "Pool（自動判定）" }),
+          poolDisplay
         ])
       ]),
       el("div", { className: "form-grid" }, [

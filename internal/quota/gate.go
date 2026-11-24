@@ -373,6 +373,33 @@ func SummarizeEvaluation(eval GateEvaluation) string {
 	return string(b)
 }
 
+const (
+	// ModelFamilyGemini classifies gemini-* models.
+	ModelFamilyGemini = "gemini"
+	// ModelFamilyClaude classifies claude-* models.
+	ModelFamilyClaude = "claude"
+	// ModelFamilyGPT classifies gpt-* models.
+	ModelFamilyGPT = "gpt"
+	// ModelFamilyUnknown classifies models whose prefix does not match a known family.
+	ModelFamilyUnknown = "unknown"
+)
+
+// ModelFamily derives the canonical model family from a model ID (docs/11 §3):
+// gemini-* -> gemini, claude-* -> claude, gpt-* -> gpt, otherwise unknown.
+func ModelFamily(modelID string) string {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	switch {
+	case m == ModelFamilyGemini || strings.HasPrefix(m, "gemini-"):
+		return ModelFamilyGemini
+	case m == ModelFamilyClaude || strings.HasPrefix(m, "claude-"):
+		return ModelFamilyClaude
+	case m == ModelFamilyGPT || strings.HasPrefix(m, "gpt-"):
+		return ModelFamilyGPT
+	default:
+		return ModelFamilyUnknown
+	}
+}
+
 // ResolvePoolByAppliesTo finds the first pool (in sorted pool-name order) whose
 // applies_to entries match the given agent and model. Returns "" if none matches.
 func ResolvePoolByAppliesTo(pools map[string]config.PoolConfig, agent, model string) string {
@@ -404,26 +431,24 @@ func ResolvePoolByAppliesTo(pools map[string]config.PoolConfig, agent, model str
 }
 
 func matchesModelFamily(model, family string) bool {
-	m := strings.ToLower(strings.TrimSpace(model))
-	f := strings.ToLower(strings.TrimSpace(family))
-	if m == "" || f == "" {
+	canonical := ModelFamily(model)
+	if canonical == ModelFamilyUnknown {
 		return false
 	}
-	if m == f || strings.Contains(m, f) {
+	f := strings.ToLower(strings.TrimSpace(family))
+	if f == "" {
+		return false
+	}
+	if canonical == f {
 		return true
 	}
-	// Support composite family tags like "claude-gpt" by matching any component token.
+	// Support composite family tags like "claude-gpt" by matching any component token
+	// against the canonical family (e.g. "claude" or "gpt").
 	tokens := strings.FieldsFunc(f, func(r rune) bool {
 		return r == '-' || r == '/' || r == ',' || r == '_'
 	})
 	for _, tok := range tokens {
-		if len(tok) < 2 {
-			continue
-		}
-		if strings.Contains(m, tok) {
-			return true
-		}
-		if tok == "claude" && (strings.Contains(m, "sonnet") || strings.Contains(m, "opus") || strings.Contains(m, "haiku")) {
+		if tok == canonical {
 			return true
 		}
 	}

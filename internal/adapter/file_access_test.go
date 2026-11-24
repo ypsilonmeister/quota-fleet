@@ -305,8 +305,28 @@ func TestWindowsRemoteFileAccess(t *testing.T) {
 		}
 
 		failRes, err := fa.RunCommand(context.Background(), "exit 3")
-		if err != nil || failRes.ExitCode != 3 || !strings.Contains(failRes.Output, "boom") {
+		if err != nil || failRes.ExitCode != 3 || !strings.Contains(failRes.Output, "boom") || !strings.Contains(failRes.Stderr, "boom") {
 			t.Errorf("RunCommand windows fail = (%+v, %v)", failRes, err)
 		}
 	})
+}
+
+func TestLocalFileAccessRunCommandSeparatesStreams(t *testing.T) {
+	fa := NewLocalFileAccess(t.TempDir())
+	res, err := fa.RunCommand(context.Background(), `printf 'out-line\n'; printf 'err-line\n' >&2`)
+	if err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", res.ExitCode)
+	}
+	if res.Stdout != "out-line\n" {
+		t.Errorf("Stdout = %q, want %q", res.Stdout, "out-line\n")
+	}
+	if res.Stderr != "err-line\n" {
+		t.Errorf("Stderr = %q, want %q", res.Stderr, "err-line\n")
+	}
+	if res.Output != "out-line\nerr-line\n" {
+		t.Errorf("Output = %q, want %q", res.Output, "out-line\nerr-line\n")
+	}
 }
