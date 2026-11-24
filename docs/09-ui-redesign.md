@@ -40,7 +40,10 @@
 
 ## 2. 二つの美的方向（`html[data-direction]`）
 
-ヘッダー右上の切替ボタン（`計器盤` / `台帳`）で `html[data-direction="console"]` と `html[data-direction="ledger"]` を即座に切り替えられる。選択値は `localStorage` のキー `qf-direction` に保存し、再訪時および別タブ間で復元・同期する。
+計器盤（`console`）と台帳（`ledger`）の二方向は両方残し、それぞれ**ダークモード（`console`）／ライトモード（`ledger`）**として運用する決定とした。
+
+- **切替 UI**: ヘッダー右上の切替ボタンの表示名は「`ダーク`」「`ライト`」とし、方向名（計器盤／台帳）は `data-direction` 属性値（`console` / `ledger`）・ボタンの `aria-label`（`ダーク（計器盤）` / `ライト（台帳）`）・本設計メモに残す。
+- **初期表示と永続化**: `localStorage` のキー `qf-direction` に保存済みの選択がある場合は常にそちらを優先する。保存済みの選択が無い初回訪問時は OS／ブラウザの `prefers-color-scheme` を参照し、`dark` なら `console`、`light` なら `ledger` を初期表示とする（判定できない場合は `console` にフォールバック）。選択値は再訪時および別タブ間（`storage` イベント）で復元・同期し、`meta[name="color-scheme"]` も選択方向に連動させる。
 
 ### 方向A: 計器盤 (`console`)
 

@@ -204,6 +204,8 @@ func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
 		`id="direction-switch"`,
 		`data-set-direction="console"`,
 		`data-set-direction="ledger"`,
+		`aria-label="ダーク（計器盤）">ダーク</button>`,
+		`aria-label="ライト（台帳）">ライト</button>`,
 	} {
 		if !strings.Contains(html, token) {
 			t.Errorf("index.html missing expected direction switcher token %q", token)
@@ -227,6 +229,8 @@ func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
 		`qf-direction`,
 		`data-direction`,
 		`applyDirection`,
+		`prefers-color-scheme`,
+		`resolveDirection`,
 	} {
 		if !strings.Contains(js, token) {
 			t.Errorf("app.js missing expected direction persistence token %q", token)
@@ -250,6 +254,24 @@ func TestChainTreeLogicWithNode(t *testing.T) {
 	script := `
 const assert = require("assert");
 const chain = require("./assets/app.js");
+
+// 0. Direction resolution: stored choice wins; otherwise prefers-color-scheme decides
+{
+  const mmDark = q => ({ matches: q === "(prefers-color-scheme: dark)" });
+  const mmLight = q => ({ matches: q === "(prefers-color-scheme: light)" });
+  const mmNone = () => ({ matches: false });
+
+  assert.strictEqual(chain.resolveDirection(null, mmDark), "console");
+  assert.strictEqual(chain.resolveDirection(null, mmLight), "ledger");
+  assert.strictEqual(chain.resolveDirection(undefined, mmLight), "ledger");
+  assert.strictEqual(chain.resolveDirection("invalid", mmLight), "ledger");
+  assert.strictEqual(chain.resolveDirection(null, mmNone), "console");
+  assert.strictEqual(chain.resolveDirection(null, null), "console");
+
+  // Stored choice always overrides OS preference
+  assert.strictEqual(chain.resolveDirection("console", mmLight), "console");
+  assert.strictEqual(chain.resolveDirection("ledger", mmDark), "ledger");
+}
 
 // 1. Multi-level tree construction & sorting
 {

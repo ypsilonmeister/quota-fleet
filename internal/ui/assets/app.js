@@ -7,8 +7,33 @@
   const DEFAULT_DIRECTION = "console";
   const VALID_DIRECTIONS = new Set(["console", "ledger"]);
 
-  function normalizeDirection(value) {
-    return VALID_DIRECTIONS.has(value) ? value : DEFAULT_DIRECTION;
+  function detectPreferredDirection(matchMediaFn) {
+    const mm = typeof matchMediaFn === "function"
+      ? matchMediaFn
+      : (typeof window !== "undefined" && typeof window.matchMedia === "function"
+        ? window.matchMedia.bind(window)
+        : null);
+    if (!mm) {
+      return DEFAULT_DIRECTION;
+    }
+    try {
+      if (mm("(prefers-color-scheme: dark)").matches) {
+        return "console";
+      }
+      if (mm("(prefers-color-scheme: light)").matches) {
+        return "ledger";
+      }
+    } catch (_err) {
+      // Fall through to default direction.
+    }
+    return DEFAULT_DIRECTION;
+  }
+
+  function resolveDirection(value, matchMediaFn) {
+    if (VALID_DIRECTIONS.has(value)) {
+      return value;
+    }
+    return detectPreferredDirection(matchMediaFn);
   }
   const ALL_STATUSES = [
     "draft",
@@ -617,6 +642,8 @@
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+      detectPreferredDirection: detectPreferredDirection,
+      resolveDirection: resolveDirection,
       buildJobForest: buildJobForest,
       summarizeChainProgress: summarizeChainProgress,
       formatChainProgressSummary: formatChainProgressSummary,
@@ -656,14 +683,14 @@
 
   function readStoredDirection() {
     try {
-      return normalizeDirection(localStorage.getItem(DIRECTION_KEY));
+      return resolveDirection(localStorage.getItem(DIRECTION_KEY));
     } catch (_err) {
-      return DEFAULT_DIRECTION;
+      return resolveDirection(null);
     }
   }
 
   function applyDirection(dir, persist) {
-    const next = normalizeDirection(dir);
+    const next = resolveDirection(dir);
     document.documentElement.setAttribute("data-direction", next);
     const schemeMeta = document.querySelector('meta[name="color-scheme"]');
     if (schemeMeta) {
