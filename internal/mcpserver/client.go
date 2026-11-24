@@ -24,12 +24,17 @@ const (
 	// (instructions/create payload, result_text, last_error); Go's encoding/json expands
 	// HTML-escaped bytes (<, >, &) up to 6x (~18 MiB/job + metadata).
 	defaultMaxSingleResponseBytes = int64(32) << 20 // 32 MiB
-	// List 2xx responses: up to MaxListLimit=200 jobs x ~18 MiB/job worst-case HTML-escaped
-	// JSON (~3.6 GiB + envelope/metadata). Decoded via streaming json.NewDecoder without
-	// buffering the raw response body in memory.
-	defaultMaxListResponseBytes = int64(4) << 30 // 4 GiB
-	maxErrorResponseBytes       = 64 << 10       // 64 KiB cap for non-2xx error bodies
-	maxErrorMessageRunes        = 256
+	// List 2xx HTTP stream cap: element-by-element streaming decode stops as soon as the
+	// MCP frame byte budget is reached, so at most one budgeted page (~7 MiB JSON) plus
+	// one overflowing item (~18 MiB worst-case job) is ever read from upstream.
+	defaultMaxListResponseBytes = int64(64) << 20 // 64 MiB
+	// MCP SDK v1.8.0 DefaultMaxLineLength is 16 MiB per JSON-RPC frame. Because mcp.AddTool
+	// emits both structuredContent (raw JSON) and content[0].text (JSON-escaped string of
+	// the same JSON), list tools budget output to <= 14 MiB on the wire (2 MiB below 16 MiB).
+	defaultMaxMCPFrameBytes = int64(14) << 20 // 14 MiB
+	mcpFrameEnvelopeReserve = int64(4) << 10  // 4 KiB reserve for JSON-RPC + list envelope
+	maxErrorResponseBytes   = 64 << 10        // 64 KiB cap for non-2xx error bodies
+	maxErrorMessageRunes    = 256
 )
 
 var errResponseTooLarge = errors.New("response body exceeded size limit")
@@ -47,6 +52,7 @@ type Client struct {
 	token            string
 	httpClient       *http.Client
 	maxResponseBytes int64
+	maxMCPFrameBytes int64
 }
 
 // APIError represents a non-success HTTP response from the quota-fleet API.
@@ -109,16 +115,23 @@ func (m *maxBytesReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+func ensureJSONEOF(dec *json.Decoder) error {
+	_, err := dec.Token()
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err == nil {
+		return errors.New("unexpected trailing data after JSON value")
+	}
+	return err
+}
+
 func decodeJSONStream(r io.Reader, dst any) error {
 	dec := json.NewDecoder(r)
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
-	// Drain any remaining bytes up to EOF so trailing payload beyond the limit is still detected.
-	if _, err := io.Copy(io.Discard, r); err != nil {
-		return err
-	}
-	return nil
+	return ensureJSONEOF(dec)
 }
 
 func (c *Client) effectiveResponseLimit(defaultLimit int64) int64 {
@@ -129,6 +142,180 @@ func (c *Client) effectiveResponseLimit(defaultLimit int64) int64 {
 		return defaultLimit
 	}
 	return defaultMaxSingleResponseBytes
+}
+
+func (c *Client) effectiveMCPFrameBudget() int64 {
+	if c.maxMCPFrameBytes > 0 {
+		return c.maxMCPFrameBytes
+	}
+	return defaultMaxMCPFrameBytes
+}
+
+// mcpWireItemBytes computes the exact upper-bound byte contribution of a single
+// compact HTML-escaped JSON item to an MCP CallToolResult JSON-RPC frame.
+// Because mcp.AddTool emits both structuredContent (raw JSON) and content[0].text
+// (a JSON-encoded string of the same JSON), every byte appears twice plus 1 extra
+// backslash for each '"' or '\\' in content[0].text, plus 2 bytes for array commas.
+func mcpWireItemBytes(compactHTMLJSON []byte) int64 {
+	var extra int64
+	for _, b := range compactHTMLJSON {
+		if b == '"' || b == '\\' {
+			extra++
+		}
+	}
+	return int64(len(compactHTMLJSON))*2 + extra + 2
+}
+
+func extractInt64ID(raw []byte) (int64, bool) {
+	var envelope struct {
+		ID *int64 `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.ID != nil {
+		return *envelope.ID, true
+	}
+	return 0, false
+}
+
+// decodeBudgetedList decodes a list envelope JSON object element-by-element so that
+// json.Decoder only buffers a single array item at a time. It stops collecting items
+// before the resulting MCP JSON-RPC frame would exceed maxMCPFrameBytes.
+// When truncation occurs, truncated=true and truncated_reason are set; if cursorByID
+// is true (e.g. GET /jobs), has_more=true and next_cursor=<last kept item id> are set
+// so callers can continue pagination cleanly.
+func decodeBudgetedList(r io.Reader, itemsKey string, cursorByID bool, maxMCPFrameBytes int64) (map[string]any, error) {
+	dec := json.NewDecoder(r)
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, fmt.Errorf("expected JSON object, got %v", tok)
+	}
+
+	reserve := mcpFrameEnvelopeReserve
+	if maxMCPFrameBytes <= reserve {
+		reserve = 512
+		if maxMCPFrameBytes <= reserve {
+			reserve = 0
+		}
+	}
+	itemBudget := maxMCPFrameBytes - reserve
+
+	out := make(map[string]any)
+	var (
+		usedWireBytes int64
+		truncated     bool
+	)
+
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected object key string, got %T", keyTok)
+		}
+
+		if key != itemsKey {
+			var val any
+			if err := dec.Decode(&val); err != nil {
+				return nil, err
+			}
+			out[key] = val
+			continue
+		}
+
+		arrTok, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		if arrTok == nil {
+			out[itemsKey] = nil
+			continue
+		}
+		if delim, ok := arrTok.(json.Delim); !ok || delim != '[' {
+			return nil, fmt.Errorf("expected JSON array for %q, got %v", itemsKey, arrTok)
+		}
+
+		kept := make([]json.RawMessage, 0)
+		for dec.More() {
+			var rawItem json.RawMessage
+			if err := dec.Decode(&rawItem); err != nil {
+				return nil, err
+			}
+			normalized, err := json.Marshal(rawItem)
+			if err != nil {
+				return nil, err
+			}
+			itemWire := mcpWireItemBytes(normalized)
+			if usedWireBytes+itemWire > itemBudget {
+				if len(kept) == 0 {
+					return nil, fmt.Errorf("first item in %q (%d wire bytes) exceeds MCP frame budget (%d bytes)", itemsKey, itemWire, maxMCPFrameBytes)
+				}
+				truncated = true
+				break
+			}
+			usedWireBytes += itemWire
+			kept = append(kept, json.RawMessage(normalized))
+		}
+
+		out[itemsKey] = kept
+		if truncated {
+			out["truncated"] = true
+			out["truncated_reason"] = "response exceeded MCP frame byte budget"
+			if cursorByID {
+				out["has_more"] = true
+				if id, ok := extractInt64ID(kept[len(kept)-1]); ok {
+					out["next_cursor"] = id
+				}
+			}
+			// Stop reading upstream immediately so remaining items beyond the budget
+			// are neither buffered nor decoded.
+			return out, nil
+		}
+
+		endArr, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		if delim, ok := endArr.(json.Delim); !ok || delim != ']' {
+			return nil, fmt.Errorf("expected closing ']' for %q, got %v", itemsKey, endArr)
+		}
+	}
+
+	endObj, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := endObj.(json.Delim); !ok || delim != '}' {
+		return nil, fmt.Errorf("expected closing '}', got %v", endObj)
+	}
+
+	if err := ensureJSONEOF(dec); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *Client) doBudgetedList(ctx context.Context, path string, query url.Values, itemsKey string, cursorByID bool) (map[string]any, error) {
+	var out map[string]any
+	err := c.doJSON(ctx, http.MethodGet, path, query, nil, defaultMaxListResponseBytes, func(status int, r io.Reader) error {
+		if status != http.StatusOK {
+			errBody, _ := io.ReadAll(io.LimitReader(r, maxErrorResponseBytes))
+			return c.parseAPIError(status, errBody)
+		}
+		decoded, err := decodeBudgetedList(r, itemsKey, cursorByID, c.effectiveMCPFrameBudget())
+		if err != nil {
+			return err
+		}
+		out = decoded
+		return nil
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *Client) doJSON(
@@ -434,7 +621,7 @@ func (c *Client) ListJobs(ctx context.Context, in ListJobsInput) (map[string]any
 		q.Set("desc", strconv.FormatBool(*in.Desc))
 	}
 
-	return c.doJSONObject(ctx, http.MethodGet, "/jobs", q, nil, defaultMaxListResponseBytes)
+	return c.doBudgetedList(ctx, "/jobs", q, "jobs", true)
 }
 
 // JobIDInput is the input schema for job-ID-only tools (get_job, requeue_job, mark_delivered).
@@ -494,7 +681,7 @@ func (c *Client) ListHeld(ctx context.Context, in ListHeldInput) (map[string]any
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	return c.doJSONObject(ctx, http.MethodGet, "/gate/held", q, nil, defaultMaxListResponseBytes)
+	return c.doBudgetedList(ctx, "/gate/held", q, "held", false)
 }
 
 // HeldIDInput is the input schema for held-ID-only tools (release_held, cancel_held).
@@ -573,7 +760,7 @@ func (c *Client) GateDecisions(ctx context.Context, in GateDecisionsInput) (map[
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	return c.doJSONObject(ctx, http.MethodGet, "/gate/decisions", q, nil, defaultMaxListResponseBytes)
+	return c.doBudgetedList(ctx, "/gate/decisions", q, "decisions", false)
 }
 
 // ListDeliveriesInput is the input schema for the list_deliveries MCP tool.
@@ -590,7 +777,7 @@ func (c *Client) ListDeliveries(ctx context.Context, in ListDeliveriesInput) (ma
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	return c.doJSONObject(ctx, http.MethodGet, "/deliveries", q, nil, defaultMaxListResponseBytes)
+	return c.doBudgetedList(ctx, "/deliveries", q, "jobs", false)
 }
 
 // FleetStatusInput is the empty input schema for the fleet_status MCP tool.

@@ -1,16 +1,19 @@
 package mcpserver
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -971,161 +974,537 @@ func TestReleaseHeld409SanitizesReason(t *testing.T) {
 	}
 }
 
-func TestMaxListPageHTMLEscapeSizingAndStreaming(t *testing.T) {
-	// API constants from internal/api/server.go (maxBodyBytes = 1 MiB) and
-	// internal/store/types.go (MaxListLimit = 200), kept local so internal/mcpserver
-	// stays decoupled from internal/store and internal/api.
-	const (
-		apiMaxBodyBytes = 1 << 20 // 1 MiB
-		apiMaxListLimit = 200
-	)
+func TestDecodeJSONRejectsTrailingData(t *testing.T) {
+	cases := []struct {
+		name      string
+		isList    bool
+		body      string
+		maxBytes  int64
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:    "single object with trailing whitespace succeeds",
+			isList:  false,
+			body:    "{\"id\":1,\"status\":\"done\"}   \t\r\n  ",
+			wantErr: false,
+		},
+		{
+			name:    "list object with trailing whitespace succeeds",
+			isList:  true,
+			body:    "{\"jobs\":[{\"id\":1}],\"has_more\":false}  \n\t ",
+			wantErr: false,
+		},
+		{
+			name:    "single object followed by second JSON object fails",
+			isList:  false,
+			body:    `{"id":1}{"id":2}`,
+			wantErr: true,
+		},
+		{
+			name:    "single object followed by whitespace and second JSON value fails",
+			isList:  false,
+			body:    `{"id":1}   123`,
+			wantErr: true,
+		},
+		{
+			name:    "single object followed by null fails",
+			isList:  false,
+			body:    `{"id":1} null`,
+			wantErr: true,
+		},
+		{
+			name:    "single object followed by invalid trailing garbage fails",
+			isList:  false,
+			body:    `{"id":1} garbage`,
+			wantErr: true,
+		},
+		{
+			name:    "list object followed by second JSON object fails",
+			isList:  true,
+			body:    `{"jobs":[{"id":1}],"has_more":false}{"extra":true}`,
+			wantErr: true,
+		},
+		{
+			name:    "list object followed by invalid trailing garbage fails",
+			isList:  true,
+			body:    `{"jobs":[{"id":1}],"has_more":false} trailing-junk`,
+			wantErr: true,
+		},
+		{
+			name:      "trailing whitespace pushing over maxResponseBytes fails with exceeded",
+			isList:    false,
+			body:      `{"id":1}  `, // 10 bytes
+			maxBytes:  9,
+			wantErr:   true,
+			errSubstr: "exceeded",
+		},
+		{
+			name:     "trailing whitespace at exact maxResponseBytes succeeds",
+			isList:   false,
+			body:     `{"id":1}  `, // 10 bytes
+			maxBytes: 10,
+			wantErr:  false,
+		},
+	}
 
-	// 1. Reproduce the review's 500 KiB '<' example: Go's json.NewEncoder (escapeHTML=true)
-	// expands each '<' to '\u003c' (6x), so 200 items exceed 512 MiB.
-	reviewInstructions := strings.Repeat("<", 500<<10)
-	var reviewBuf bytes.Buffer
-	if err := json.NewEncoder(&reviewBuf).Encode(reviewInstructions); err != nil {
-		t.Fatalf("encode 500 KiB instructions: %v", err)
-	}
-	encodedReviewField := int64(reviewBuf.Len() - 1) // exclude trailing newline from Encode
-	if encodedReviewField != 3_072_002 {
-		t.Fatalf("encoded 500 KiB '<' field = %d bytes, want 3072002", encodedReviewField)
-	}
-	if encodedReviewField*apiMaxListLimit <= 512<<20 {
-		t.Fatalf("expected 200x 500 KiB '<' to exceed 512 MiB, got %d", encodedReviewField*apiMaxListLimit)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
 
-	// 2. Measure the worst-case single job accepted by the API:
-	// up to 3 independent 1 MiB request bodies (create instructions, complete result_text,
-	// fail/cancel last_error), each filled with HTML-escaped '<' characters.
-	maxFieldChars := apiMaxBodyBytes - 64 // leave room for JSON request envelope within 1 MiB
-	worstField := strings.Repeat("<", maxFieldChars)
-	worstJob := map[string]any{
-		"id":           123456,
-		"request_id":   "req-worst-case-0001",
-		"title":        "worst-case-job",
-		"status":       "done",
-		"agent":        "claude",
-		"host":         "worker-01",
-		"instructions": worstField,
-		"result_text":  worstField,
-		"last_error":   worstField,
-		"created_at":   "2026-11-24T00:00:00Z",
-		"updated_at":   "2026-11-24T00:00:00Z",
-	}
-	var jobBuf bytes.Buffer
-	if err := json.NewEncoder(&jobBuf).Encode(worstJob); err != nil {
-		t.Fatalf("encode worst-case job: %v", err)
-	}
-	singleJobBytes := int64(jobBuf.Len() - 1)
-	if singleJobBytes >= defaultMaxSingleResponseBytes {
-		t.Fatalf("worst-case single job (%d bytes) >= defaultMaxSingleResponseBytes (%d)", singleJobBytes, defaultMaxSingleResponseBytes)
-	}
-	// 200 worst-case jobs + commas + {"jobs":[...],"next_cursor":123456,"has_more":true} envelope.
-	maxPageBytes := singleJobBytes*apiMaxListLimit + int64(apiMaxListLimit) + 128
-	if maxPageBytes >= defaultMaxListResponseBytes {
-		t.Fatalf("worst-case 200-job page (%d bytes) >= defaultMaxListResponseBytes (%d)", maxPageBytes, defaultMaxListResponseBytes)
-	}
-	if defaultMaxSingleResponseBytes >= defaultMaxListResponseBytes {
-		t.Fatalf("expected single response limit (%d) < list response limit (%d)", defaultMaxSingleResponseBytes, defaultMaxListResponseBytes)
-	}
-
-	// 3. Stream a real 200-item HTML-escaped list_jobs response through Client.ListJobs
-	// (200 x 8 KiB '<' -> ~48 KiB JSON/job, ~9.6 MiB HTTP response) and verify streaming
-	// decode unescapes '<' and preserves pagination metadata.
-	const itemChars = 8 << 10
-	itemInstructions := strings.Repeat("<", itemChars)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		enc := json.NewEncoder(w)
-		jobs := make([]map[string]any, apiMaxListLimit)
-		for i := range jobs {
-			jobs[i] = map[string]any{
-				"id":           i + 1,
-				"title":        "html-escaped-job",
-				"status":       "queued",
-				"instructions": itemInstructions,
+			client, err := NewClient(ts.URL, "trailing-test-token", ts.Client())
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
 			}
-		}
-		_ = enc.Encode(map[string]any{
-			"jobs":        jobs,
-			"next_cursor": apiMaxListLimit,
-			"has_more":    true,
+			if tc.maxBytes > 0 {
+				client.maxResponseBytes = tc.maxBytes
+			}
+
+			ctx := context.Background()
+			if tc.isList {
+				_, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
+			} else {
+				_, err = client.GetJob(ctx, 1)
+			}
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for body %q, got nil", tc.body)
+				}
+				if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Fatalf("error %q missing substring %q", err.Error(), tc.errSubstr)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error for body %q: %v", tc.body, err)
+			}
 		})
+	}
+}
+
+func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
+	// 10 jobs x ~2 MiB result_text each -> ~4 MiB MCP wire bytes/job.
+	// With defaultMaxMCPFrameBytes = 14 MiB, each page fits 3 jobs (~12 MiB wire)
+	// and truncates before the 4th (~16 MiB wire), advancing via next_cursor.
+	const totalJobs = 10
+	bigText := strings.Repeat("a", 2<<20)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/jobs":
+			cursor, _ := strconv.Atoi(r.URL.Query().Get("cursor"))
+			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+			if limit <= 0 {
+				limit = 50
+			}
+			jobs := make([]map[string]any, 0, totalJobs)
+			for id := cursor + 1; id <= totalJobs && len(jobs) < limit; id++ {
+				jobs = append(jobs, map[string]any{
+					"id":          id,
+					"title":       fmt.Sprintf("job-%d", id),
+					"status":      "done",
+					"result_text": bigText,
+				})
+			}
+			hasMore := len(jobs) > 0 && jobs[len(jobs)-1]["id"].(int) < totalJobs
+			var nextCursor int
+			if hasMore {
+				nextCursor = jobs[len(jobs)-1]["id"].(int)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jobs":        jobs,
+				"next_cursor": nextCursor,
+				"has_more":    hasMore,
+			})
+		case "/deliveries":
+			jobs := make([]map[string]any, 0, 5)
+			for id := 1; id <= 5; id++ {
+				jobs = append(jobs, map[string]any{
+					"id":          id,
+					"title":       fmt.Sprintf("delivery-%d", id),
+					"status":      "done",
+					"result_text": bigText,
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer ts.Close()
 
-	client, err := NewClient(ts.URL, "max-page-token", ts.Client())
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	limit := apiMaxListLimit
-	got, err := client.ListJobs(context.Background(), ListJobsInput{
-		Status: "queued",
-		Limit:  &limit,
-	})
-	if err != nil {
-		t.Fatalf("Client.ListJobs 200-item HTML-escaped page failed: %v", err)
-	}
-	if got["has_more"] != true || got["next_cursor"] != float64(apiMaxListLimit) {
-		t.Fatalf("pagination mismatch: has_more=%v next_cursor=%v", got["has_more"], got["next_cursor"])
-	}
-	jobs, ok := got["jobs"].([]any)
-	if !ok || len(jobs) != apiMaxListLimit {
-		t.Fatalf("jobs count = %d, want %d", len(jobs), apiMaxListLimit)
-	}
-	first, ok := jobs[0].(map[string]any)
-	if !ok || first["instructions"] != itemInstructions {
-		t.Fatalf("first job instructions mismatch (len=%d)", len(first["instructions"].(string)))
-	}
-
-	// 4. Also exercise the full MCP CallTool path with a 200-item HTML-escaped page
-	// sized within the MCP JSON-RPC transport frame limit.
-	mcpInstructions := strings.Repeat("<", 1<<10) // 1 KiB '<' -> 6 KiB JSON/job (~1.2 MiB HTTP response)
-	tsMCP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		enc := json.NewEncoder(w)
-		jobs := make([]map[string]any, apiMaxListLimit)
-		for i := range jobs {
-			jobs[i] = map[string]any{
-				"id":           i + 1,
-				"title":        "html-escaped-job",
-				"status":       "queued",
-				"instructions": mcpInstructions,
-			}
-		}
-		_ = enc.Encode(map[string]any{
-			"jobs":        jobs,
-			"next_cursor": apiMaxListLimit,
-			"has_more":    true,
-		})
-	}))
-	defer tsMCP.Close()
-
 	session, cleanup := connectTestClient(t, Options{
-		APIURL:     tsMCP.URL,
-		Token:      "max-page-token",
-		HTTPClient: tsMCP.Client(),
+		APIURL:     ts.URL,
+		Token:      "budget-pagination-token",
+		HTTPClient: ts.Client(),
 	})
 	defer cleanup()
 
-	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+	ctx := context.Background()
+	var (
+		collectedIDs   []int
+		cursor         int64
+		truncatedPages int
+		pages          int
+	)
+
+	for {
+		pages++
+		if pages > totalJobs+1 {
+			t.Fatalf("pagination did not terminate after %d pages", pages)
+		}
+		args := map[string]any{"status": "done", "limit": totalJobs}
+		if cursor > 0 {
+			args["cursor"] = cursor
+		}
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "list_jobs",
+			Arguments: args,
+		})
+		if err != nil || res.IsError {
+			t.Fatalf("list_jobs page %d (cursor=%d) failed: err=%v res=%+v", pages, cursor, err, res)
+		}
+		got := decodeToolResultJSON(t, res)
+		jobs, ok := got["jobs"].([]any)
+		if !ok || len(jobs) == 0 {
+			t.Fatalf("page %d returned empty jobs: %+v", pages, got)
+		}
+		for _, raw := range jobs {
+			m := raw.(map[string]any)
+			collectedIDs = append(collectedIDs, int(m["id"].(float64)))
+		}
+		hasMore, _ := got["has_more"].(bool)
+		truncated, _ := got["truncated"].(bool)
+		if truncated {
+			truncatedPages++
+			if reason, _ := got["truncated_reason"].(string); reason == "" {
+				t.Errorf("page %d truncated=true but truncated_reason is empty", pages)
+			}
+			if !hasMore {
+				t.Errorf("page %d truncated=true must set has_more=true", pages)
+			}
+		}
+		if !hasMore {
+			if truncated {
+				t.Errorf("final page %d should not be truncated", pages)
+			}
+			break
+		}
+		nextCursorFloat, ok := got["next_cursor"].(float64)
+		if !ok || int64(nextCursorFloat) <= cursor {
+			t.Fatalf("page %d did not advance next_cursor: got %v (prev=%d)", pages, got["next_cursor"], cursor)
+		}
+		cursor = int64(nextCursorFloat)
+	}
+
+	if truncatedPages == 0 {
+		t.Fatalf("expected at least one truncated page across %d large jobs, got 0", totalJobs)
+	}
+	wantIDs := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	if !reflect.DeepEqual(collectedIDs, wantIDs) {
+		t.Fatalf("collected job IDs = %v, want %v", collectedIDs, wantIDs)
+	}
+
+	// Non-cursor list endpoint (list_deliveries) must also enforce the budget and mark truncated=true.
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "list_deliveries",
+		Arguments: map[string]any{"status": "undelivered", "limit": 5},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("list_deliveries failed: err=%v res=%+v", err, res)
+	}
+	gotDeliv := decodeToolResultJSON(t, res)
+	if gotDeliv["truncated"] != true {
+		t.Errorf("list_deliveries expected truncated=true, got %+v", gotDeliv["truncated"])
+	}
+	if reason, _ := gotDeliv["truncated_reason"].(string); reason == "" {
+		t.Errorf("list_deliveries truncated_reason must be non-empty")
+	}
+	delivJobs, _ := gotDeliv["jobs"].([]any)
+	if len(delivJobs) != 3 {
+		t.Errorf("list_deliveries returned %d jobs, want 3 within 14 MiB frame budget", len(delivJobs))
+	}
+}
+
+func TestListByteBudgetBoundary(t *testing.T) {
+	item1 := []byte(`{"id":1,"title":"item-1","status":"done","result_text":"` + strings.Repeat("b", 2000) + `"}`)
+	item2 := []byte(`{"id":2,"title":"item-2","status":"done","result_text":"` + strings.Repeat("c", 2000) + `"}`)
+	item1Wire := mcpWireItemBytes(item1)
+	item2Wire := mcpWireItemBytes(item2)
+
+	payload := fmt.Sprintf(`{"jobs":[%s,%s],"next_cursor":2,"has_more":false}`, item1, item2)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(ts.URL, "boundary-budget-token", ts.Client())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx := context.Background()
+
+	// Exact fit for 2 items: budget = mcpFrameEnvelopeReserve + item1Wire + item2Wire.
+	exactBudget := mcpFrameEnvelopeReserve + item1Wire + item2Wire
+	client.maxMCPFrameBytes = exactBudget
+	got, err := client.ListJobs(ctx, ListJobsInput{Status: "done"})
+	if err != nil {
+		t.Fatalf("ListJobs at exact 2-item budget failed: %v", err)
+	}
+	if got["truncated"] == true {
+		t.Errorf("expected no truncation at exact budget %d, got truncated=true", exactBudget)
+	}
+	if jobs := got["jobs"].([]json.RawMessage); len(jobs) != 2 {
+		t.Errorf("jobs count = %d, want 2 at exact budget", len(jobs))
+	}
+
+	// 1 byte below exact 2-item budget: must truncate to 1 item with has_more=true, next_cursor=1.
+	client.maxMCPFrameBytes = exactBudget - 1
+	got, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
+	if err != nil {
+		t.Fatalf("ListJobs at budget-1 failed: %v", err)
+	}
+	if got["truncated"] != true || got["has_more"] != true || got["next_cursor"] != int64(1) {
+		t.Errorf("expected truncated=true has_more=true next_cursor=1, got truncated=%v has_more=%v next_cursor=%v",
+			got["truncated"], got["has_more"], got["next_cursor"])
+	}
+	if jobs := got["jobs"].([]json.RawMessage); len(jobs) != 1 {
+		t.Errorf("jobs count = %d, want 1 at budget-1", len(jobs))
+	}
+
+	// Budget smaller than first item alone: must fail rather than emit an oversized MCP frame.
+	client.maxMCPFrameBytes = mcpFrameEnvelopeReserve + item1Wire - 1
+	_, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
+	if err == nil {
+		t.Fatalf("expected error when first item exceeds MCP frame budget, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds MCP frame budget") {
+		t.Errorf("unexpected error for oversized first item: %v", err)
+	}
+}
+
+type maxLineTrackingWriter struct {
+	io.WriteCloser
+	mu      sync.Mutex
+	curLine int
+	maxLine int
+}
+
+func (w *maxLineTrackingWriter) Write(p []byte) (int, error) {
+	n, err := w.WriteCloser.Write(p)
+	w.mu.Lock()
+	for _, b := range p[:n] {
+		w.curLine++
+		if b == '\n' {
+			if w.curLine > w.maxLine {
+				w.maxLine = w.curLine
+			}
+			w.curLine = 0
+		}
+	}
+	if w.curLine > w.maxLine {
+		w.maxLine = w.curLine
+	}
+	w.mu.Unlock()
+	return n, err
+}
+
+func (w *maxLineTrackingWriter) MaxLine() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.maxLine
+}
+
+func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
+	// Stream 200 HTML-escaped jobs (64 KiB '<' each -> ~384 KiB JSON/job, ~76.8 MiB total
+	// if unbudgeted) through a real MCP IOTransport with default 16 MiB DefaultMaxLineLength.
+	// Verify:
+	// 1) Element-by-element decoding stops early once the 14 MiB MCP frame budget is full.
+	// 2) The actual JSON-RPC wire frame is > 12 MiB, <= 14 MiB, and < 16 MiB SDK limit.
+	// 3) Peak heap / total allocations remain tightly bounded (no full-stream buffering).
+	const (
+		apiMaxListLimit = 200
+		itemChars       = 64 << 10 // 64 KiB '<' -> ~384 KiB JSON/job -> ~832 KiB MCP wire/job
+	)
+	itemInstructions := strings.Repeat("<", itemChars)
+	var streamedItems atomic.Int64
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, `{"jobs":[`)
+		enc := json.NewEncoder(w)
+		for i := 1; i <= apiMaxListLimit; i++ {
+			if i > 1 {
+				if _, err := io.WriteString(w, ","); err != nil {
+					return
+				}
+			}
+			streamedItems.Add(1)
+			if err := enc.Encode(map[string]any{
+				"id":           i,
+				"title":        "html-escaped-job",
+				"status":       "queued",
+				"instructions": itemInstructions,
+			}); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		_, _ = fmt.Fprintf(w, `],"next_cursor":%d,"has_more":false}`, apiMaxListLimit)
+	}))
+	defer ts.Close()
+
+	srv, err := NewServer(Options{
+		APIURL:     ts.URL,
+		Token:      "max-page-token",
+		HTTPClient: ts.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	tracker := &maxLineTrackingWriter{WriteCloser: s2cW}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- srv.Run(ctx, &mcp.IOTransport{
+			Reader:        c2sR,
+			Writer:        tracker,
+			MaxLineLength: 0, // default 16 MiB mcp.DefaultMaxLineLength
+		})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "io-test-client", Version: "0.0.1"}, nil)
+	session, err := client.Connect(ctx, &mcp.IOTransport{
+		Reader:        s2cR,
+		Writer:        c2sW,
+		MaxLineLength: 0, // default 16 MiB mcp.DefaultMaxLineLength
+	}, nil)
+	if err != nil {
+		cancel()
+		t.Fatalf("client.Connect over IOTransport: %v", err)
+	}
+	defer func() {
+		_ = session.Close()
+		_ = c2sW.Close()
+		_ = s2cR.Close()
+		cancel()
+		<-serverDone
+	}()
+
+	// Phase 1: Measure decodeBudgetedList directly against a synthetic 200-item (~76.8 MiB)
+	// streaming JSON reader (no httptest/MCP client noise) to verify element-by-element
+	// decoding keeps allocations far below the full 76.8 MiB stream size.
+	{
+		pr, pw := io.Pipe()
+		go func() {
+			defer pw.Close()
+			if _, err := io.WriteString(pw, `{"jobs":[`); err != nil {
+				return
+			}
+			enc := json.NewEncoder(pw)
+			for i := 1; i <= apiMaxListLimit; i++ {
+				if i > 1 {
+					if _, err := io.WriteString(pw, ","); err != nil {
+						return
+					}
+				}
+				if err := enc.Encode(map[string]any{
+					"id":           i,
+					"title":        "html-escaped-job",
+					"status":       "queued",
+					"instructions": itemInstructions,
+				}); err != nil {
+					return
+				}
+			}
+			_, _ = fmt.Fprintf(pw, `],"next_cursor":%d,"has_more":false}`, apiMaxListLimit)
+		}()
+
+		runtime.GC()
+		var decBefore, decAfter runtime.MemStats
+		runtime.ReadMemStats(&decBefore)
+
+		decoded, err := decodeBudgetedList(pr, "jobs", true, defaultMaxMCPFrameBytes)
+		_ = pr.Close()
+		if err != nil {
+			t.Fatalf("decodeBudgetedList direct stream failed: %v", err)
+		}
+		runtime.ReadMemStats(&decAfter)
+		decAllocDelta := decAfter.TotalAlloc - decBefore.TotalAlloc
+		decLiveHeap := int64(decAfter.HeapAlloc) - int64(decBefore.HeapAlloc)
+
+		decJobs := decoded["jobs"].([]json.RawMessage)
+		if len(decJobs) == 0 || len(decJobs) >= apiMaxListLimit {
+			t.Fatalf("direct decode expected truncated non-empty page (<%d), got %d", apiMaxListLimit, len(decJobs))
+		}
+		if decoded["truncated"] != true || decoded["has_more"] != true {
+			t.Fatalf("direct decode expected truncated=true has_more=true, got %v / %v", decoded["truncated"], decoded["has_more"])
+		}
+		// Full 200-item stream would be ~76.8 MiB raw JSON (plus ~150+ MiB if buffered+unmarshaled).
+		// With element-by-element budgeted decoding, total allocations stay well below 64 MiB.
+		const maxDecodeAlloc = 64 << 20
+		if decAllocDelta > maxDecodeAlloc {
+			t.Errorf("direct decode totalAllocDelta = %d bytes (> %d bytes)", decAllocDelta, maxDecodeAlloc)
+		}
+		t.Logf("direct stream decode (200-item ~76.8 MiB source): returned=%d jobs, total_alloc_delta=%.2f MiB, live_heap_delta=%.2f MiB",
+			len(decJobs), float64(decAllocDelta)/(1<<20), float64(decLiveHeap)/(1<<20))
+	}
+
+	// Phase 2: Full end-to-end MCP CallTool over default 16 MiB IOTransport.
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "list_jobs",
 		Arguments: map[string]any{"status": "queued", "limit": apiMaxListLimit},
 	})
 	if err != nil || res.IsError {
-		t.Fatalf("MCP list_jobs 200-item HTML-escaped page failed: err=%v res=%+v", err, res)
+		t.Fatalf("MCP list_jobs max-page over default 16 MiB IOTransport failed: err=%v res=%+v", err, res)
 	}
-	gotMCP := decodeToolResultJSON(t, res)
-	if gotMCP["has_more"] != true || gotMCP["next_cursor"] != float64(apiMaxListLimit) {
-		t.Fatalf("MCP pagination mismatch: has_more=%v next_cursor=%v", gotMCP["has_more"], gotMCP["next_cursor"])
+
+	wireBytes := int64(tracker.MaxLine())
+
+	got := decodeToolResultJSON(t, res)
+	jobs, ok := got["jobs"].([]any)
+	if !ok || len(jobs) == 0 || len(jobs) >= apiMaxListLimit {
+		t.Fatalf("expected truncated non-empty page (<%d), got %d jobs", apiMaxListLimit, len(jobs))
 	}
-	mcpJobs, ok := gotMCP["jobs"].([]any)
-	if !ok || len(mcpJobs) != apiMaxListLimit {
-		t.Fatalf("MCP jobs count = %d, want %d", len(mcpJobs), apiMaxListLimit)
+	if got["truncated"] != true || got["has_more"] != true {
+		t.Fatalf("expected truncated=true has_more=true, got truncated=%v has_more=%v", got["truncated"], got["has_more"])
 	}
+	if got["next_cursor"] != float64(len(jobs)) {
+		t.Fatalf("next_cursor = %v, want %d", got["next_cursor"], len(jobs))
+	}
+	first := jobs[0].(map[string]any)
+	if first["instructions"] != itemInstructions {
+		t.Fatalf("first job instructions mismatch (got len=%d, want %d)", len(first["instructions"].(string)), len(itemInstructions))
+	}
+
+	if wireBytes <= 12<<20 {
+		t.Errorf("measured wire frame = %d bytes, expected > 12 MiB to exercise max page", wireBytes)
+	}
+	if wireBytes > defaultMaxMCPFrameBytes {
+		t.Errorf("measured wire frame = %d bytes > defaultMaxMCPFrameBytes (%d)", wireBytes, defaultMaxMCPFrameBytes)
+	}
+	if wireBytes >= mcp.DefaultMaxLineLength {
+		t.Errorf("measured wire frame = %d bytes >= mcp.DefaultMaxLineLength (%d)", wireBytes, mcp.DefaultMaxLineLength)
+	}
+
+	t.Logf("max MCP list page verified: returned=%d/%d jobs (upstream streamed=%d), wire_frame=%d bytes (%.2f MiB / 16.00 MiB SDK limit)",
+		len(jobs), apiMaxListLimit, streamedItems.Load(),
+		wireBytes, float64(wireBytes)/(1<<20))
 }
 
 func TestNewServerValidation(t *testing.T) {

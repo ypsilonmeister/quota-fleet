@@ -53,7 +53,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_jobs",
-		Description: "List jobs filtered by status (required) and optional agent, host, title query (q), parent_id, cursor, limit, and desc (GET /jobs).",
+		Description: "List jobs filtered by status (required) and optional agent, host, title query (q), parent_id, cursor, limit, and desc (GET /jobs). Pages are capped to fit the MCP frame byte budget; if truncated=true, continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListJobsInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.ListJobs(ctx, in)
 		if err != nil {
