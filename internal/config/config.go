@@ -604,6 +604,7 @@ func (c *Config) Validate() error {
 
 	if len(c.API.Tokens) > 0 {
 		seenNames := make(map[string]int, len(c.API.Tokens))
+		seenTokens := make(map[string]int, len(c.API.Tokens))
 		hasLegacy := strings.TrimSpace(c.API.Token) != ""
 		for i, tok := range c.API.Tokens {
 			name := strings.TrimSpace(tok.Name)
@@ -621,6 +622,15 @@ func (c *Config) Validate() error {
 			}
 			if strings.TrimSpace(tok.Token) == "" {
 				errs = append(errs, fmt.Errorf("api.tokens[%d].token must not be empty", i))
+			} else {
+				if hasLegacy && tok.Token == c.API.Token {
+					errs = append(errs, fmt.Errorf("api.tokens[%d].token conflicts with legacy api.token", i))
+				}
+				if prevIdx, dup := seenTokens[tok.Token]; dup {
+					errs = append(errs, fmt.Errorf("api.tokens[%d].token is duplicated (already defined at api.tokens[%d])", i, prevIdx))
+				} else {
+					seenTokens[tok.Token] = i
+				}
 			}
 			for j, sc := range tok.Scopes {
 				if !ValidAPIScope(sc) {

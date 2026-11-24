@@ -29,42 +29,16 @@ func (tokenTestAgentChecker) CheckOnce(_ context.Context) (*agentver.CheckResult
 	return &agentver.CheckResult{}, nil
 }
 
-func TestAPITokenScopeEndpointMatrix(t *testing.T) {
-	_, st, ts := newTestServer(t, Options{
-		InstanceID: "inst-scopes",
-		MaxClaimed: 5,
-		Token:      "tok-legacy-secret",
-		Tokens: []config.APITokenConfig{
-			{Name: "coordinator", Token: "tok-coord-secret", Scopes: []string{"read", "register", "operate", "worker", "agents"}},
-			{Name: "watch", Token: "tok-watch-secret", Scopes: []string{"read"}},
-			{Name: "registrar", Token: "tok-reg-secret", Scopes: []string{"register"}},
-			{Name: "operator", Token: "tok-op-secret", Scopes: []string{"operate"}},
-			{Name: "worker-bot", Token: "tok-worker-secret", Scopes: []string{"worker"}},
-			{Name: "agents-bot", Token: "tok-agents-secret", Scopes: []string{"agents"}},
-		},
-		GateReleaser: tokenTestGateReleaser{},
-		AgentChecker: tokenTestAgentChecker{},
-	})
+type apiEndpointCase struct {
+	name          string
+	method        string
+	path          string
+	body          any
+	requiredScope string
+}
 
-	// Seed a job directly in store so job endpoints have a valid target ID.
-	job, _, err := st.CreateJob(context.Background(), store.CreateJobParams{
-		RequestID: "req-matrix-seed",
-		Title:     "Matrix Seed Job",
-	})
-	if err != nil {
-		t.Fatalf("seed job: %v", err)
-	}
-	jobID := job.ID
-
-	type endpointCase struct {
-		name          string
-		method        string
-		path          string
-		body          any
-		requiredScope string
-	}
-
-	endpoints := []endpointCase{
+func apiScopeEndpoints(jobID int64) []apiEndpointCase {
+	return []apiEndpointCase{
 		// read
 		{name: "GET /jobs", method: http.MethodGet, path: "/jobs?status=queued", requiredScope: config.ScopeRead},
 		{name: "GET /jobs/{id}", method: http.MethodGet, path: fmt.Sprintf("/jobs/%d", jobID), requiredScope: config.ScopeRead},
@@ -95,6 +69,34 @@ func TestAPITokenScopeEndpointMatrix(t *testing.T) {
 		{name: "POST /jobs/{id}/cancel-claimed", method: http.MethodPost, path: fmt.Sprintf("/jobs/%d/cancel-claimed", jobID+999), body: FailRequest{Token: "x"}, requiredScope: config.ScopeWorker},
 		{name: "POST /jobs/{id}/reject-invalid", method: http.MethodPost, path: fmt.Sprintf("/jobs/%d/reject-invalid", jobID+999), body: ReasonRequest{Reason: "invalid"}, requiredScope: config.ScopeWorker},
 	}
+}
+
+func TestAPITokenScopeEndpointMatrix(t *testing.T) {
+	_, st, ts := newTestServer(t, Options{
+		InstanceID: "inst-scopes",
+		MaxClaimed: 5,
+		Token:      "tok-legacy-secret",
+		Tokens: []config.APITokenConfig{
+			{Name: "coordinator", Token: "tok-coord-secret", Scopes: []string{"read", "register", "operate", "worker", "agents"}},
+			{Name: "watch", Token: "tok-watch-secret", Scopes: []string{"read"}},
+			{Name: "registrar", Token: "tok-reg-secret", Scopes: []string{"register"}},
+			{Name: "operator", Token: "tok-op-secret", Scopes: []string{"operate"}},
+			{Name: "worker-bot", Token: "tok-worker-secret", Scopes: []string{"worker"}},
+			{Name: "agents-bot", Token: "tok-agents-secret", Scopes: []string{"agents"}},
+		},
+		GateReleaser: tokenTestGateReleaser{},
+		AgentChecker: tokenTestAgentChecker{},
+	})
+
+	// Seed a job directly in store so job endpoints have a valid target ID.
+	job, _, err := st.CreateJob(context.Background(), store.CreateJobParams{
+		RequestID: "req-matrix-seed",
+		Title:     "Matrix Seed Job",
+	})
+	if err != nil {
+		t.Fatalf("seed job: %v", err)
+	}
+	endpoints := apiScopeEndpoints(job.ID)
 
 	type tokenCase struct {
 		name   string
@@ -239,6 +241,26 @@ func TestLegacySingleTokenBackwardCompatibility(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /agents/check status = %d, want 200", resp.StatusCode)
+	}
+
+	// All 22 API endpoints must be reachable with the legacy single token when api.tokens is unset,
+	// and must still reject unauthenticated requests with 401.
+	for _, ep := range apiScopeEndpoints(created.Job.ID) {
+		t.Run("all_routes/"+ep.name+"/no_token", func(t *testing.T) {
+			resp := doJSON(t, ep.method, ts.URL+ep.path, "", ep.body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", resp.StatusCode)
+			}
+		})
+		t.Run("all_routes/"+ep.name+"/legacy", func(t *testing.T) {
+			resp := doJSON(t, ep.method, ts.URL+ep.path, "only-legacy-token", ep.body)
+			rawBody, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				t.Fatalf("legacy single token rejected on %s: status = %d, body = %s", ep.name, resp.StatusCode, string(rawBody))
+			}
+		})
 	}
 }
 

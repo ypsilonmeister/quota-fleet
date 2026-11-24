@@ -1162,6 +1162,36 @@ api:
 `,
 			wantErrPart: "token must not be empty",
 		},
+		{
+			name: "duplicate token value among named tokens",
+			yaml: `
+instance_id: "inst-dup-val"
+api:
+  tokens:
+    - name: watch
+      token: "shared-secret-value-123"
+      scopes: [read]
+    - name: operator
+      token: "shared-secret-value-123"
+      scopes: [operate]
+`,
+			wantErrPart: "duplicated",
+			noLeak:      "shared-secret-value-123",
+		},
+		{
+			name: "duplicate token value with legacy api.token",
+			yaml: `
+instance_id: "inst-dup-legacy-val"
+api:
+  token: "shared-legacy-secret-456"
+  tokens:
+    - name: watch
+      token: "shared-legacy-secret-456"
+      scopes: [read]
+`,
+			wantErrPart: "conflicts with legacy",
+			noLeak:      "shared-legacy-secret-456",
+		},
 	}
 
 	for _, tc := range invalidCases {
