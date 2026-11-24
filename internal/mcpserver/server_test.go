@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -2116,16 +2117,36 @@ func TestListJobsExceedingHTTPResponseLimitContinuation(t *testing.T) {
 
 func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
 	// End-to-end round-trip verification of the full-text recovery contract using the EXACT SAME
-	// stored SQLite job records served by the real HTTP API over the official SDK's default
+	// stored SQLite records served by the real HTTP API over the official SDK's default
 	// 16 MiB IOTransport (MaxLineLength=0):
-	// 1) Plain UTF-8 job within guaranteed MCP get_job range (2 x 1 MiB plain -> ~4 MiB wire):
-	//    list_jobs & list_deliveries project to <= 4 KiB; MCP get_job recovers exact full text.
-	// 2) HTML-escaped '<' job within guaranteed MCP get_job range (2 x 400 KiB '<' -> ~10.4 MiB wire):
-	//    list_jobs & list_deliveries project to <= 4 KiB; MCP get_job recovers exact full text.
-	// 3) HTML-escaped '<' job exceeding default 16 MiB MCP transport frame limit (2 x 800 KiB '<'
-	//    -> ~20.3 MiB MCP wire > 16 MiB, while HTTP JSON is ~9.6 MiB < 32 MiB):
-	//    list_jobs still succeeds with 4 KiB projection; MCP get_job fails at the 16 MiB transport
-	//    limit; direct HTTP Client.GetJob (GET /jobs/{id}) recovers the exact full text.
+	//
+	// A) Jobs (list_jobs & list_deliveries -> MCP get_job / direct HTTP GET /jobs/{id}):
+	//    1) Plain UTF-8 done job within guaranteed MCP get_job range:
+	//       instructions, acceptance_criteria, result_text projected to <=4 KiB with exact
+	//       fields_truncated; MCP get_job recovers all 3 fields byte-for-byte.
+	//    2) Plain UTF-8 failed job within guaranteed MCP get_job range:
+	//       instructions, acceptance_criteria, result_text, last_error projected to <=4 KiB with
+	//       exact fields_truncated; MCP get_job recovers all 4 fields byte-for-byte.
+	//    3) HTML-escaped ('<'/'>'/'&') failed job within guaranteed MCP get_job range (~10.4 MiB wire):
+	//       all 4 fields projected with exact fields_truncated; MCP get_job recovers all 4 fields.
+	//    4) HTML-escaped ('<'/'>'/'&') failed job exceeding default 16 MiB MCP frame limit (~20.3 MiB wire):
+	//       list_jobs & list_deliveries still succeed with 4 KiB projection + exact fields_truncated;
+	//       MCP get_job fails at the 16 MiB transport limit; direct HTTP GET /jobs/{id} (raw HTTP
+	//       and MCP Client.GetJob) recovers all 4 fields byte-for-byte.
+	//
+	// B) Held jobs (list_held -> direct HTTP GET /gate/held, and released payload -> MCP get_job):
+	//    1) Active held job with >4 KiB payload.instructions, payload.acceptance_criteria, reason,
+	//       snapshot_summary, last_error: list_held projects all 5 with exact fields_truncated;
+	//       direct HTTP GET /gate/held recovers all 5 fields byte-for-byte.
+	//    2) Released held job: release clears held last_error; list_held(status=released) projects
+	//       payload.instructions, payload.acceptance_criteria, reason, snapshot_summary with exact
+	//       fields_truncated; MCP get_job(id=released_job_id) recovers carried-over payload fields
+	//       (instructions, acceptance_criteria) while direct HTTP GET /gate/held recovers held-only
+	//       fields (reason, snapshot_summary).
+	//
+	// C) Gate decisions (gate_decisions -> direct HTTP GET /gate/decisions):
+	//    1) Decision with >4 KiB reason: gate_decisions projects reason with exact
+	//       fields_truncated=["reason"]; direct HTTP GET /gate/decisions recovers reason byte-for-byte.
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "fleet-recovery.db")
 	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: "mcp-recovery-test"})
@@ -2134,14 +2155,15 @@ func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
 	}
 	defer st.Close()
 
-	seedDoneJob := func(reqID, title, instr, result string) int64 {
+	seedDoneJob := func(reqID, title, instr, ac, result string) int64 {
 		t.Helper()
 		job, _, err := st.CreateJob(ctx, store.CreateJobParams{
-			RequestID:    reqID,
-			Title:        title,
-			Agent:        "claude",
-			Host:         "ubuntu",
-			Instructions: instr,
+			RequestID:          reqID,
+			Title:              title,
+			Agent:              "claude",
+			Host:               "ubuntu",
+			Instructions:       instr,
+			AcceptanceCriteria: ac,
 		})
 		if err != nil {
 			t.Fatalf("CreateJob(%s): %v", reqID, err)
@@ -2156,21 +2178,188 @@ func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
 		return job.ID
 	}
 
-	plainInstr := strings.Repeat("A", 1<<20)         // 1 MiB plain
-	plainResult := strings.Repeat("B", 1<<20)        // 1 MiB plain
-	htmlWithinInstr := strings.Repeat("<", 400<<10)  // 400 KiB '<'
-	htmlWithinResult := strings.Repeat(">", 400<<10) // 400 KiB '>'
-	htmlOverInstr := strings.Repeat("<", 800<<10)    // 800 KiB '<'
-	htmlOverResult := strings.Repeat("<", 800<<10)   // 800 KiB '<'
+	seedFailedJob := func(reqID, title, instr, ac, result, lastErr string) int64 {
+		t.Helper()
+		job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+			RequestID:          reqID,
+			Title:              title,
+			Agent:              "claude",
+			Host:               "ubuntu",
+			Instructions:       instr,
+			AcceptanceCriteria: ac,
+		})
+		if err != nil {
+			t.Fatalf("CreateJob(%s): %v", reqID, err)
+		}
+		claimed, ok, err := st.ClaimByID(ctx, job.ID, 10)
+		if err != nil || !ok {
+			t.Fatalf("ClaimByID(%d): ok=%v err=%v", job.ID, ok, err)
+		}
+		if _, err := st.FailWithResult(ctx, job.ID, claimed.ClaimedBy, lastErr, result); err != nil {
+			t.Fatalf("FailWithResult(%d): %v", job.ID, err)
+		}
+		return job.ID
+	}
 
-	plainID := seedDoneJob("rec-plain", "plain-within-mcp", plainInstr, plainResult)
-	htmlWithinID := seedDoneJob("rec-html-within", "html-within-mcp", htmlWithinInstr, htmlWithinResult)
-	htmlOverID := seedDoneJob("rec-html-over", "html-over-mcp", htmlOverInstr, htmlOverResult)
+	// Job 1: done plain UTF-8 (3 x 512 KiB = 1.5 MiB plain -> ~3 MiB wire < 16 MiB).
+	plainDoneInstr := strings.Repeat("A", 512<<10)
+	plainDoneAC := strings.Repeat("C", 512<<10)
+	plainDoneResult := strings.Repeat("B", 512<<10)
+	plainDoneID := seedDoneJob("rec-plain-done", "plain-done-within-mcp", plainDoneInstr, plainDoneAC, plainDoneResult)
+
+	// Job 2: failed plain UTF-8 (4 x 256 KiB = 1 MiB plain -> ~2 MiB wire < 16 MiB).
+	plainFailInstr := strings.Repeat("D", 256<<10)
+	plainFailAC := strings.Repeat("E", 256<<10)
+	plainFailResult := strings.Repeat("F", 256<<10)
+	plainFailErr := strings.Repeat("G", 256<<10)
+	plainFailID := seedFailedJob("rec-plain-failed", "plain-failed-within-mcp", plainFailInstr, plainFailAC, plainFailResult, plainFailErr)
+
+	// Job 3: failed HTML-escaped within 16 MiB MCP limit (4 x 200 KiB = 800 KiB -> ~10.4 MiB wire < 16 MiB).
+	htmlWithinInstr := strings.Repeat("<", 200<<10)
+	htmlWithinAC := strings.Repeat(">", 200<<10)
+	htmlWithinResult := strings.Repeat("&", 200<<10)
+	htmlWithinErr := strings.Repeat("<", 200<<10)
+	htmlWithinID := seedFailedJob("rec-html-within", "html-within-mcp", htmlWithinInstr, htmlWithinAC, htmlWithinResult, htmlWithinErr)
+
+	// Job 4: failed HTML-escaped exceeding 16 MiB MCP limit (4 x 400 KiB = 1.6 MiB -> ~20.3 MiB wire > 16 MiB).
+	htmlOverInstr := strings.Repeat("<", 400<<10)
+	htmlOverAC := strings.Repeat(">", 400<<10)
+	htmlOverResult := strings.Repeat("&", 400<<10)
+	htmlOverErr := strings.Repeat("<", 400<<10)
+	htmlOverID := seedFailedJob("rec-html-over", "html-over-mcp", htmlOverInstr, htmlOverAC, htmlOverResult, htmlOverErr)
+
+	// Held job 1 (active): all 5 long text fields > 4 KiB.
+	heldInstr := "held-instr-" + strings.Repeat("H", 8<<10)
+	heldAC := "held-ac-" + strings.Repeat("I", 8<<10)
+	heldReason := "held-reason-" + strings.Repeat("J", 8<<10)
+	heldSnapshot := "held-snapshot-" + strings.Repeat("K", 8<<10)
+	heldLastErr := "held-last-error-" + strings.Repeat("L", 8<<10)
+	heldActive, _, err := st.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "rec-held-active",
+		Pool:      "claude-main",
+		Payload: store.CreateJobParams{
+			RequestID:          "rec-held-active",
+			Title:              "held-active-long-fields",
+			Agent:              "claude",
+			Host:               "ubuntu",
+			Instructions:       heldInstr,
+			AcceptanceCriteria: heldAC,
+		},
+		Reason:          heldReason,
+		SnapshotSummary: heldSnapshot,
+	})
+	if err != nil {
+		t.Fatalf("HoldJob(active): %v", err)
+	}
+	if _, _, err := st.RecordHeldReleaseError(ctx, heldActive.ID, "initial release error"); err != nil {
+		t.Fatalf("RecordHeldReleaseError(active): %v", err)
+	}
+	// Populate held_jobs.last_error with >4 KiB directly in SQLite so >4 KiB truncation of
+	// held last_error is exercised end-to-end on the real SQLite store + HTTP API.
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open(sqlite): %v", err)
+	}
+	if _, err := rawDB.ExecContext(ctx, `UPDATE held_jobs SET last_error = ? WHERE id = ?`, heldLastErr, heldActive.ID); err != nil {
+		rawDB.Close()
+		t.Fatalf("UPDATE held_jobs.last_error: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("rawDB.Close: %v", err)
+	}
+
+	// Held job 2 (released): payload fields transfer to created job, while held reason &
+	// snapshot_summary stay on held_jobs and held last_error is cleared on release.
+	relInstr := "rel-instr-" + strings.Repeat("M", 8<<10)
+	relAC := "rel-ac-" + strings.Repeat("N", 8<<10)
+	relReason := "rel-reason-" + strings.Repeat("O", 8<<10)
+	relSnapshot := "rel-snapshot-" + strings.Repeat("P", 8<<10)
+	heldReleased, _, err := st.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "rec-held-released",
+		Pool:      "claude-main",
+		Payload: store.CreateJobParams{
+			RequestID:          "rec-held-released",
+			Title:              "held-released-long-fields",
+			Agent:              "claude",
+			Host:               "ubuntu",
+			Instructions:       relInstr,
+			AcceptanceCriteria: relAC,
+		},
+		Reason:          relReason,
+		SnapshotSummary: relSnapshot,
+	})
+	if err != nil {
+		t.Fatalf("HoldJob(released): %v", err)
+	}
+	if _, _, err := st.RecordHeldReleaseError(ctx, heldReleased.ID, "transient error cleared on release"); err != nil {
+		t.Fatalf("RecordHeldReleaseError(released): %v", err)
+	}
+	relParams := heldReleased.Payload
+	relParams.RequestID = heldReleased.RequestID
+	relParams.Pool = "claude-main"
+	releasedJob, _, err := st.CreateJob(ctx, relParams)
+	if err != nil {
+		t.Fatalf("CreateJob(released): %v", err)
+	}
+	if _, err := st.MarkHeldReleased(ctx, heldReleased.ID, releasedJob.ID, "claude-main"); err != nil {
+		t.Fatalf("MarkHeldReleased: %v", err)
+	}
+
+	// Gate decision with >4 KiB reason.
+	decisionReason := "decision-reason-" + strings.Repeat("Q", 8<<10)
+	decisionRec, err := st.RecordGateDecision(ctx, store.GateDecision{
+		HeldID:        heldActive.ID,
+		Held:          true,
+		Mode:          "enforce",
+		RequestedPool: "claude-main",
+		Decision:      "would_hold",
+		BlockedBy:     "weekly_remaining",
+		Reason:        decisionReason,
+	})
+	if err != nil {
+		t.Fatalf("RecordGateDecision: %v", err)
+	}
 
 	const apiToken = "recovery-contract-token"
 	apiSrv := api.NewServer(st, api.Options{Token: apiToken})
 	ts := httptest.NewServer(apiSrv)
 	defer ts.Close()
+
+	// Helper for direct raw HTTP API GET requests (bypassing MCP Client limits).
+	directHTTPGetJSON := func(t *testing.T, path string) map[string]any {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest(%s): %v", path, err)
+		}
+		req.Header.Set("Authorization", "Bearer "+apiToken)
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatalf("HTTP GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("HTTP GET %s status=%d body=%s", path, resp.StatusCode, string(body))
+		}
+		var out map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode HTTP GET %s: %v", path, err)
+		}
+		return out
+	}
+
+	toStringSlice := func(v any) []string {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil
+		}
+		out := make([]string, len(arr))
+		for i, e := range arr {
+			out[i], _ = e.(string)
+		}
+		return out
+	}
 
 	session, tracker, cleanup := connectIOTransportClient(t, Options{
 		APIURL:     ts.URL,
@@ -2194,10 +2383,17 @@ func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
 	}{
 		{"list_jobs", "GET /jobs/{id}"},
 		{"list_jobs", "16 MiB"},
+		{"list_jobs", "32 MiB"},
 		{"get_job", "16 MiB"},
+		{"get_job", "32 MiB"},
 		{"get_job", "GET /jobs/{id}"},
 		{"list_deliveries", "GET /jobs/{id}"},
+		{"list_deliveries", "16 MiB"},
+		{"list_deliveries", "32 MiB"},
 		{"list_held", "GET /gate/held"},
+		{"list_held", "reason, snapshot_summary, last_error"},
+		{"list_held", "only returns fields carried over from payload"},
+		{"list_held", "not held-record-specific fields"},
 		{"gate_decisions", "GET /gate/decisions"},
 	} {
 		if !strings.Contains(descByName[tc.tool], tc.substr) {
@@ -2205,48 +2401,88 @@ func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
 		}
 	}
 
-	// Verify list_jobs and list_deliveries return all 3 jobs projected to <= 4 KiB with fields_truncated.
-	for _, toolName := range []string{"list_jobs", "list_deliveries"} {
-		args := map[string]any{"status": "done", "limit": 10}
-		if toolName == "list_deliveries" {
-			args = map[string]any{"status": "undelivered", "limit": 10}
+	// Verify list_jobs (done & failed) and list_deliveries (undelivered) project all long fields
+	// to <= 4 KiB and record the EXACT fields_truncated paths for every seeded job.
+	wantJobFieldsTruncated := map[int64][]string{
+		plainDoneID:  {"acceptance_criteria", "instructions", "result_text"},
+		plainFailID:  {"acceptance_criteria", "instructions", "last_error", "result_text"},
+		htmlWithinID: {"acceptance_criteria", "instructions", "last_error", "result_text"},
+		htmlOverID:   {"acceptance_criteria", "instructions", "last_error", "result_text"},
+	}
+	checkProjectedJob := func(t *testing.T, source string, item map[string]any) {
+		t.Helper()
+		id := int64(item["id"].(float64))
+		wantFT, ok := wantJobFieldsTruncated[id]
+		if !ok {
+			t.Fatalf("%s returned unexpected job id=%d", source, id)
 		}
-		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: toolName, Arguments: args})
-		if err != nil || res.IsError {
-			t.Fatalf("%s failed: err=%v res=%+v", toolName, err, res)
+		for _, field := range wantFT {
+			s, _ := item[field].(string)
+			if len(s) == 0 || len(s) > defaultMaxListTextBytes {
+				t.Errorf("%s id=%d field %q len=%d, want 1..%d", source, id, field, len(s), defaultMaxListTextBytes)
+			}
 		}
-		got := decodeToolResultJSON(t, res)
-		jobs := got["jobs"].([]any)
-		if len(jobs) != 3 {
-			t.Fatalf("%s returned %d jobs, want 3", toolName, len(jobs))
-		}
-		for _, raw := range jobs {
-			item := raw.(map[string]any)
-			if len(item["instructions"].(string)) > defaultMaxListTextBytes {
-				t.Errorf("%s id=%v instructions not projected", toolName, item["id"])
-			}
-			if len(item["result_text"].(string)) > defaultMaxListTextBytes {
-				t.Errorf("%s id=%v result_text not projected", toolName, item["id"])
-			}
-			ft := item["fields_truncated"].([]any)
-			if len(ft) < 2 {
-				t.Errorf("%s id=%v expected fields_truncated >= 2, got %v", toolName, item["id"], ft)
-			}
+		gotFT := toStringSlice(item["fields_truncated"])
+		if !reflect.DeepEqual(gotFT, wantFT) {
+			t.Errorf("%s id=%d fields_truncated = %v, want %v", source, id, gotFT, wantFT)
 		}
 	}
 
-	// 1 & 2: Guaranteed full-text recovery via MCP get_job over default 16 MiB IOTransport
-	// on the exact same stored jobs.
+	for _, status := range []string{"done", "failed"} {
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "list_jobs",
+			Arguments: map[string]any{"status": status, "limit": 10},
+		})
+		if err != nil || res.IsError {
+			t.Fatalf("list_jobs(status=%s) failed: err=%v res=%+v", status, err, res)
+		}
+		got := decodeToolResultJSON(t, res)
+		jobs := got["jobs"].([]any)
+		wantCount := 1
+		if status == "failed" {
+			wantCount = 3
+		}
+		if len(jobs) != wantCount {
+			t.Fatalf("list_jobs(status=%s) returned %d jobs, want %d", status, len(jobs), wantCount)
+		}
+		for _, raw := range jobs {
+			checkProjectedJob(t, "list_jobs/"+status, raw.(map[string]any))
+		}
+	}
+
+	{
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "list_deliveries",
+			Arguments: map[string]any{"status": "undelivered", "limit": 10},
+		})
+		if err != nil || res.IsError {
+			t.Fatalf("list_deliveries failed: err=%v res=%+v", err, res)
+		}
+		got := decodeToolResultJSON(t, res)
+		jobs := got["jobs"].([]any)
+		if len(jobs) != 4 {
+			t.Fatalf("list_deliveries returned %d jobs, want 4", len(jobs))
+		}
+		for _, raw := range jobs {
+			checkProjectedJob(t, "list_deliveries", raw.(map[string]any))
+		}
+	}
+
+	// A1-A3: Guaranteed full-text recovery via MCP get_job over default 16 MiB IOTransport
+	// on the exact same stored jobs (verifying instructions, acceptance_criteria, result_text, last_error).
 	for _, tc := range []struct {
-		name       string
-		id         int64
-		wantInstr  string
-		wantResult string
+		name        string
+		id          int64
+		wantInstr   string
+		wantAC      string
+		wantResult  string
+		wantLastErr string
 	}{
-		{"plain_2x1MiB", plainID, plainInstr, plainResult},
-		{"html_2x400KiB", htmlWithinID, htmlWithinInstr, htmlWithinResult},
+		{"plain_done", plainDoneID, plainDoneInstr, plainDoneAC, plainDoneResult, ""},
+		{"plain_failed", plainFailID, plainFailInstr, plainFailAC, plainFailResult, plainFailErr},
+		{"html_within_16MiB", htmlWithinID, htmlWithinInstr, htmlWithinAC, htmlWithinResult, htmlWithinErr},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run("get_job_"+tc.name, func(t *testing.T) {
 			res, err := session.CallTool(ctx, &mcp.CallToolParams{
 				Name:      "get_job",
 				Arguments: map[string]any{"id": tc.id},
@@ -2255,18 +2491,24 @@ func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
 				t.Fatalf("MCP get_job(%d) failed: err=%v res=%+v", tc.id, err, res)
 			}
 			full := decodeToolResultJSON(t, res)
-			if gotInstr, _ := full["instructions"].(string); gotInstr != tc.wantInstr {
-				t.Fatalf("get_job(%d) instructions len=%d, want exact %d", tc.id, len(gotInstr), len(tc.wantInstr))
+			if got, _ := full["instructions"].(string); got != tc.wantInstr {
+				t.Fatalf("get_job(%d) instructions len=%d, want exact %d", tc.id, len(got), len(tc.wantInstr))
 			}
-			if gotRes, _ := full["result_text"].(string); gotRes != tc.wantResult {
-				t.Fatalf("get_job(%d) result_text len=%d, want exact %d", tc.id, len(gotRes), len(tc.wantResult))
+			if got, _ := full["acceptance_criteria"].(string); got != tc.wantAC {
+				t.Fatalf("get_job(%d) acceptance_criteria len=%d, want exact %d", tc.id, len(got), len(tc.wantAC))
+			}
+			if got, _ := full["result_text"].(string); got != tc.wantResult {
+				t.Fatalf("get_job(%d) result_text len=%d, want exact %d", tc.id, len(got), len(tc.wantResult))
+			}
+			if got, _ := full["last_error"].(string); got != tc.wantLastErr {
+				t.Fatalf("get_job(%d) last_error len=%d, want exact %d", tc.id, len(got), len(tc.wantLastErr))
 			}
 		})
 	}
 	t.Logf("guaranteed MCP get_job round-trip max wire line: %d bytes (%.2f MiB / 16.00 MiB SDK limit)",
 		tracker.MaxLine(), float64(tracker.MaxLine())/(1<<20))
 
-	// 3: Job exceeding default 16 MiB MCP transport frame limit (2 x 800 KiB '<' -> ~20.3 MiB wire):
+	// A4: Job exceeding default 16 MiB MCP transport frame limit (~20.3 MiB wire):
 	// Use a dedicated IOTransport session so the frame-limit disconnect does not affect earlier checks.
 	overSession, _, overCleanup := connectIOTransportClient(t, Options{
 		APIURL:     ts.URL,
@@ -2280,11 +2522,22 @@ func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
 		Arguments: map[string]any{"id": htmlOverID},
 	})
 	if err == nil {
-		t.Fatalf("expected MCP get_job(%d) with 2x800KiB '<' to exceed default 16 MiB IOTransport frame limit, but it succeeded", htmlOverID)
+		t.Fatalf("expected MCP get_job(%d) with 4x400KiB HTML-escaped fields to exceed default 16 MiB IOTransport frame limit, but it succeeded", htmlOverID)
 	}
 	t.Logf("confirmed MCP get_job(%d) above 16 MiB frame limit fails as documented: %v", htmlOverID, err)
 
-	// Direct HTTP API (Client.GetJob -> GET /jobs/{id}) retrieves the exact same 2 x 800 KiB '<' job in full.
+	// Direct raw HTTP API GET /jobs/{id} (and MCP Client.GetJob) recover all 4 fields verbatim.
+	rawOver := directHTTPGetJSON(t, fmt.Sprintf("/jobs/%d", htmlOverID))
+	for field, want := range map[string]string{
+		"instructions":        htmlOverInstr,
+		"acceptance_criteria": htmlOverAC,
+		"result_text":         htmlOverResult,
+		"last_error":          htmlOverErr,
+	} {
+		if got, _ := rawOver[field].(string); got != want {
+			t.Fatalf("direct HTTP GET /jobs/%d %s len=%d, want exact %d", htmlOverID, field, len(got), len(want))
+		}
+	}
 	httpClient, err := NewClient(ts.URL, apiToken, ts.Client())
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -2293,12 +2546,202 @@ func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HTTP Client.GetJob(%d) failed: %v", htmlOverID, err)
 	}
-	if gotInstr, _ := fullOver["instructions"].(string); gotInstr != htmlOverInstr {
-		t.Fatalf("HTTP Client.GetJob(%d) instructions len=%d, want exact %d", htmlOverID, len(gotInstr), len(htmlOverInstr))
+	for field, want := range map[string]string{
+		"instructions":        htmlOverInstr,
+		"acceptance_criteria": htmlOverAC,
+		"result_text":         htmlOverResult,
+		"last_error":          htmlOverErr,
+	} {
+		if got, _ := fullOver[field].(string); got != want {
+			t.Fatalf("HTTP Client.GetJob(%d) %s len=%d, want exact %d", htmlOverID, field, len(got), len(want))
+		}
 	}
-	if gotRes, _ := fullOver["result_text"].(string); gotRes != htmlOverResult {
-		t.Fatalf("HTTP Client.GetJob(%d) result_text len=%d, want exact %d", htmlOverID, len(gotRes), len(htmlOverResult))
-	}
+
+	// B1: list_held (active) projects all 5 long text fields with exact fields_truncated, and
+	// direct HTTP GET /gate/held recovers the EXACT SAME record's 5 fields byte-for-byte.
+	t.Run("list_held_active_http_recovery", func(t *testing.T) {
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "list_held",
+			Arguments: map[string]any{"status": "held", "limit": 10},
+		})
+		if err != nil || res.IsError {
+			t.Fatalf("MCP list_held(held) failed: err=%v res=%+v", err, res)
+		}
+		got := decodeToolResultJSON(t, res)
+		items := got["held"].([]any)
+		if len(items) != 1 {
+			t.Fatalf("list_held(held) returned %d items, want 1", len(items))
+		}
+		item := items[0].(map[string]any)
+		if item["id"] != heldActive.ID {
+			t.Fatalf("list_held(held) id=%v, want %s", item["id"], heldActive.ID)
+		}
+		wantFT := []string{
+			"last_error",
+			"payload.acceptance_criteria",
+			"payload.instructions",
+			"reason",
+			"snapshot_summary",
+		}
+		if gotFT := toStringSlice(item["fields_truncated"]); !reflect.DeepEqual(gotFT, wantFT) {
+			t.Fatalf("list_held(held) fields_truncated = %v, want %v", gotFT, wantFT)
+		}
+		payload := item["payload"].(map[string]any)
+		for name, val := range map[string]string{
+			"payload.instructions":        payload["instructions"].(string),
+			"payload.acceptance_criteria": payload["acceptance_criteria"].(string),
+			"reason":                      item["reason"].(string),
+			"snapshot_summary":            item["snapshot_summary"].(string),
+			"last_error":                  item["last_error"].(string),
+		} {
+			if len(val) == 0 || len(val) > defaultMaxListTextBytes {
+				t.Errorf("list_held(held) %s len=%d, want 1..%d", name, len(val), defaultMaxListTextBytes)
+			}
+		}
+
+		// Direct HTTP GET /gate/held?status=held recovers all 5 fields verbatim.
+		httpHeldResp := directHTTPGetJSON(t, "/gate/held?status=held")
+		httpItems := httpHeldResp["held"].([]any)
+		if len(httpItems) != 1 {
+			t.Fatalf("HTTP GET /gate/held?status=held returned %d items, want 1", len(httpItems))
+		}
+		httpItem := httpItems[0].(map[string]any)
+		if httpItem["id"] != heldActive.ID {
+			t.Fatalf("HTTP GET /gate/held id=%v, want %s", httpItem["id"], heldActive.ID)
+		}
+		httpPayload := httpItem["payload"].(map[string]any)
+		if got, _ := httpPayload["instructions"].(string); got != heldInstr {
+			t.Fatalf("HTTP GET /gate/held payload.instructions len=%d, want exact %d", len(got), len(heldInstr))
+		}
+		if got, _ := httpPayload["acceptance_criteria"].(string); got != heldAC {
+			t.Fatalf("HTTP GET /gate/held payload.acceptance_criteria len=%d, want exact %d", len(got), len(heldAC))
+		}
+		if got, _ := httpItem["reason"].(string); got != heldReason {
+			t.Fatalf("HTTP GET /gate/held reason len=%d, want exact %d", len(got), len(heldReason))
+		}
+		if got, _ := httpItem["snapshot_summary"].(string); got != heldSnapshot {
+			t.Fatalf("HTTP GET /gate/held snapshot_summary len=%d, want exact %d", len(got), len(heldSnapshot))
+		}
+		if got, _ := httpItem["last_error"].(string); got != heldLastErr {
+			t.Fatalf("HTTP GET /gate/held last_error len=%d, want exact %d", len(got), len(heldLastErr))
+		}
+	})
+
+	// B2: list_held (released) -> MCP get_job(id=released_job_id) recovers carried-over payload
+	// fields only, while held-specific fields (reason, snapshot_summary) are recovered via
+	// direct HTTP GET /gate/held?status=released (and held last_error was cleared on release).
+	t.Run("list_held_released_payload_vs_held_fields", func(t *testing.T) {
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "list_held",
+			Arguments: map[string]any{"status": "released", "limit": 10},
+		})
+		if err != nil || res.IsError {
+			t.Fatalf("MCP list_held(released) failed: err=%v res=%+v", err, res)
+		}
+		got := decodeToolResultJSON(t, res)
+		items := got["held"].([]any)
+		if len(items) != 1 {
+			t.Fatalf("list_held(released) returned %d items, want 1", len(items))
+		}
+		item := items[0].(map[string]any)
+		if item["id"] != heldReleased.ID {
+			t.Fatalf("list_held(released) id=%v, want %s", item["id"], heldReleased.ID)
+		}
+		wantFT := []string{
+			"payload.acceptance_criteria",
+			"payload.instructions",
+			"reason",
+			"snapshot_summary",
+		}
+		if gotFT := toStringSlice(item["fields_truncated"]); !reflect.DeepEqual(gotFT, wantFT) {
+			t.Fatalf("list_held(released) fields_truncated = %v, want %v", gotFT, wantFT)
+		}
+		if le, _ := item["last_error"].(string); le != "" {
+			t.Fatalf("list_held(released) last_error = %q, want empty (cleared on release)", le)
+		}
+		relJobID := int64(item["released_job_id"].(float64))
+		if relJobID != releasedJob.ID {
+			t.Fatalf("list_held(released) released_job_id = %d, want %d", relJobID, releasedJob.ID)
+		}
+
+		// MCP get_job(id=released_job_id) recovers carried-over payload fields, not held-specific fields.
+		jobRes, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "get_job",
+			Arguments: map[string]any{"id": relJobID},
+		})
+		if err != nil || jobRes.IsError {
+			t.Fatalf("MCP get_job(%d) failed: err=%v res=%+v", relJobID, err, jobRes)
+		}
+		jobFull := decodeToolResultJSON(t, jobRes)
+		if got, _ := jobFull["instructions"].(string); got != relInstr {
+			t.Fatalf("get_job(released_job_id=%d) instructions len=%d, want exact %d", relJobID, len(got), len(relInstr))
+		}
+		if got, _ := jobFull["acceptance_criteria"].(string); got != relAC {
+			t.Fatalf("get_job(released_job_id=%d) acceptance_criteria len=%d, want exact %d", relJobID, len(got), len(relAC))
+		}
+		if _, hasReason := jobFull["reason"]; hasReason {
+			t.Errorf("get_job(released_job_id=%d) unexpectedly has held field 'reason'", relJobID)
+		}
+		if _, hasSnap := jobFull["snapshot_summary"]; hasSnap {
+			t.Errorf("get_job(released_job_id=%d) unexpectedly has held field 'snapshot_summary'", relJobID)
+		}
+
+		// Held-specific fields (reason, snapshot_summary) are recovered via direct HTTP GET /gate/held.
+		httpRelResp := directHTTPGetJSON(t, "/gate/held?status=released")
+		httpItems := httpRelResp["held"].([]any)
+		if len(httpItems) != 1 {
+			t.Fatalf("HTTP GET /gate/held?status=released returned %d items, want 1", len(httpItems))
+		}
+		httpItem := httpItems[0].(map[string]any)
+		if got, _ := httpItem["reason"].(string); got != relReason {
+			t.Fatalf("HTTP GET /gate/held?status=released reason len=%d, want exact %d", len(got), len(relReason))
+		}
+		if got, _ := httpItem["snapshot_summary"].(string); got != relSnapshot {
+			t.Fatalf("HTTP GET /gate/held?status=released snapshot_summary len=%d, want exact %d", len(got), len(relSnapshot))
+		}
+	})
+
+	// C1: gate_decisions projects >4 KiB reason with exact fields_truncated=["reason"], and
+	// direct HTTP GET /gate/decisions recovers the EXACT SAME decision's reason byte-for-byte.
+	t.Run("gate_decisions_http_recovery", func(t *testing.T) {
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "gate_decisions",
+			Arguments: map[string]any{"held_id": heldActive.ID, "limit": 10},
+		})
+		if err != nil || res.IsError {
+			t.Fatalf("MCP gate_decisions failed: err=%v res=%+v", err, res)
+		}
+		got := decodeToolResultJSON(t, res)
+		decisions := got["decisions"].([]any)
+		if len(decisions) != 1 {
+			t.Fatalf("gate_decisions returned %d items, want 1", len(decisions))
+		}
+		dec := decisions[0].(map[string]any)
+		if int64(dec["id"].(float64)) != decisionRec.ID {
+			t.Fatalf("gate_decisions id=%v, want %d", dec["id"], decisionRec.ID)
+		}
+		if r, _ := dec["reason"].(string); len(r) == 0 || len(r) > defaultMaxListTextBytes {
+			t.Errorf("gate_decisions reason len=%d, want 1..%d", len(r), defaultMaxListTextBytes)
+		}
+		wantFT := []string{"reason"}
+		if gotFT := toStringSlice(dec["fields_truncated"]); !reflect.DeepEqual(gotFT, wantFT) {
+			t.Fatalf("gate_decisions fields_truncated = %v, want %v", gotFT, wantFT)
+		}
+
+		// Direct HTTP GET /gate/decisions?held_id=... recovers reason verbatim.
+		httpDecResp := directHTTPGetJSON(t, "/gate/decisions?held_id="+heldActive.ID)
+		httpDecisions := httpDecResp["decisions"].([]any)
+		if len(httpDecisions) != 1 {
+			t.Fatalf("HTTP GET /gate/decisions returned %d items, want 1", len(httpDecisions))
+		}
+		httpDec := httpDecisions[0].(map[string]any)
+		if int64(httpDec["id"].(float64)) != decisionRec.ID {
+			t.Fatalf("HTTP GET /gate/decisions id=%v, want %d", httpDec["id"], decisionRec.ID)
+		}
+		if got, _ := httpDec["reason"].(string); got != decisionReason {
+			t.Fatalf("HTTP GET /gate/decisions reason len=%d, want exact %d", len(got), len(decisionReason))
+		}
+	})
 }
 
 func TestNewServerValidation(t *testing.T) {
