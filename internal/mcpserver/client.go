@@ -19,11 +19,20 @@ import (
 )
 
 const (
-	defaultHTTPTimeout      = 30 * time.Second
-	defaultMaxResponseBytes = 512 << 20 // 512 MiB (accommodates max-limit list pages)
-	maxErrorResponseBytes   = 64 << 10  // 64 KiB cap for non-2xx error bodies
-	maxErrorMessageRunes    = 256
+	defaultHTTPTimeout = 30 * time.Second
+	// Single-resource 2xx responses: a job has up to 3 API-writable 1 MiB text fields
+	// (instructions/create payload, result_text, last_error); Go's encoding/json expands
+	// HTML-escaped bytes (<, >, &) up to 6x (~18 MiB/job + metadata).
+	defaultMaxSingleResponseBytes = int64(32) << 20 // 32 MiB
+	// List 2xx responses: up to MaxListLimit=200 jobs x ~18 MiB/job worst-case HTML-escaped
+	// JSON (~3.6 GiB + envelope/metadata). Decoded via streaming json.NewDecoder without
+	// buffering the raw response body in memory.
+	defaultMaxListResponseBytes = int64(4) << 30 // 4 GiB
+	maxErrorResponseBytes       = 64 << 10       // 64 KiB cap for non-2xx error bodies
+	maxErrorMessageRunes        = 256
 )
+
+var errResponseTooLarge = errors.New("response body exceeded size limit")
 
 var (
 	authHeaderRe  = regexp.MustCompile(`(?i)\bauthorization\s*[:=]\s*[^\r\n,;"]+`)
@@ -70,14 +79,67 @@ func NewClient(baseURL, token string, httpClient *http.Client) (*Client, error) 
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &Client{
-		baseURL:          trimmed,
-		token:            strings.TrimSpace(token),
-		httpClient:       httpClient,
-		maxResponseBytes: defaultMaxResponseBytes,
+		baseURL:    trimmed,
+		token:      strings.TrimSpace(token),
+		httpClient: httpClient,
 	}, nil
 }
 
-func (c *Client) doJSON(ctx context.Context, method, path string, query url.Values, body any) (int, []byte, error) {
+type maxBytesReader struct {
+	r        io.Reader
+	remain   int64
+	exceeded bool
+}
+
+func (m *maxBytesReader) Read(p []byte) (int, error) {
+	if m.remain <= 0 {
+		var probe [1]byte
+		n, err := m.r.Read(probe[:])
+		if n > 0 {
+			m.exceeded = true
+			return 0, errResponseTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > m.remain {
+		p = p[:m.remain]
+	}
+	n, err := m.r.Read(p)
+	m.remain -= int64(n)
+	return n, err
+}
+
+func decodeJSONStream(r io.Reader, dst any) error {
+	dec := json.NewDecoder(r)
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	// Drain any remaining bytes up to EOF so trailing payload beyond the limit is still detected.
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) effectiveResponseLimit(defaultLimit int64) int64 {
+	if c.maxResponseBytes > 0 {
+		return c.maxResponseBytes
+	}
+	if defaultLimit > 0 {
+		return defaultLimit
+	}
+	return defaultMaxSingleResponseBytes
+}
+
+func (c *Client) doJSON(
+	ctx context.Context,
+	method, path string,
+	query url.Values,
+	body any,
+	maxBytes int64,
+	decode2xx func(status int, r io.Reader) error,
+	onNon2xx func(status int, body []byte) error,
+) error {
 	endpoint := c.baseURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
@@ -87,14 +149,14 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, fmt.Errorf("marshal request body: %w", err)
+			return fmt.Errorf("marshal request body: %w", err)
 		}
 		reqBody = bytes.NewReader(raw)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reqBody)
 	if err != nil {
-		return 0, nil, fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -106,30 +168,49 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("request %s %s failed: %s", method, path, c.sanitizeErrorText(err.Error()))
+		return fmt.Errorf("request %s %s failed: %s", method, path, c.sanitizeErrorText(err.Error()))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBytes))
 		if err != nil {
-			return resp.StatusCode, nil, fmt.Errorf("read response from %s %s: %s", method, path, c.sanitizeErrorText(err.Error()))
+			return fmt.Errorf("read response from %s %s: %s", method, path, c.sanitizeErrorText(err.Error()))
 		}
-		return resp.StatusCode, respBytes, nil
+		if onNon2xx != nil {
+			return onNon2xx(resp.StatusCode, respBytes)
+		}
+		return c.parseAPIError(resp.StatusCode, respBytes)
 	}
 
-	limit := c.maxResponseBytes
-	if limit <= 0 {
-		limit = defaultMaxResponseBytes
+	limit := c.effectiveResponseLimit(maxBytes)
+	mr := &maxBytesReader{r: resp.Body, remain: limit}
+	if err := decode2xx(resp.StatusCode, mr); err != nil {
+		if mr.exceeded || errors.Is(err, errResponseTooLarge) {
+			return fmt.Errorf("response from %s %s exceeded %d bytes", method, path, limit)
+		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			return apiErr
+		}
+		return fmt.Errorf("decode response from %s %s: %s", method, path, c.sanitizeErrorText(err.Error()))
 	}
-	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	return nil
+}
+
+func (c *Client) doJSONObject(ctx context.Context, method, path string, query url.Values, body any, maxBytes int64) (map[string]any, error) {
+	var out map[string]any
+	err := c.doJSON(ctx, method, path, query, body, maxBytes, func(status int, r io.Reader) error {
+		if status != http.StatusOK {
+			errBody, _ := io.ReadAll(io.LimitReader(r, maxErrorResponseBytes))
+			return c.parseAPIError(status, errBody)
+		}
+		return decodeJSONStream(r, &out)
+	}, nil)
 	if err != nil {
-		return resp.StatusCode, nil, fmt.Errorf("read response from %s %s: %s", method, path, c.sanitizeErrorText(err.Error()))
+		return nil, err
 	}
-	if int64(len(respBytes)) > limit {
-		return resp.StatusCode, nil, fmt.Errorf("response from %s %s exceeded %d bytes", method, path, limit)
-	}
-	return resp.StatusCode, respBytes, nil
+	return out, nil
 }
 
 func (c *Client) parseAPIError(status int, body []byte) error {
@@ -205,14 +286,6 @@ func (c *Client) sanitizeErrorText(s string) string {
 	return out
 }
 
-func decodeObject(body []byte) (map[string]any, error) {
-	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("decode JSON response: %w", err)
-	}
-	return out, nil
-}
-
 // WorktreeSpec defines optional git worktree creation parameters for a job.
 type WorktreeSpec struct {
 	RepoPath string `json:"repo_path" jsonschema:"Path to the base git repository on the worker host"`
@@ -263,56 +336,61 @@ func (c *Client) CreateJob(ctx context.Context, in CreateJobInput) (*CreateJobOu
 		in.RequestID = reqID
 	}
 
-	status, body, err := c.doJSON(ctx, http.MethodPost, "/jobs", nil, in)
+	var result *CreateJobOutput
+	err := c.doJSON(ctx, http.MethodPost, "/jobs", nil, in, defaultMaxSingleResponseBytes, func(status int, r io.Reader) error {
+		switch status {
+		case http.StatusOK, http.StatusCreated:
+			var resp struct {
+				Job     map[string]any `json:"job"`
+				Created bool           `json:"created"`
+			}
+			if err := decodeJSONStream(r, &resp); err != nil {
+				return err
+			}
+			result = &CreateJobOutput{
+				Held:    false,
+				Created: resp.Created,
+				Job:     resp.Job,
+			}
+			return nil
+
+		case http.StatusAccepted:
+			var resp struct {
+				HeldID  string         `json:"held_id"`
+				Held    map[string]any `json:"held"`
+				Created bool           `json:"created"`
+			}
+			if err := decodeJSONStream(r, &resp); err != nil {
+				return err
+			}
+			var reason, snapshotSummary string
+			if resp.Held != nil {
+				if v, ok := resp.Held["reason"].(string); ok {
+					reason = v
+				}
+				if s, ok := resp.Held["snapshot_summary"].(string); ok {
+					snapshotSummary = s
+				}
+			}
+			result = &CreateJobOutput{
+				Held:            true,
+				Created:         resp.Created,
+				HeldID:          resp.HeldID,
+				Reason:          reason,
+				SnapshotSummary: snapshotSummary,
+				HeldJob:         resp.Held,
+			}
+			return nil
+
+		default:
+			errBody, _ := io.ReadAll(io.LimitReader(r, maxErrorResponseBytes))
+			return c.parseAPIError(status, errBody)
+		}
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	switch status {
-	case http.StatusOK, http.StatusCreated:
-		var resp struct {
-			Job     map[string]any `json:"job"`
-			Created bool           `json:"created"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("decode create job response: %w", err)
-		}
-		return &CreateJobOutput{
-			Held:    false,
-			Created: resp.Created,
-			Job:     resp.Job,
-		}, nil
-
-	case http.StatusAccepted:
-		var resp struct {
-			HeldID  string         `json:"held_id"`
-			Held    map[string]any `json:"held"`
-			Created bool           `json:"created"`
-		}
-		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("decode held job response: %w", err)
-		}
-		var reason, snapshotSummary string
-		if resp.Held != nil {
-			if r, ok := resp.Held["reason"].(string); ok {
-				reason = r
-			}
-			if s, ok := resp.Held["snapshot_summary"].(string); ok {
-				snapshotSummary = s
-			}
-		}
-		return &CreateJobOutput{
-			Held:            true,
-			Created:         resp.Created,
-			HeldID:          resp.HeldID,
-			Reason:          reason,
-			SnapshotSummary: snapshotSummary,
-			HeldJob:         resp.Held,
-		}, nil
-
-	default:
-		return nil, c.parseAPIError(status, body)
-	}
+	return result, nil
 }
 
 // ListJobsInput is the input schema for the list_jobs MCP tool.
@@ -356,14 +434,7 @@ func (c *Client) ListJobs(ctx context.Context, in ListJobsInput) (map[string]any
 		q.Set("desc", strconv.FormatBool(*in.Desc))
 	}
 
-	status, body, err := c.doJSON(ctx, http.MethodGet, "/jobs", q, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodGet, "/jobs", q, nil, defaultMaxListResponseBytes)
 }
 
 // JobIDInput is the input schema for job-ID-only tools (get_job, requeue_job, mark_delivered).
@@ -375,14 +446,7 @@ func (c *Client) GetJob(ctx context.Context, id int64) (map[string]any, error) {
 	if id <= 0 {
 		return nil, fmt.Errorf("invalid job id %d: must be positive", id)
 	}
-	status, body, err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/jobs/%d", id), nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodGet, fmt.Sprintf("/jobs/%d", id), nil, nil, defaultMaxSingleResponseBytes)
 }
 
 // CancelJobInput is the input schema for the cancel_job MCP tool.
@@ -399,42 +463,21 @@ func (c *Client) CancelJob(ctx context.Context, in CancelJobInput) (map[string]a
 	if r := strings.TrimSpace(in.Reason); r != "" {
 		payload = map[string]string{"reason": r}
 	}
-	status, body, err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/jobs/%d/cancel", in.ID), nil, payload)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodPost, fmt.Sprintf("/jobs/%d/cancel", in.ID), nil, payload, defaultMaxSingleResponseBytes)
 }
 
 func (c *Client) RequeueJob(ctx context.Context, id int64) (map[string]any, error) {
 	if id <= 0 {
 		return nil, fmt.Errorf("invalid job id %d: must be positive", id)
 	}
-	status, body, err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/jobs/%d/requeue", id), nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodPost, fmt.Sprintf("/jobs/%d/requeue", id), nil, nil, defaultMaxSingleResponseBytes)
 }
 
 func (c *Client) MarkDelivered(ctx context.Context, id int64) (map[string]any, error) {
 	if id <= 0 {
 		return nil, fmt.Errorf("invalid job id %d: must be positive", id)
 	}
-	status, body, err := c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/jobs/%d/deliver", id), nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodPost, fmt.Sprintf("/jobs/%d/deliver", id), nil, nil, defaultMaxSingleResponseBytes)
 }
 
 // ListHeldInput is the input schema for the list_held MCP tool.
@@ -451,14 +494,7 @@ func (c *Client) ListHeld(ctx context.Context, in ListHeldInput) (map[string]any
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	status, body, err := c.doJSON(ctx, http.MethodGet, "/gate/held", q, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodGet, "/gate/held", q, nil, defaultMaxListResponseBytes)
 }
 
 // HeldIDInput is the input schema for held-ID-only tools (release_held, cancel_held).
@@ -479,26 +515,35 @@ func (c *Client) ReleaseHeld(ctx context.Context, id string) (*ReleaseHeldOutput
 		return nil, errors.New("held job id is required")
 	}
 	path := "/gate/held/" + url.PathEscape(id) + "/release"
-	status, body, err := c.doJSON(ctx, http.MethodPost, path, nil, nil)
+	var result *ReleaseHeldOutput
+	err := c.doJSON(ctx, http.MethodPost, path, nil, nil, defaultMaxSingleResponseBytes, func(status int, r io.Reader) error {
+		if status != http.StatusOK {
+			errBody, _ := io.ReadAll(io.LimitReader(r, maxErrorResponseBytes))
+			return c.parseAPIError(status, errBody)
+		}
+		var out ReleaseHeldOutput
+		if err := decodeJSONStream(r, &out); err != nil {
+			return err
+		}
+		result = &out
+		return nil
+	}, func(status int, body []byte) error {
+		if status == http.StatusConflict {
+			var out ReleaseHeldOutput
+			if err := json.Unmarshal(body, &out); err == nil && !out.Released {
+				out.Reason = c.sanitizeErrorText(out.Reason)
+				if out.Reason != "" {
+					result = &out
+					return nil
+				}
+			}
+		}
+		return c.parseAPIError(status, body)
+	})
 	if err != nil {
 		return nil, err
 	}
-	switch status {
-	case http.StatusOK:
-		var out ReleaseHeldOutput
-		if err := json.Unmarshal(body, &out); err != nil {
-			return nil, fmt.Errorf("decode release held response: %w", err)
-		}
-		return &out, nil
-	case http.StatusConflict:
-		var out ReleaseHeldOutput
-		if err := json.Unmarshal(body, &out); err == nil && !out.Released && out.Reason != "" {
-			return &out, nil
-		}
-		return nil, c.parseAPIError(status, body)
-	default:
-		return nil, c.parseAPIError(status, body)
-	}
+	return result, nil
 }
 
 func (c *Client) CancelHeld(ctx context.Context, id string) (map[string]any, error) {
@@ -507,14 +552,7 @@ func (c *Client) CancelHeld(ctx context.Context, id string) (map[string]any, err
 		return nil, errors.New("held job id is required")
 	}
 	path := "/gate/held/" + url.PathEscape(id)
-	status, body, err := c.doJSON(ctx, http.MethodDelete, path, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodDelete, path, nil, nil, defaultMaxSingleResponseBytes)
 }
 
 // GateDecisionsInput is the input schema for the gate_decisions MCP tool.
@@ -535,14 +573,7 @@ func (c *Client) GateDecisions(ctx context.Context, in GateDecisionsInput) (map[
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	status, body, err := c.doJSON(ctx, http.MethodGet, "/gate/decisions", q, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodGet, "/gate/decisions", q, nil, defaultMaxListResponseBytes)
 }
 
 // ListDeliveriesInput is the input schema for the list_deliveries MCP tool.
@@ -559,28 +590,14 @@ func (c *Client) ListDeliveries(ctx context.Context, in ListDeliveriesInput) (ma
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	status, body, err := c.doJSON(ctx, http.MethodGet, "/deliveries", q, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodGet, "/deliveries", q, nil, defaultMaxListResponseBytes)
 }
 
 // FleetStatusInput is the empty input schema for the fleet_status MCP tool.
 type FleetStatusInput struct{}
 
 func (c *Client) FleetStatus(ctx context.Context) (map[string]any, error) {
-	status, body, err := c.doJSON(ctx, http.MethodGet, "/status", nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	if status != http.StatusOK {
-		return nil, c.parseAPIError(status, body)
-	}
-	return decodeObject(body)
+	return c.doJSONObject(ctx, http.MethodGet, "/status", nil, nil, defaultMaxSingleResponseBytes)
 }
 
 func generateMCPRequestID() (string, error) {

@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -861,6 +862,269 @@ func TestResponseSizeBoundary(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "exceeded") {
 		t.Errorf("unexpected error content for huge 502: %v", err)
+	}
+}
+
+func TestReleaseHeld409SanitizesReason(t *testing.T) {
+	const (
+		secret      = "release-held-secret-token-xyz"
+		otherBearer = "other-leaked-bearer-999"
+		basicCreds  = "dXNlcjpwYXNz"
+	)
+
+	cases := []struct {
+		name         string
+		body         string
+		wantIsError  bool
+		wantReason   string
+		wantSubstr   []string
+		forbidSubstr []string
+	}{
+		{
+			name:         "409 structured result redacts client token and auth headers in reason",
+			body:         `{"released":false,"reason":"upstream rejected token ` + secret + ` via Authorization: Bearer ` + secret + ` and Bearer ` + otherBearer + ` and Basic ` + basicCreds + `"}`,
+			wantIsError:  false,
+			wantSubstr:   []string{"[REDACTED]"},
+			forbidSubstr: []string{secret, otherBearer, basicCreds},
+		},
+		{
+			name:         "409 structured result preserves normal safe reason",
+			body:         `{"released":false,"reason":"primary pool still below threshold"}`,
+			wantIsError:  false,
+			wantReason:   "primary pool still below threshold",
+			forbidSubstr: []string{secret},
+		},
+		{
+			name:         "409 with whitespace-only reason falls back to API error",
+			body:         `{"released":false,"reason":"   \t\n  "}`,
+			wantIsError:  true,
+			wantSubstr:   []string{"409"},
+			forbidSubstr: []string{secret},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/gate/held/held-409/release" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			session, cleanup := connectTestClient(t, Options{
+				APIURL:     ts.URL,
+				Token:      secret,
+				HTTPClient: ts.Client(),
+			})
+			defer cleanup()
+
+			res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+				Name:      "release_held",
+				Arguments: map[string]any{"id": "held-409"},
+			})
+			if err != nil {
+				t.Fatalf("unexpected protocol error: %v", err)
+			}
+			if res.IsError != tc.wantIsError {
+				t.Fatalf("IsError = %v, want %v (res=%+v)", res.IsError, tc.wantIsError, res)
+			}
+
+			tcText, ok := res.Content[0].(*mcp.TextContent)
+			if !ok {
+				t.Fatalf("expected *mcp.TextContent, got %T", res.Content[0])
+			}
+			structuredRaw, err := json.Marshal(res.StructuredContent)
+			if err != nil {
+				t.Fatalf("marshal StructuredContent: %v", err)
+			}
+			allOutput := tcText.Text + "\n" + string(structuredRaw)
+
+			for _, forbid := range tc.forbidSubstr {
+				if strings.Contains(allOutput, forbid) {
+					t.Errorf("release_held output leaked forbidden substring %q: %s", forbid, allOutput)
+				}
+			}
+			for _, want := range tc.wantSubstr {
+				if !strings.Contains(allOutput, want) {
+					t.Errorf("release_held output missing %q: %s", want, allOutput)
+				}
+			}
+
+			if !tc.wantIsError {
+				got := decodeToolResultJSON(t, res)
+				if got["released"] != false {
+					t.Errorf("released = %v, want false", got["released"])
+				}
+				reason, ok := got["reason"].(string)
+				if !ok || reason == "" {
+					t.Errorf("expected non-empty reason in structured result, got %+v", got)
+				}
+				if tc.wantReason != "" && reason != tc.wantReason {
+					t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+				}
+			}
+		})
+	}
+}
+
+func TestMaxListPageHTMLEscapeSizingAndStreaming(t *testing.T) {
+	// API constants from internal/api/server.go (maxBodyBytes = 1 MiB) and
+	// internal/store/types.go (MaxListLimit = 200), kept local so internal/mcpserver
+	// stays decoupled from internal/store and internal/api.
+	const (
+		apiMaxBodyBytes = 1 << 20 // 1 MiB
+		apiMaxListLimit = 200
+	)
+
+	// 1. Reproduce the review's 500 KiB '<' example: Go's json.NewEncoder (escapeHTML=true)
+	// expands each '<' to '\u003c' (6x), so 200 items exceed 512 MiB.
+	reviewInstructions := strings.Repeat("<", 500<<10)
+	var reviewBuf bytes.Buffer
+	if err := json.NewEncoder(&reviewBuf).Encode(reviewInstructions); err != nil {
+		t.Fatalf("encode 500 KiB instructions: %v", err)
+	}
+	encodedReviewField := int64(reviewBuf.Len() - 1) // exclude trailing newline from Encode
+	if encodedReviewField != 3_072_002 {
+		t.Fatalf("encoded 500 KiB '<' field = %d bytes, want 3072002", encodedReviewField)
+	}
+	if encodedReviewField*apiMaxListLimit <= 512<<20 {
+		t.Fatalf("expected 200x 500 KiB '<' to exceed 512 MiB, got %d", encodedReviewField*apiMaxListLimit)
+	}
+
+	// 2. Measure the worst-case single job accepted by the API:
+	// up to 3 independent 1 MiB request bodies (create instructions, complete result_text,
+	// fail/cancel last_error), each filled with HTML-escaped '<' characters.
+	maxFieldChars := apiMaxBodyBytes - 64 // leave room for JSON request envelope within 1 MiB
+	worstField := strings.Repeat("<", maxFieldChars)
+	worstJob := map[string]any{
+		"id":           123456,
+		"request_id":   "req-worst-case-0001",
+		"title":        "worst-case-job",
+		"status":       "done",
+		"agent":        "claude",
+		"host":         "worker-01",
+		"instructions": worstField,
+		"result_text":  worstField,
+		"last_error":   worstField,
+		"created_at":   "2026-11-24T00:00:00Z",
+		"updated_at":   "2026-11-24T00:00:00Z",
+	}
+	var jobBuf bytes.Buffer
+	if err := json.NewEncoder(&jobBuf).Encode(worstJob); err != nil {
+		t.Fatalf("encode worst-case job: %v", err)
+	}
+	singleJobBytes := int64(jobBuf.Len() - 1)
+	if singleJobBytes >= defaultMaxSingleResponseBytes {
+		t.Fatalf("worst-case single job (%d bytes) >= defaultMaxSingleResponseBytes (%d)", singleJobBytes, defaultMaxSingleResponseBytes)
+	}
+	// 200 worst-case jobs + commas + {"jobs":[...],"next_cursor":123456,"has_more":true} envelope.
+	maxPageBytes := singleJobBytes*apiMaxListLimit + int64(apiMaxListLimit) + 128
+	if maxPageBytes >= defaultMaxListResponseBytes {
+		t.Fatalf("worst-case 200-job page (%d bytes) >= defaultMaxListResponseBytes (%d)", maxPageBytes, defaultMaxListResponseBytes)
+	}
+	if defaultMaxSingleResponseBytes >= defaultMaxListResponseBytes {
+		t.Fatalf("expected single response limit (%d) < list response limit (%d)", defaultMaxSingleResponseBytes, defaultMaxListResponseBytes)
+	}
+
+	// 3. Stream a real 200-item HTML-escaped list_jobs response through Client.ListJobs
+	// (200 x 8 KiB '<' -> ~48 KiB JSON/job, ~9.6 MiB HTTP response) and verify streaming
+	// decode unescapes '<' and preserves pagination metadata.
+	const itemChars = 8 << 10
+	itemInstructions := strings.Repeat("<", itemChars)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		jobs := make([]map[string]any, apiMaxListLimit)
+		for i := range jobs {
+			jobs[i] = map[string]any{
+				"id":           i + 1,
+				"title":        "html-escaped-job",
+				"status":       "queued",
+				"instructions": itemInstructions,
+			}
+		}
+		_ = enc.Encode(map[string]any{
+			"jobs":        jobs,
+			"next_cursor": apiMaxListLimit,
+			"has_more":    true,
+		})
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(ts.URL, "max-page-token", ts.Client())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	limit := apiMaxListLimit
+	got, err := client.ListJobs(context.Background(), ListJobsInput{
+		Status: "queued",
+		Limit:  &limit,
+	})
+	if err != nil {
+		t.Fatalf("Client.ListJobs 200-item HTML-escaped page failed: %v", err)
+	}
+	if got["has_more"] != true || got["next_cursor"] != float64(apiMaxListLimit) {
+		t.Fatalf("pagination mismatch: has_more=%v next_cursor=%v", got["has_more"], got["next_cursor"])
+	}
+	jobs, ok := got["jobs"].([]any)
+	if !ok || len(jobs) != apiMaxListLimit {
+		t.Fatalf("jobs count = %d, want %d", len(jobs), apiMaxListLimit)
+	}
+	first, ok := jobs[0].(map[string]any)
+	if !ok || first["instructions"] != itemInstructions {
+		t.Fatalf("first job instructions mismatch (len=%d)", len(first["instructions"].(string)))
+	}
+
+	// 4. Also exercise the full MCP CallTool path with a 200-item HTML-escaped page
+	// sized within the MCP JSON-RPC transport frame limit.
+	mcpInstructions := strings.Repeat("<", 1<<10) // 1 KiB '<' -> 6 KiB JSON/job (~1.2 MiB HTTP response)
+	tsMCP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		jobs := make([]map[string]any, apiMaxListLimit)
+		for i := range jobs {
+			jobs[i] = map[string]any{
+				"id":           i + 1,
+				"title":        "html-escaped-job",
+				"status":       "queued",
+				"instructions": mcpInstructions,
+			}
+		}
+		_ = enc.Encode(map[string]any{
+			"jobs":        jobs,
+			"next_cursor": apiMaxListLimit,
+			"has_more":    true,
+		})
+	}))
+	defer tsMCP.Close()
+
+	session, cleanup := connectTestClient(t, Options{
+		APIURL:     tsMCP.URL,
+		Token:      "max-page-token",
+		HTTPClient: tsMCP.Client(),
+	})
+	defer cleanup()
+
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "list_jobs",
+		Arguments: map[string]any{"status": "queued", "limit": apiMaxListLimit},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("MCP list_jobs 200-item HTML-escaped page failed: err=%v res=%+v", err, res)
+	}
+	gotMCP := decodeToolResultJSON(t, res)
+	if gotMCP["has_more"] != true || gotMCP["next_cursor"] != float64(apiMaxListLimit) {
+		t.Fatalf("MCP pagination mismatch: has_more=%v next_cursor=%v", gotMCP["has_more"], gotMCP["next_cursor"])
+	}
+	mcpJobs, ok := gotMCP["jobs"].([]any)
+	if !ok || len(mcpJobs) != apiMaxListLimit {
+		t.Fatalf("MCP jobs count = %d, want %d", len(mcpJobs), apiMaxListLimit)
 	}
 }
 
