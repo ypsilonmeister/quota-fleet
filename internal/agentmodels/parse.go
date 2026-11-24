@@ -21,15 +21,20 @@ var (
 )
 
 // ParseAgyModelsOutput parses the stdout/combined output of `agy models` into a model catalog.
-// It tolerates terminal spinner lines separated by '\r' and ANSI escape codes, and extracts
-// `<id>   <display_name>` rows (two-column tabular output separated by 2+ spaces or a tab, or
-// a bare lowercase slug ID on its own line). Diagnostic / prose lines such as "No models available"
-// are rejected so an empty-list message never overwrites a previously stored catalog.
-// Returns an error if no valid models are parsed.
+// Observed `agy models` output formats:
+//   - Non-TTY (pipe / SSH): stderr "Fetching available models..." + stdout "<id>\t<display_name>"
+//   - TTY (interactive): "\r⠋ Fetching available models...\r\x1b[K<id>  +<display_name>\r\n"
+//
+// It tolerates terminal spinner lines separated by '\r' and ANSI escape codes, requires two-column
+// `<id>` + `<display_name>` rows matching the observed CLI format, and requires at least one
+// recognized model family (gemini/claude/gpt) so diagnostic/error outputs (including tabular
+// diagnostics such as `error-code  authentication required`) never overwrite a stored catalog.
+// Returns an error if no valid catalog is parsed.
 func ParseAgyModelsOutput(output string) ([]store.AgentModelItem, error) {
 	lines := strings.Split(output, "\n")
 	seen := make(map[string]struct{})
 	var items []store.AgentModelItem
+	recognizedFamilies := 0
 
 	for _, rawLine := range lines {
 		clean := ansiEscapeRe.ReplaceAllString(rawLine, "")
@@ -52,17 +57,18 @@ func ParseAgyModelsOutput(output string) ([]store.AgentModelItem, error) {
 			continue
 		}
 		seen[id] = struct{}{}
-		if displayName == "" {
-			displayName = id
+		family := quota.ModelFamily(id)
+		if family != quota.ModelFamilyUnknown {
+			recognizedFamilies++
 		}
 		items = append(items, store.AgentModelItem{
 			ID:          id,
 			DisplayName: displayName,
-			Family:      quota.ModelFamily(id),
+			Family:      family,
 		})
 	}
 
-	if len(items) == 0 {
+	if len(items) == 0 || recognizedFamilies == 0 {
 		return nil, errors.New("agy models output contained no parseable models")
 	}
 	return items, nil
@@ -104,26 +110,31 @@ func isSpinnerOrHeaderLine(line string) bool {
 }
 
 // parseAgyModelRow extracts (id, displayName, true) from a single trimmed `agy models` line.
-// Real `agy models` rows are tabular (`<slug-id>  +<display name>` or `<slug-id>\t<display name>`),
-// or a single bare slug ID. Single-space prose sentences like "No models available" are rejected.
+// Real `agy models` rows are always two-column tabular rows:
+//   - `<slug-id>\t<Display Name>` (non-TTY stdout)
+//   - `<slug-id>  +<Display Name>` (TTY space-padded table)
+//
+// Bare single-column tokens, single-space prose ("No models available"), and diagnostic lines
+// with lowercase prose in the second column ("error-code  authentication required") are rejected.
 func parseAgyModelRow(line string) (string, string, bool) {
-	if !strings.ContainsAny(line, " \t") {
-		if isValidAgyModelID(line) {
-			return line, "", true
-		}
-		return "", "", false
-	}
 	loc := agyColSepRe.FindStringIndex(line)
 	if loc == nil {
-		// Words separated only by single spaces (e.g. "No models available") are prose, not a table row.
 		return "", "", false
 	}
 	id := strings.TrimSpace(line[:loc[0]])
 	rest := strings.TrimSpace(line[loc[1]:])
-	if !isValidAgyModelID(id) {
+	if !isValidAgyModelID(id) || !isValidAgyDisplayName(rest) {
 		return "", "", false
 	}
 	return id, rest, true
+}
+
+func isValidAgyDisplayName(name string) bool {
+	if name == "" || strings.ContainsRune(name, '\t') {
+		return false
+	}
+	c := name[0]
+	return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
 func isValidAgyModelID(id string) bool {
