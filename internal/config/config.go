@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ const (
 	DefaultQuotaStaleAfter        = 45 * time.Minute
 	DefaultQuotaGateCheckInterval = 1 * time.Minute
 	DefaultAgentsCheckInterval    = 6 * time.Hour
+	DefaultModelsCheckInterval    = 24 * time.Hour
 
 	// GateModeOff disables Quota Gate checks on job registration.
 	GateModeOff = "off"
@@ -70,6 +72,7 @@ type Config struct {
 	InstanceID          string                 `yaml:"instance_id"`
 	StateDir            string                 `yaml:"state_dir"`
 	AgentsCheckInterval string                 `yaml:"agents_check_interval"`
+	ModelsCheckInterval string                 `yaml:"models_check_interval"`
 	API                 APIConfig              `yaml:"api"`
 	Runtime             RuntimeConfig          `yaml:"runtime"`
 	Limits              LimitsConfig           `yaml:"limits"`
@@ -94,6 +97,74 @@ func (c *Config) EffectiveAgentsCheckInterval() time.Duration {
 		raw = strings.TrimSpace(c.AgentsCheckInterval)
 	}
 	return parseNonNegativeDurationOrDefault(raw, DefaultAgentsCheckInterval)
+}
+
+// EffectiveModelsCheckInterval returns the configured periodic model catalog probe interval.
+// It checks runtime.models_check_interval first, then top-level models_check_interval.
+// When omitted, it defaults to DefaultModelsCheckInterval (24h).
+// When explicitly set to "0" (or "0s"), it returns 0 (disabled).
+func (c *Config) EffectiveModelsCheckInterval() time.Duration {
+	if c == nil {
+		return DefaultModelsCheckInterval
+	}
+	raw := strings.TrimSpace(c.Runtime.ModelsCheckInterval)
+	if raw == "" {
+		raw = strings.TrimSpace(c.ModelsCheckInterval)
+	}
+	return parseNonNegativeDurationOrDefault(raw, DefaultModelsCheckInterval)
+}
+
+// AllAgents returns the sorted union of top-level agents keys and all per-host agents keys.
+func (c *Config) AllAgents() []string {
+	if c == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for a := range c.Agents {
+		if name := strings.TrimSpace(a); name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	for _, hc := range c.Hosts {
+		for a := range hc.Agents {
+			if name := strings.TrimSpace(a); name != "" {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for a := range seen {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// HostAgentsMap returns a map from each configured host name to the sorted list of
+// agent names explicitly configured under hosts.<host>.agents.
+func (c *Config) HostAgentsMap() map[string][]string {
+	if c == nil || len(c.Hosts) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(c.Hosts))
+	for h, hc := range c.Hosts {
+		hName := strings.TrimSpace(h)
+		if hName == "" {
+			continue
+		}
+		agents := make([]string, 0, len(hc.Agents))
+		for a := range hc.Agents {
+			if aName := strings.TrimSpace(a); aName != "" {
+				agents = append(agents, aName)
+			}
+		}
+		sort.Strings(agents)
+		out[hName] = agents
+	}
+	return out
 }
 
 // NotifierConfig holds delivery and report notification settings.
@@ -204,6 +275,7 @@ type RuntimeConfig struct {
 	ReconcileInterval   string `yaml:"reconcile_interval"`
 	StaleClaimedAfter   string `yaml:"stale_claimed_after"`
 	AgentsCheckInterval string `yaml:"agents_check_interval"`
+	ModelsCheckInterval string `yaml:"models_check_interval"`
 	SignalMaxBytes      int64  `yaml:"signal_max_bytes"`
 	DeliveriesDir       string `yaml:"deliveries_dir"`
 }
@@ -399,16 +471,56 @@ type HostAgentOverride struct {
 	ManualUpdate bool              `yaml:"manual_update"`
 }
 
+// ModelConfig defines a static model catalog entry under agents.<name>.models in fleet.yaml.
+// Each YAML item may be either a plain model ID string or a mapping with id and display_name.
+type ModelConfig struct {
+	ID          string `yaml:"id" json:"id"`
+	DisplayName string `yaml:"display_name,omitempty" json:"display_name,omitempty"`
+}
+
+// UnmarshalYAML decodes either a scalar model ID string or a mapping {id, display_name}.
+func (m *ModelConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		if value.Tag == "!!null" {
+			*m = ModelConfig{}
+			return nil
+		}
+		var id string
+		if err := value.Decode(&id); err != nil {
+			return err
+		}
+		m.ID = strings.TrimSpace(id)
+		m.DisplayName = ""
+		return nil
+	}
+	type rawModel struct {
+		ID          string `yaml:"id"`
+		DisplayName string `yaml:"display_name"`
+		Name        string `yaml:"name"`
+	}
+	var raw rawModel
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	m.ID = strings.TrimSpace(raw.ID)
+	m.DisplayName = strings.TrimSpace(raw.DisplayName)
+	if m.DisplayName == "" {
+		m.DisplayName = strings.TrimSpace(raw.Name)
+	}
+	return nil
+}
+
 // AgentConfig defines an agent driver configuration.
 type AgentConfig struct {
-	Preflight      string     `yaml:"preflight"`
-	Launch         string     `yaml:"launch"`
-	Resume         string     `yaml:"resume"`
-	SessionLogGlob string     `yaml:"session_log_glob"`
-	SandboxFlag    string     `yaml:"sandbox_flag"`
-	PromptStyle    string     `yaml:"prompt_style"`
-	VersionArgs    StringList `yaml:"version_args"`
-	ManualUpdate   bool       `yaml:"manual_update"`
+	Preflight      string        `yaml:"preflight"`
+	Launch         string        `yaml:"launch"`
+	Resume         string        `yaml:"resume"`
+	SessionLogGlob string        `yaml:"session_log_glob"`
+	SandboxFlag    string        `yaml:"sandbox_flag"`
+	PromptStyle    string        `yaml:"prompt_style"`
+	VersionArgs    StringList    `yaml:"version_args"`
+	ManualUpdate   bool          `yaml:"manual_update"`
+	Models         []ModelConfig `yaml:"models"`
 }
 
 // PoolConfig defines a quota pool.
@@ -518,6 +630,12 @@ func (c *Config) Validate() error {
 		errs = append(errs, err)
 	}
 	if err := validateNonNegativeDuration("agents_check_interval", c.AgentsCheckInterval); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateNonNegativeDuration("runtime.models_check_interval", c.Runtime.ModelsCheckInterval); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validateNonNegativeDuration("models_check_interval", c.ModelsCheckInterval); err != nil {
 		errs = append(errs, err)
 	}
 	if c.Runtime.SignalMaxBytes < 0 {

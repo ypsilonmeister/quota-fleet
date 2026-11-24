@@ -372,14 +372,30 @@ type PoolSummaryDTO struct {
 	ServiceStale           bool       `json:"service_stale,omitempty"`
 }
 
+// ModelDTO describes a selectable model exposed by GET /meta.
+type ModelDTO struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Family      string `json:"family,omitempty"`
+}
+
+// PoolAppliesToDTO describes a pool's applies_to matching rule for UI pool preview.
+type PoolAppliesToDTO struct {
+	Agent       string `json:"agent"`
+	ModelFamily string `json:"model_family,omitempty"`
+}
+
 // MetaResponse is returned by GET /meta with non-sensitive form candidates and runtime modes.
 type MetaResponse struct {
-	Hosts         []string         `json:"hosts"`
-	Agents        []string         `json:"agents"`
-	Pools         []string         `json:"pools"`
-	GateMode      string           `json:"gate_mode"`
-	EvaluatorMode string           `json:"evaluator_mode"`
-	PoolSummaries []PoolSummaryDTO `json:"pool_summaries"`
+	Hosts         []string                         `json:"hosts"`
+	Agents        []string                         `json:"agents"`
+	HostAgents    map[string][]string              `json:"host_agents,omitempty"`
+	Models        map[string]map[string][]ModelDTO `json:"models"`
+	Pools         []string                         `json:"pools"`
+	PoolRules     map[string][]PoolAppliesToDTO    `json:"pool_rules,omitempty"`
+	GateMode      string                           `json:"gate_mode"`
+	EvaluatorMode string                           `json:"evaluator_mode"`
+	PoolSummaries []PoolSummaryDTO                 `json:"pool_summaries"`
 }
 
 // AgentVersionEventDTO is the JSON representation of an agent_version_events entry.

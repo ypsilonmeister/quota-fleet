@@ -154,4 +154,16 @@ CREATE TABLE IF NOT EXISTS agent_version_events (
 
 CREATE INDEX IF NOT EXISTS idx_agent_version_events_created_at ON agent_version_events(created_at, id);
 CREATE INDEX IF NOT EXISTS idx_agent_version_events_agent ON agent_version_events(agent, id DESC);
+
+CREATE TABLE IF NOT EXISTS agent_models (
+    host TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    models_json TEXT NOT NULL DEFAULT '[]',
+    source TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ok' CHECK(status IN ('ok','error')),
+    error_detail TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (host, agent)
+);
 `

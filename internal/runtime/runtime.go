@@ -39,6 +39,7 @@ type Options struct {
 	QuotaStaleAfter     time.Duration
 	GateCheckInterval   time.Duration
 	AgentsCheckInterval time.Duration
+	ModelsCheckInterval time.Duration
 	Pools               map[string]config.PoolConfig
 	SnapshotLoader      func() (*quota.Snapshot, error)
 	Now                 func() time.Time
@@ -53,6 +54,7 @@ type Runtime struct {
 	Reconciler   *Reconciler
 	GateChecker  *GateChecker
 	AgentChecker *AgentVersionChecker
+	ModelProber  *AgentModelProber
 
 	notifyCh chan struct{}
 	logger   *log.Logger
@@ -191,6 +193,14 @@ func New(opts Options) (*Runtime, error) {
 		Now:      opts.Now,
 		Logger:   logger,
 	})
+	modelProber := NewAgentModelProber(AgentModelProberOptions{
+		Store:    opts.Store,
+		Config:   opts.Config,
+		Provider: hostFAProvider,
+		Interval: opts.ModelsCheckInterval,
+		Now:      opts.Now,
+		Logger:   logger,
+	})
 
 	return &Runtime{
 		Dispatcher:   dispatcher,
@@ -199,6 +209,7 @@ func New(opts Options) (*Runtime, error) {
 		Reconciler:   reconciler,
 		GateChecker:  gateChecker,
 		AgentChecker: agentChecker,
+		ModelProber:  modelProber,
 		notifyCh:     notifyCh,
 		logger:       logger,
 	}, nil
@@ -237,6 +248,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 			name string
 			fn   func(context.Context) error
 		}{"agent-versions", r.AgentChecker.Run})
+	}
+	if r.ModelProber != nil && r.ModelProber.Enabled() {
+		components = append(components, struct {
+			name string
+			fn   func(context.Context) error
+		}{"agent-models", r.ModelProber.Run})
 	}
 
 	for _, comp := range components {

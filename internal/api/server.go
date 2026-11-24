@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/agentmodels"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentver"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
@@ -123,6 +124,15 @@ func NewServer(st *store.Store, opts Options) *Server {
 		nowFn = time.Now
 	}
 
+	hostNames := append([]string(nil), opts.Hosts...)
+	agentNames := append([]string(nil), opts.Agents...)
+	if opts.Config != nil {
+		for h := range opts.Config.Hosts {
+			hostNames = append(hostNames, h)
+		}
+		agentNames = append(agentNames, opts.Config.AllAgents()...)
+	}
+
 	s := &Server{
 		store:           st,
 		instanceID:      opts.InstanceID,
@@ -135,8 +145,8 @@ func NewServer(st *store.Store, opts Options) *Server {
 		quotaUsageFile:  strings.TrimSpace(opts.QuotaUsageFile),
 		quotaStaleAfter: staleAfter,
 		pools:           opts.Pools,
-		hosts:           normalizeSortedNames(opts.Hosts),
-		agents:          normalizeSortedNames(opts.Agents),
+		hosts:           normalizeSortedNames(hostNames),
+		agents:          normalizeSortedNames(agentNames),
 		cfg:             opts.Config,
 		gateReleaser:    opts.GateReleaser,
 		agentChecker:    opts.AgentChecker,
@@ -228,6 +238,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resolvedPool := s.resolveRequestPool(req)
 	params := store.CreateJobParams{
 		RequestID:          req.RequestID,
 		Title:              req.Title,
@@ -241,7 +252,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		AcceptanceCriteria: req.AcceptanceCriteria,
 		ParentID:           req.ParentID,
 		Model:              req.Model,
-		Pool:               req.Pool,
+		Pool:               resolvedPool,
 		AltPools:           req.AltPools,
 		SessionID:          req.SessionID,
 	}
@@ -1085,14 +1096,110 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		agents = []string{}
 	}
 
+	var hostAgents map[string][]string
+	if s.cfg != nil {
+		hostAgents = s.cfg.HostAgentsMap()
+	}
+
+	models := s.buildMetaModels(r.Context())
+
+	var poolRules map[string][]PoolAppliesToDTO
+	if len(s.pools) > 0 {
+		poolRules = make(map[string][]PoolAppliesToDTO, len(s.pools))
+		for _, name := range poolNames {
+			cfg := s.pools[name]
+			if len(cfg.AppliesTo) == 0 {
+				continue
+			}
+			rules := make([]PoolAppliesToDTO, 0, len(cfg.AppliesTo))
+			for _, t := range cfg.AppliesTo {
+				rules = append(rules, PoolAppliesToDTO{
+					Agent:       strings.TrimSpace(t.Agent),
+					ModelFamily: strings.TrimSpace(t.ModelFamily),
+				})
+			}
+			poolRules[name] = rules
+		}
+		if len(poolRules) == 0 {
+			poolRules = nil
+		}
+	}
+
 	writeJSON(w, http.StatusOK, MetaResponse{
 		Hosts:         hosts,
 		Agents:        agents,
+		HostAgents:    hostAgents,
+		Models:        models,
 		Pools:         poolNames,
+		PoolRules:     poolRules,
 		GateMode:      s.gateMode,
 		EvaluatorMode: s.evaluatorMode,
 		PoolSummaries: summaries,
 	})
+}
+
+func (s *Server) buildMetaModels(ctx context.Context) map[string]map[string][]ModelDTO {
+	out := make(map[string]map[string][]ModelDTO)
+
+	setModels := func(host, agent string, items []store.AgentModelItem) {
+		if host == "" || agent == "" || len(items) == 0 {
+			return
+		}
+		if out[host] == nil {
+			out[host] = make(map[string][]ModelDTO)
+		}
+		dtos := make([]ModelDTO, 0, len(items))
+		for _, it := range items {
+			dtos = append(dtos, ModelDTO{
+				ID:          it.ID,
+				DisplayName: it.DisplayName,
+				Family:      it.Family,
+			})
+		}
+		out[host][agent] = dtos
+	}
+
+	if s.store != nil {
+		if rows, err := s.store.ListAgentModels(ctx); err == nil {
+			for _, row := range rows {
+				if row == nil || len(row.Models) == 0 {
+					continue
+				}
+				setModels(row.Host, row.Agent, row.Models)
+			}
+		} else {
+			s.logger.Printf("WARNING: failed to load agent_models for /meta: %v", err)
+		}
+	}
+
+	// Fill in static config catalogs (e.g. claude in fleet.yaml) for any host×agent
+	// not yet populated in agent_models.
+	if s.cfg != nil {
+		allAgents := s.cfg.AllAgents()
+		for _, h := range s.hosts {
+			hc := s.cfg.Hosts[h]
+			var hostAgents []string
+			if len(hc.Agents) > 0 {
+				for a := range hc.Agents {
+					if name := strings.TrimSpace(a); name != "" {
+						hostAgents = append(hostAgents, name)
+					}
+				}
+			} else {
+				hostAgents = allAgents
+			}
+			for _, a := range hostAgents {
+				if out[h] != nil && len(out[h][a]) > 0 {
+					continue
+				}
+				if cfgItems := agentmodels.CatalogFromConfig(s.cfg, a); len(cfgItems) > 0 {
+					setModels(h, a, cfgItems)
+				}
+			}
+		}
+	}
+
+	return out
 }
 
 func (s *Server) loadSnapshotForMeta() *quota.Snapshot {

@@ -144,6 +144,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		QuotaStaleAfter:     cfg.Quota.EffectiveStaleAfter(),
 		GateCheckInterval:   cfg.Quota.EffectiveGateCheckInterval(),
 		AgentsCheckInterval: cfg.EffectiveAgentsCheckInterval(),
+		ModelsCheckInterval: cfg.EffectiveModelsCheckInterval(),
 		Pools:               cfg.Pools,
 		Logger:              logger,
 	})
@@ -170,7 +171,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		QuotaStaleAfter: cfg.Quota.EffectiveStaleAfter(),
 		Pools:           cfg.Pools,
 		Hosts:           sortedMapKeys(cfg.Hosts),
-		Agents:          sortedMapKeys(cfg.Agents),
+		Agents:          cfg.AllAgents(),
 		Config:          cfg,
 		GateReleaser:    gateReleaserAdapter{checker: rt.GateChecker},
 		AgentChecker:    rt.AgentChecker,
@@ -245,6 +246,14 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 		agentsCheckSummary = fmt.Sprintf("every %s", agentsCheckInterval)
 	}
 
+	modelsCheckInterval := cfg.EffectiveModelsCheckInterval()
+	var modelsCheckSummary string
+	if modelsCheckInterval <= 0 {
+		modelsCheckSummary = "disabled (models_check_interval=0)"
+	} else {
+		modelsCheckSummary = fmt.Sprintf("every %s", modelsCheckInterval)
+	}
+
 	fmt.Fprintf(w, "quota-fleet serve listening on %s (instance_id=%s, db=%s, adapter=%s, evaluator=%s, gate_mode=%s)\n",
 		listen, cfg.InstanceID, dbPath, adapterName, evalMode, gateMode)
 	fmt.Fprintf(w, "  adapter:   %s\n", adapterName)
@@ -253,6 +262,7 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 	fmt.Fprintf(w, "  notifier:  %s\n", notifierSummary)
 	fmt.Fprintf(w, "  api_auth:  %s\n", apiAuthSummary)
 	fmt.Fprintf(w, "  agents_check: %s\n", agentsCheckSummary)
+	fmt.Fprintf(w, "  models_check: %s\n", modelsCheckSummary)
 	fmt.Fprintf(w, "  ui_url:    %s\n", formatPlannedUIURL(listen))
 
 	if evalMode == config.EvaluatorModeTypedDecision && strings.TrimSpace(os.Getenv(apiKeyEnv)) == "" {

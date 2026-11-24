@@ -1193,6 +1193,23 @@ html[data-direction="ledger"] .btn:hover:not(:disabled) {
   color: var(--muted);
 }
 
+.model-control > select,
+.model-control > input {
+  width: 100%;
+}
+
+.derived-pool-display {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-subtle);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
 input[type="text"],
 input[type="password"],
 input[type="number"],

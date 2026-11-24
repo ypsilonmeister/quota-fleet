@@ -373,6 +373,33 @@ func SummarizeEvaluation(eval GateEvaluation) string {
 	return string(b)
 }
 
+const (
+	// ModelFamilyGemini classifies gemini-* models.
+	ModelFamilyGemini = "gemini"
+	// ModelFamilyClaude classifies claude-* models.
+	ModelFamilyClaude = "claude"
+	// ModelFamilyGPT classifies gpt-* models.
+	ModelFamilyGPT = "gpt"
+	// ModelFamilyUnknown classifies models whose prefix does not match a known family.
+	ModelFamilyUnknown = "unknown"
+)
+
+// ModelFamily derives the canonical model family from a model ID (docs/11 §3):
+// gemini-* -> gemini, claude-* -> claude, gpt-* -> gpt, otherwise unknown.
+func ModelFamily(modelID string) string {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	switch {
+	case m == ModelFamilyGemini || strings.HasPrefix(m, "gemini-"):
+		return ModelFamilyGemini
+	case m == ModelFamilyClaude || strings.HasPrefix(m, "claude-"):
+		return ModelFamilyClaude
+	case m == ModelFamilyGPT || strings.HasPrefix(m, "gpt-"):
+		return ModelFamilyGPT
+	default:
+		return ModelFamilyUnknown
+	}
+}
+
 // ResolvePoolByAppliesTo finds the first pool (in sorted pool-name order) whose
 // applies_to entries match the given agent and model. Returns "" if none matches.
 func ResolvePoolByAppliesTo(pools map[string]config.PoolConfig, agent, model string) string {
