@@ -14,27 +14,76 @@ import (
 )
 
 var (
-	ansiEscapeRe     = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
-	agyModelIDRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*$`)
-	agyColSepRe      = regexp.MustCompile(`(?:\t| {2,})`)
-	agySlugMarkerRe  = regexp.MustCompile(`[-_./0-9]`)
+	ansiEscapeRe    = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+	agyModelIDRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*$`)
+	agyColSepRe     = regexp.MustCompile(`(?:\t| {2,})`)
+	agySlugMarkerRe = regexp.MustCompile(`[-_./0-9]`)
+
+	agyDiagnosticPrefixes = []string{
+		"error:",
+		"err:",
+		"warning:",
+		"warn:",
+		"fatal:",
+		"panic:",
+		"failed:",
+		"usage:",
+	}
+
+	agyDiagnosticPhrases = []string{
+		"authentication required",
+		"not authenticated",
+		"unauthenticated",
+		"unauthorized",
+		"forbidden",
+		"permission denied",
+		"access denied",
+		"not logged in",
+		"login required",
+		"failed to ",
+		"rate limit",
+		"timed out",
+		"timeout",
+		"connection refused",
+		"service unavailable",
+		"temporarily unavailable",
+		"no models",
+		"not found",
+		"invalid token",
+		"token expired",
+		"internal error",
+		"unknown error",
+		"bad request",
+	}
 )
+
+type agySepKind int
+
+const (
+	agySepNone agySepKind = iota
+	agySepTab
+	agySepSpaces
+)
+
+const minAgyCatalogModels = 2
 
 // ParseAgyModelsOutput parses the stdout/combined output of `agy models` into a model catalog.
 // Observed `agy models` output formats:
 //   - Non-TTY (pipe / SSH): stderr "Fetching available models..." + stdout "<id>\t<display_name>"
 //   - TTY (interactive): "\r⠋ Fetching available models...\r\x1b[K<id>  +<display_name>\r\n"
 //
-// It tolerates terminal spinner lines separated by '\r' and ANSI escape codes, requires two-column
-// `<id>` + `<display_name>` rows matching the observed CLI format, and requires at least one
-// recognized model family (gemini/claude/gpt) so diagnostic/error outputs (including tabular
-// diagnostics such as `error-code  authentication required`) never overwrite a stored catalog.
-// Returns an error if no valid catalog is parsed.
+// List validity is intentionally decoupled from model family classification (docs/11 §3: unknown
+// prefixes are imported with family=unknown). Instead, the entire output must form a consistent
+// multi-row catalog:
+//   - Every non-empty, non-spinner/header line must be a valid two-column model row (no silent skips).
+//   - All rows must share the same column separator style (all tabs or all space-padded).
+//   - Rows containing diagnostic IDs or diagnostic messages are rejected.
+//   - At least two distinct model rows are required so single-line output cannot overwrite a catalog.
 func ParseAgyModelsOutput(output string) ([]store.AgentModelItem, error) {
 	lines := strings.Split(output, "\n")
 	seen := make(map[string]struct{})
 	var items []store.AgentModelItem
-	recognizedFamilies := 0
+	sepStyle := agySepNone
 
 	for _, rawLine := range lines {
 		clean := ansiEscapeRe.ReplaceAllString(rawLine, "")
@@ -49,27 +98,28 @@ func ParseAgyModelsOutput(output string) ([]store.AgentModelItem, error) {
 			continue
 		}
 
-		id, displayName, ok := parseAgyModelRow(seg)
+		id, displayName, sep, ok := parseAgyModelRow(seg)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("agy models output contained non-model line: %q", seg)
+		}
+		if sepStyle == agySepNone {
+			sepStyle = sep
+		} else if sepStyle != sep {
+			return nil, fmt.Errorf("agy models output mixed column separator styles at line: %q", seg)
 		}
 		if _, dup := seen[id]; dup {
 			continue
 		}
 		seen[id] = struct{}{}
-		family := quota.ModelFamily(id)
-		if family != quota.ModelFamilyUnknown {
-			recognizedFamilies++
-		}
 		items = append(items, store.AgentModelItem{
 			ID:          id,
 			DisplayName: displayName,
-			Family:      family,
+			Family:      quota.ModelFamily(id),
 		})
 	}
 
-	if len(items) == 0 || recognizedFamilies == 0 {
-		return nil, errors.New("agy models output contained no parseable models")
+	if len(items) < minAgyCatalogModels {
+		return nil, fmt.Errorf("agy models output did not contain a valid model list (parsed %d rows, need at least %d)", len(items), minAgyCatalogModels)
 	}
 	return items, nil
 }
@@ -109,32 +159,51 @@ func isSpinnerOrHeaderLine(line string) bool {
 	return false
 }
 
-// parseAgyModelRow extracts (id, displayName, true) from a single trimmed `agy models` line.
+// parseAgyModelRow extracts (id, displayName, sepKind, true) from a single trimmed `agy models` line.
 // Real `agy models` rows are always two-column tabular rows:
 //   - `<slug-id>\t<Display Name>` (non-TTY stdout)
 //   - `<slug-id>  +<Display Name>` (TTY space-padded table)
 //
-// Bare single-column tokens, single-space prose ("No models available"), and diagnostic lines
-// with lowercase prose in the second column ("error-code  authentication required") are rejected.
-func parseAgyModelRow(line string) (string, string, bool) {
+// Bare single-column tokens, single-space prose ("No models available"), multi-column rows,
+// and diagnostic rows (e.g. `error-code\tAuthentication required` or `gemini-4-neon-medium\tAuthentication required`)
+// are rejected.
+func parseAgyModelRow(line string) (string, string, agySepKind, bool) {
 	loc := agyColSepRe.FindStringIndex(line)
 	if loc == nil {
-		return "", "", false
+		return "", "", agySepNone, false
+	}
+	sep := agySepSpaces
+	if line[loc[0]] == '\t' {
+		sep = agySepTab
 	}
 	id := strings.TrimSpace(line[:loc[0]])
 	rest := strings.TrimSpace(line[loc[1]:])
 	if !isValidAgyModelID(id) || !isValidAgyDisplayName(rest) {
-		return "", "", false
+		return "", "", agySepNone, false
 	}
-	return id, rest, true
+	return id, rest, sep, true
 }
 
 func isValidAgyDisplayName(name string) bool {
-	if name == "" || strings.ContainsRune(name, '\t') {
+	if name == "" || strings.ContainsRune(name, '\t') || strings.Contains(name, "  ") {
 		return false
 	}
 	c := name[0]
-	return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, prefix := range agyDiagnosticPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return false
+		}
+	}
+	for _, phrase := range agyDiagnosticPhrases {
+		if strings.Contains(lower, phrase) {
+			return false
+		}
+	}
+	return true
 }
 
 func isValidAgyModelID(id string) bool {
@@ -149,7 +218,23 @@ func isValidAgyModelID(id string) bool {
 	}
 	// Require at least one slug separator or digit so plain English words ("no", "none", "empty")
 	// are never mistaken for model IDs.
-	return agySlugMarkerRe.MatchString(id)
+	if !agySlugMarkerRe.MatchString(id) {
+		return false
+	}
+	return !isDiagnosticAgyID(id)
+}
+
+func isDiagnosticAgyID(id string) bool {
+	tokens := strings.FieldsFunc(strings.ToLower(id), func(r rune) bool {
+		return r == '-' || r == '_' || r == '.' || r == ':' || r == '/'
+	})
+	for _, tok := range tokens {
+		switch tok {
+		case "error", "err", "warn", "warning", "fatal", "panic", "fail", "failed":
+			return true
+		}
+	}
+	return false
 }
 
 type codexModelsCache struct {

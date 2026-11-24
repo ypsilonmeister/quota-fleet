@@ -126,6 +126,14 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		"error-code  Authentication required\n",
 		"error-code\tAuthentication required\n",
 		"Fetching available models...\nerror-code  authentication required\n",
+		"gemini-4-neon-medium\tAuthentication required\n",
+		"gemini-4-neon-medium  Authentication required\n",
+		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\n",
+		"new-provider-v1\tNew Provider V1\n",
+		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nerror-code\tAuthentication required\n",
+		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tAuthentication required\n",
+		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\nWarning: incomplete catalog\n",
+		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high  Claude Opus 5.5 (High)\n",
 		"err-401\n",
 		"gemini-4-neon-medium\n",
 		"Usage: agy models [flags]\n\nList available models\n\nFlags:\n  -h      Show help\n  --help  Show help\n",
@@ -133,6 +141,180 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		if got, err := ParseAgyModelsOutput(diag); err == nil {
 			t.Errorf("ParseAgyModelsOutput(%q) succeeded with %+v, want error", diag, got)
 		}
+	}
+
+	// Unknown-prefix model catalog must be accepted with family=unknown (docs/11 §3).
+	unknownOnlyRaw := "new-provider-v1\tNew Provider V1\nnew-provider-v2\tnew-provider-v2\n"
+	unknownItems, err := ParseAgyModelsOutput(unknownOnlyRaw)
+	if err != nil {
+		t.Fatalf("ParseAgyModelsOutput(unknown-only) failed: %v", err)
+	}
+	wantUnknown := []store.AgentModelItem{
+		{ID: "new-provider-v1", DisplayName: "New Provider V1", Family: quota.ModelFamilyUnknown},
+		{ID: "new-provider-v2", DisplayName: "new-provider-v2", Family: quota.ModelFamilyUnknown},
+	}
+	if len(unknownItems) != len(wantUnknown) {
+		t.Fatalf("unknown-only got %d items, want %d: %+v", len(unknownItems), len(wantUnknown), unknownItems)
+	}
+	for i, w := range wantUnknown {
+		if unknownItems[i] != w {
+			t.Errorf("unknownItems[%d] = %+v, want %+v", i, unknownItems[i], w)
+		}
+	}
+}
+
+// Captured real `agy models` samples (non-TTY combined stderr+stdout and PTY output).
+const (
+	realAgyModelsNonTTY = "Fetching available models...\n" +
+		"gemini-4-neon-high\tGemini 4 Neon (High)\n" +
+		"gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)\n" +
+		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\n" +
+		"gemini-4-neon-low\tGemini 4 Neon (Low)\n" +
+		"gemini-4-carbon-medium\tGemini 4 Carbon (Medium)\n" +
+		"gemini-4-carbon-high\tGemini 4 Carbon (High)\n" +
+		"gemini-4-carbon-low\tGemini 4 Carbon (Low)\n" +
+		"gemini-4-argon-medium\tGemini 4 Argon (Medium)\n" +
+		"gemini-4-argon-high\tGemini 4 Argon (High)\n" +
+		"gemini-4-argon-low\tGemini 4 Argon (Low)\n" +
+		"gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\n" +
+		"gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\n" +
+		"gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)\n" +
+		"gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)\n" +
+		"gemini-pro-orchestrator-neon\tOrchestrator (Neon)\n" +
+		"gemini-pro-orchestrator\tOrchestrator (Carbon)\n" +
+		"gemini-pro-orchestrator-argon\tOrchestrator (Argon)\n" +
+		"gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n" +
+		"gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n" +
+		"gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n" +
+		"claude-opus-5-5-low\tClaude Opus 5.5 (Low)\n" +
+		"claude-opus-5-5-medium\tClaude Opus 5.5 (Medium)\n" +
+		"claude-opus-5-5-high\tClaude Opus 5.5 (High)\n" +
+		"claude-sonnet-5-5-low\tClaude Sonnet 5.5 (Low)\n" +
+		"claude-sonnet-5-5-medium\tClaude Sonnet 5.5 (Medium)\n" +
+		"claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)\n" +
+		"gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n"
+
+	realAgyModelsPTY = "\r⠋ Fetching available models...\r⠙ Fetching available models...\r⠹ Fetching available models...\r\x1b[K" +
+		"gemini-4-neon-high             Gemini 4 Neon (High)\r\n" +
+		"gemini-4-neon-xhigh            Gemini 4 Neon (XHigh)\r\n" +
+		"gemini-4-neon-medium           Gemini 4 Neon (Medium)\r\n" +
+		"gemini-4-neon-low              Gemini 4 Neon (Low)\r\n" +
+		"gemini-4-carbon-medium         Gemini 4 Carbon (Medium)\r\n" +
+		"gemini-4-carbon-high           Gemini 4 Carbon (High)\r\n" +
+		"gemini-4-carbon-low            Gemini 4 Carbon (Low)\r\n" +
+		"gemini-4-argon-medium          Gemini 4 Argon (Medium)\r\n" +
+		"gemini-4-argon-high            Gemini 4 Argon (High)\r\n" +
+		"gemini-4-argon-low             Gemini 4 Argon (Low)\r\n" +
+		"gemini-4-hydrogen-high         Gemini 4 Hydrogen (High)\r\n" +
+		"gemini-4-hydrogen-xhigh        Gemini 4 Hydrogen (XHigh)\r\n" +
+		"gemini-4-hydrogen-medium       Gemini 4 Hydrogen (Medium)\r\n" +
+		"gemini-4-hydrogen-low          Gemini 4 Hydrogen (Low)\r\n" +
+		"gemini-pro-orchestrator-neon   Orchestrator (Neon)\r\n" +
+		"gemini-pro-orchestrator        Orchestrator (Carbon)\r\n" +
+		"gemini-pro-orchestrator-argon  Orchestrator (Argon)\r\n" +
+		"gemini-3.8-flash-high          Gemini 3.8 Flash (High)\r\n" +
+		"gemini-3.8-flash-medium        Gemini 3.8 Flash (Medium)\r\n" +
+		"gemini-3.8-flash-low           Gemini 3.8 Flash (Low)\r\n" +
+		"claude-opus-5-5-low            Claude Opus 5.5 (Low)\r\n" +
+		"claude-opus-5-5-medium         Claude Opus 5.5 (Medium)\r\n" +
+		"claude-opus-5-5-high           Claude Opus 5.5 (High)\r\n" +
+		"claude-sonnet-5-5-low          Claude Sonnet 5.5 (Low)\r\n" +
+		"claude-sonnet-5-5-medium       Claude Sonnet 5.5 (Medium)\r\n" +
+		"claude-sonnet-5-5-high         Claude Sonnet 5.5 (High)\r\n" +
+		"gpt-oss-120b-medium            GPT-OSS 120B (Medium)\r\n"
+)
+
+func TestProberImportsRealAgySamplesAndUnknownFamilyCatalog(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-real-samples"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		InstanceID: "agy-real-samples",
+		Hosts: map[string]config.HostConfig{
+			"ubuntu": {
+				OS: "linux",
+				Agents: map[string]config.HostAgentOverride{
+					"agy": {},
+				},
+			},
+		},
+	}
+
+	output := realAgyModelsNonTTY
+	provider := &fakeHostProvider{
+		hosts: map[string]adapter.FileAccess{
+			"ubuntu": &fakeFileAccess{
+				runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+					return adapter.ExecResult{ExitCode: 0, Output: output}, nil
+				},
+			},
+		},
+	}
+
+	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	now := t1
+	prober, err := NewProber(ProberOptions{
+		Store:    st,
+		Config:   cfg,
+		Provider: provider,
+		Now:      func() time.Time { return now },
+		Logger:   log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewProber: %v", err)
+	}
+
+	// 1. Real non-TTY sample: all 27 models imported.
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("non-TTY Probe: %v", err)
+	}
+	nonTTYCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels(non-TTY): %v", err)
+	}
+	if nonTTYCat.Status != store.AgentModelStatusOK || len(nonTTYCat.Models) != 27 {
+		t.Fatalf("non-TTY catalog = status=%q len=%d, want ok and 27", nonTTYCat.Status, len(nonTTYCat.Models))
+	}
+
+	// 2. Real PTY sample: all 27 models imported identically in exact order.
+	output = realAgyModelsPTY
+	now = t1.Add(time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("PTY Probe: %v", err)
+	}
+	ptyCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels(PTY): %v", err)
+	}
+	if ptyCat.Status != store.AgentModelStatusOK || len(ptyCat.Models) != len(nonTTYCat.Models) {
+		t.Fatalf("PTY catalog = status=%q len=%d, want ok and %d", ptyCat.Status, len(ptyCat.Models), len(nonTTYCat.Models))
+	}
+	for i := range nonTTYCat.Models {
+		if ptyCat.Models[i] != nonTTYCat.Models[i] {
+			t.Errorf("PTY model[%d] = %+v, want %+v", i, ptyCat.Models[i], nonTTYCat.Models[i])
+		}
+	}
+
+	// 3. Unknown-prefix catalog (docs/11 §3) + lowercase display name: saved as ok with family=unknown.
+	output = "new-provider-v1\tNew Provider V1\nnew-provider-v2\tnew-provider-v2\n"
+	now = t1.Add(2 * time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("unknown-family Probe: %v", err)
+	}
+	unkCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels(unknown): %v", err)
+	}
+	if unkCat.Status != store.AgentModelStatusOK || len(unkCat.Models) != 2 {
+		t.Fatalf("unknown catalog = %+v, want status=ok and 2 models", unkCat)
+	}
+	if unkCat.Models[0].ID != "new-provider-v1" || unkCat.Models[0].Family != quota.ModelFamilyUnknown ||
+		unkCat.Models[1].ID != "new-provider-v2" || unkCat.Models[1].DisplayName != "new-provider-v2" || unkCat.Models[1].Family != quota.ModelFamilyUnknown {
+		t.Errorf("unexpected unknown-family models: %+v", unkCat.Models)
 	}
 }
 
@@ -341,6 +523,38 @@ func TestProberPreservesAgyCatalogOnDiagnosticMessageWithExitZero(t *testing.T) 
 		{
 			name:   "tab separated capitalized diagnostic",
 			output: "error-code\tAuthentication required\n",
+		},
+		{
+			name:   "known model ID with tab diagnostic",
+			output: "gemini-4-neon-medium\tAuthentication required\n",
+		},
+		{
+			name:   "known model ID with two-space diagnostic",
+			output: "gemini-4-neon-medium  Authentication required\n",
+		},
+		{
+			name:   "valid row mixed with tabular error diagnostic",
+			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nerror-code\tAuthentication required\n",
+		},
+		{
+			name:   "valid row mixed with known-ID diagnostic",
+			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tAuthentication required\n",
+		},
+		{
+			name:   "valid rows mixed with plain-text diagnostic line",
+			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\nWarning: incomplete catalog\n",
+		},
+		{
+			name:   "single-line known model output",
+			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\n",
+		},
+		{
+			name:   "single-line unknown-prefix output",
+			output: "new-provider-v1\tNew Provider V1\n",
+		},
+		{
+			name:   "mixed tab and space separators",
+			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high  Claude Opus 5.5 (High)\n",
 		},
 	}
 
