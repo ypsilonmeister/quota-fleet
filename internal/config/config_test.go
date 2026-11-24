@@ -1213,3 +1213,20 @@ api:
 		})
 	}
 }
+
+func TestAPIMCPHTTPDefaultsFalseAndParses(t *testing.T) {
+	cfg, err := Parse([]byte("instance_id: x\n"))
+	if err != nil {
+		t.Fatalf("Parse default: %v", err)
+	}
+	if cfg.API.MCPHTTP {
+		t.Fatalf("api.mcp_http default = true, want false")
+	}
+	cfg, err = Parse([]byte("instance_id: x\napi:\n  mcp_http: true\n"))
+	if err != nil {
+		t.Fatalf("Parse enabled: %v", err)
+	}
+	if !cfg.API.MCPHTTP {
+		t.Fatalf("api.mcp_http not parsed")
+	}
+}

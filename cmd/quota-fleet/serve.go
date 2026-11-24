@@ -20,6 +20,7 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/api"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
+	"github.com/ypsilonmeister/quota-fleet/internal/mcpserver"
 	"github.com/ypsilonmeister/quota-fleet/internal/runtime"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
@@ -158,7 +159,12 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 	}
 	defer rt.Stop()
 
+	var mcpHandler func(http.Handler) http.Handler
+	if cfg.API.MCPHTTP {
+		mcpHandler = mcpserver.NewHTTPHandler
+	}
 	apiSrv := api.NewServer(st, api.Options{
+		MCPHandler:      mcpHandler,
 		InstanceID:      cfg.InstanceID,
 		MaxClaimed:      cfg.Limits.MaxClaimed,
 		Token:           cfg.API.Token,

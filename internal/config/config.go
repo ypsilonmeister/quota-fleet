@@ -356,6 +356,8 @@ type APIConfig struct {
 	Token       string           `yaml:"token"`
 	Tokens      []APITokenConfig `yaml:"tokens"`
 	RequireAuth bool             `yaml:"require_auth"`
+	// MCPHTTP enables the Streamable HTTP MCP endpoint at /mcp (docs/13). Default false.
+	MCPHTTP bool `yaml:"mcp_http"`
 }
 
 // HasAuthTokens reports whether any legacy or named API token is configured.

@@ -369,3 +369,31 @@ evaluator:
 		t.Errorf("unexpected warning when GEMINI_API_KEY is set:\n%s", bannerWithKey.String())
 	}
 }
+
+func TestCLIMCPConfigHTTPSnippetNoTokenLeak(t *testing.T) {
+	const secretToken = "qf-super-secret-token-should-never-appear"
+	t.Setenv("QUOTA_FLEET_TOKEN", secretToken)
+
+	var out, errBuf bytes.Buffer
+	code := run([]string{"mcp", "config", "--format", "http", "--url", "http://100.64.0.1:8737/"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, errBuf.String())
+	}
+	var parsed struct {
+		MCPServers map[string]struct {
+			Type    string            `json:"type"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out.String())
+	}
+	e := parsed.MCPServers["quota-fleet"]
+	if e.Type != "http" || e.URL != "http://100.64.0.1:8737/mcp" || e.Headers["Authorization"] != "Bearer ${QUOTA_FLEET_TOKEN}" {
+		t.Fatalf("unexpected entry: %+v", e)
+	}
+	if strings.Contains(out.String(), secretToken) {
+		t.Fatalf("http snippet leaked token value")
+	}
+}

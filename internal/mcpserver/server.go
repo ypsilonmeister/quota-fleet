@@ -24,8 +24,13 @@ func NewServer(opts Options) (*mcp.Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newServerWithClient(client, opts.Version), nil
+}
 
-	version := strings.TrimSpace(opts.Version)
+// newServerWithClient builds the MCP server for client. It is the single place the
+// 12 tools are registered, shared by the stdio and Streamable HTTP transports.
+func newServerWithClient(client *Client, version string) *mcp.Server {
+	version = strings.TrimSpace(version)
 	if version == "" {
 		version = defaultServerVersion
 	}
@@ -36,7 +41,7 @@ func NewServer(opts Options) (*mcp.Server, error) {
 	}, nil)
 
 	registerTools(srv, client)
-	return srv, nil
+	return srv
 }
 
 func registerTools(srv *mcp.Server, client *Client) {

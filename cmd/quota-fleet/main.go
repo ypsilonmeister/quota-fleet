@@ -59,7 +59,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  quota-fleet gate <check|decisions|held|release> [options]")
 	fmt.Fprintln(w, "  quota-fleet agents [check|events] [options]")
 	fmt.Fprintln(w, "  quota-fleet mcp")
-	fmt.Fprintln(w, "  quota-fleet mcp config [--format all|claude-code|json] [--url http://127.0.0.1:8737] [--binary quota-fleet]")
+	fmt.Fprintln(w, "  quota-fleet mcp config [--format all|claude-code|json|http] [--url http://127.0.0.1:8737] [--binary quota-fleet]")
 	fmt.Fprintln(w, "  quota-fleet config check [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet status [--config fleet.yaml] [--db path/to/fleet.db]")
 }
