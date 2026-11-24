@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -428,6 +429,11 @@ type APIConfig struct {
 	Token       string           `yaml:"token"`
 	Tokens      []APITokenConfig `yaml:"tokens"`
 	RequireAuth bool             `yaml:"require_auth"`
+	// MCPHTTP enables the Streamable HTTP MCP endpoint at /mcp (docs/13). Default false.
+	MCPHTTP bool `yaml:"mcp_http"`
+	// MCPAllowedOriginHosts lists host names (no scheme or port), in addition to loopback,
+	// whose Origin header /mcp accepts, e.g. the server's tailnet host name.
+	MCPAllowedOriginHosts []string `yaml:"mcp_allowed_origin_hosts"`
 }
 
 // HasAuthTokens reports whether any legacy or named API token is configured.
@@ -718,6 +724,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Notifier.WebhookRetries != nil && *c.Notifier.WebhookRetries < 0 {
 		errs = append(errs, fmt.Errorf("notifier.webhook_retries must be >= 0 (got %d)", *c.Notifier.WebhookRetries))
+	}
+
+	for i, host := range c.API.MCPAllowedOriginHosts {
+		// A colon is only valid inside an IPv6 literal; anything URL-like would never match.
+		if host == "" || strings.ContainsAny(host, "/@*?#[] \t") ||
+			(strings.Contains(host, ":") && net.ParseIP(host) == nil) {
+			errs = append(errs, fmt.Errorf("api.mcp_allowed_origin_hosts[%d] %q must be a bare host name or IP address (no scheme, port or wildcard)", i, host))
+		}
 	}
 
 	if len(c.API.Tokens) > 0 {

@@ -19,12 +19,14 @@
 ## 3. セキュリティ
 
 - 公開範囲は serve の待ち受け範囲そのまま（本番は tailnet IP）。funnel 等での外部公開はしない。
-- MCP 仕様の DNS リバインディング対策として、Origin ヘッダの検証を SDK の既定／推奨設定で行う（localhost と tailnet ホスト名を許可する範囲に留める）。
+- MCP 仕様の DNS リバインディング対策として、Origin ヘッダの検証を SDK の既定／推奨設定で行う（localhost と tailnet ホスト名を許可する範囲に留める）。SDK v1.8.0 の既定はループバック着信時の Host 検査のみのため、`/mcp` 側で Origin を検査する。Origin なしは通し、Origin 付きはホストがループバックか `api.mcp_allowed_origin_hosts` にある場合だけ通す（それ以外は 403）。
+- `/mcp` は常に Bearer トークン必須。トークン未設定の場合は `require_auth: false` でも 401（JSON API の従来動作は変えない）。
 - ログにトークン値を出さない。呼び出し元 identity はトークンの `name` を監査に残す（API 側の既存記録で足りる場合は追加実装しない）。
 
 ## 4. 設定
 
 - `fleet.yaml` に `api.mcp_http`（bool、既定 false）を追加し、有効化は明示設定のみ。無効時は `/mcp` を登録しない（404）。
+- `api.mcp_allowed_origin_hosts`（文字列の配列、既定は空）に、Origin を許可する tailnet ホスト名を書く（スキーム・ポート・ワイルドカードは不可）。
 - `quota-fleet mcp config` に HTTP 形式の接続スニペット出力を追加する（URL と環境変数参照のトークン。トークン値そのものは出力しない）。
 
 ## 5. ツール面

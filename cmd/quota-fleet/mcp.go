@@ -21,6 +21,7 @@ const (
 	mcpFormatAll        = "all"
 	mcpFormatClaudeCode = "claude-code"
 	mcpFormatJSON       = "json"
+	mcpFormatHTTP       = "http"
 
 	mcpTokenEnvRef = "${QUOTA_FLEET_TOKEN}"
 )
@@ -68,7 +69,7 @@ func runMCPServeContext(ctx context.Context, transport mcp.Transport, stderr io.
 func printMCPUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  quota-fleet mcp")
-	fmt.Fprintln(w, "  quota-fleet mcp config [--format all|claude-code|json] [--url http://127.0.0.1:8737] [--binary quota-fleet]")
+	fmt.Fprintln(w, "  quota-fleet mcp config [--format all|claude-code|json|http] [--url http://127.0.0.1:8737] [--binary quota-fleet]")
 }
 
 func resolveDefaultAPIURL() string {
@@ -87,7 +88,7 @@ func runMCPConfig(args []string, stdout, stderr io.Writer) int {
 		apiURL string
 		binary string
 	)
-	fs.StringVar(&format, "format", mcpFormatAll, "output format: all, claude-code, or json")
+	fs.StringVar(&format, "format", mcpFormatAll, "output format: all, claude-code, json, or http")
 	fs.StringVar(&apiURL, "url", resolveDefaultAPIURL(), "quota-fleet HTTP API URL")
 	fs.StringVar(&binary, "binary", "quota-fleet", "path or name of the quota-fleet binary")
 
@@ -118,6 +119,12 @@ func runMCPConfig(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "mcp config failed: %v\n", err)
 			return 1
 		}
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "# Streamable HTTP (requires api.mcp_http: true on the server):")
+		if err := writeHTTPMCPSnippet(stdout, apiURL); err != nil {
+			fmt.Fprintf(stderr, "mcp config failed: %v\n", err)
+			return 1
+		}
 		return 0
 	case mcpFormatClaudeCode:
 		writeClaudeCodeMCPSnippet(stdout, apiURL, binary)
@@ -128,8 +135,14 @@ func runMCPConfig(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case mcpFormatHTTP:
+		if err := writeHTTPMCPSnippet(stdout, apiURL); err != nil {
+			fmt.Fprintf(stderr, "mcp config failed: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
-		fmt.Fprintf(stderr, "mcp config failed: unsupported --format %q (allowed: all, claude-code, json)\n", format)
+		fmt.Fprintf(stderr, "mcp config failed: unsupported --format %q (allowed: all, claude-code, json, http)\n", format)
 		return 1
 	}
 }
@@ -161,6 +174,34 @@ func writeGenericJSONMCPSnippet(w io.Writer, apiURL, binary string) error {
 					"QUOTA_FLEET_API_URL": apiURL,
 					"QUOTA_FLEET_TOKEN":   mcpTokenEnvRef,
 				},
+			},
+		},
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc.Encode(payload)
+}
+
+type mcpHTTPClientConfigJSON struct {
+	MCPServers map[string]mcpHTTPServerEntryJSON `json:"mcpServers"`
+}
+
+type mcpHTTPServerEntryJSON struct {
+	Type    string            `json:"type"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
+// writeHTTPMCPSnippet prints a Streamable HTTP client entry. The token is only an
+// environment variable reference; its value is never printed.
+func writeHTTPMCPSnippet(w io.Writer, apiURL string) error {
+	payload := mcpHTTPClientConfigJSON{
+		MCPServers: map[string]mcpHTTPServerEntryJSON{
+			"quota-fleet": {
+				Type:    "http",
+				URL:     strings.TrimRight(apiURL, "/") + "/mcp",
+				Headers: map[string]string{"Authorization": "Bearer " + mcpTokenEnvRef},
 			},
 		},
 	}

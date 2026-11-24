@@ -1213,3 +1213,46 @@ api:
 		})
 	}
 }
+
+func TestAPIMCPHTTPDefaultsFalseAndParses(t *testing.T) {
+	cfg, err := Parse([]byte("instance_id: x\n"))
+	if err != nil {
+		t.Fatalf("Parse default: %v", err)
+	}
+	if cfg.API.MCPHTTP {
+		t.Fatalf("api.mcp_http default = true, want false")
+	}
+	cfg, err = Parse([]byte("instance_id: x\napi:\n  mcp_http: true\n"))
+	if err != nil {
+		t.Fatalf("Parse enabled: %v", err)
+	}
+	if !cfg.API.MCPHTTP {
+		t.Fatalf("api.mcp_http not parsed")
+	}
+}
+
+func TestAPIMCPAllowedOriginHosts(t *testing.T) {
+	for host, ok := range map[string]bool{
+		"fleet.example.ts.net": true,
+		"100.64.0.1":           true,
+		"fd7a:115c:a1e0::1":    true,
+		"":                     false,
+		"*.ts.net":             false,
+		"https://fleet.ts.net": false,
+		"fleet.ts.net:8737":    false,
+		"[::1]":                false,
+	} {
+		cfg, err := Parse([]byte("instance_id: x\napi:\n  mcp_allowed_origin_hosts: [\"" + host + "\"]\n"))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", host, err)
+		}
+		if len(cfg.API.MCPAllowedOriginHosts) != 1 || cfg.API.MCPAllowedOriginHosts[0] != host {
+			t.Fatalf("parsed hosts = %q, want [%q]", cfg.API.MCPAllowedOriginHosts, host)
+		}
+		err = cfg.Validate()
+		rejected := err != nil && strings.Contains(err.Error(), "api.mcp_allowed_origin_hosts")
+		if rejected == ok {
+			t.Errorf("host %q: Validate err = %v, want accepted=%v", host, err, ok)
+		}
+	}
+}

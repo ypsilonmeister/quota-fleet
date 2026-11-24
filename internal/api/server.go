@@ -65,6 +65,12 @@ type Options struct {
 	Agents []string
 	// Config provides host/agent pin and manual_update policies for GET /agents.
 	Config *config.Config
+	// MCPHandler, when non-nil, is mounted at /mcp behind bearer authentication (docs/13).
+	// Unlike the JSON API, /mcp never allows anonymous access: with no tokens configured it
+	// answers 401 even when RequireAuth is false.
+	// It receives the authenticated API handler so tool calls re-enter the normal API path
+	// (scope enforcement and created_by recording) with the caller's own token.
+	MCPHandler func(backend http.Handler) http.Handler
 	// GateReleaser handles POST /gate/held/{id}/release via immediate quota re-evaluation.
 	GateReleaser GateReleaser
 	// AgentChecker handles POST /agents/check via immediate host×agent version probing.
@@ -255,6 +261,11 @@ func NewServer(st *store.Store, opts Options) *Server {
 	rootMux.Handle("/ui", uiHandler)
 	rootMux.Handle("/ui/", uiHandler)
 	// All JSON API endpoints remain protected by authMiddleware.
+	if opts.MCPHandler != nil {
+		mcpHandler := s.requireTokenAuth(opts.MCPHandler(apiHandler))
+		rootMux.Handle("/mcp", mcpHandler)
+		rootMux.Handle("/mcp/", mcpHandler)
+	}
 	rootMux.Handle("/", apiHandler)
 
 	s.handler = rootMux
@@ -313,6 +324,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			scopeSet: matched.scopeSet,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// requireTokenAuth is authMiddleware without the anonymous fallback: when no tokens are
+// configured every request is rejected.
+func (s *Server) requireTokenAuth(next http.Handler) http.Handler {
+	if len(s.tokens) > 0 {
+		return s.authMiddleware(next)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusUnauthorized, "unauthorized: server api token is not configured")
 	})
 }
 
