@@ -234,13 +234,16 @@ func (p *Prober) probeAgy(ctx context.Context, fa adapter.FileAccess, hostName s
 	}
 	isWin := strings.EqualFold(strings.TrimSpace(hostCfg.OS), "windows")
 
+	probeCtx, cancel := context.WithTimeout(ctx, p.probeTimeout)
+	defer cancel()
+
 	// Primary path: structured JSON output (`agy --output-format json models`),
 	// non-TTY with stdout and stderr strictly separated.
-	items, jsonErr := p.probeAgyJSON(ctx, fa, driver, isWin)
+	items, jsonErr := p.probeAgyJSON(probeCtx, fa, driver, isWin)
 	if jsonErr == nil {
 		return items, nil
 	}
-	if ctx.Err() != nil {
+	if probeCtx.Err() != nil {
 		return nil, jsonErr
 	}
 
@@ -248,7 +251,7 @@ func (p *Prober) probeAgy(ctx context.Context, fa adapter.FileAccess, hostName s
 
 	// Fallback path: legacy `agy models`, non-TTY with stdout and stderr strictly separated,
 	// parsing stdout as 2-column TSV (<id>\t<label>).
-	items, tsvErr := p.probeAgyTSV(ctx, fa, driver, isWin)
+	items, tsvErr := p.probeAgyTSV(probeCtx, fa, driver, isWin)
 	if tsvErr == nil {
 		return items, nil
 	}
@@ -261,10 +264,7 @@ func (p *Prober) probeAgyJSON(ctx context.Context, fa adapter.FileAccess, driver
 		return nil, fmt.Errorf("build agy json models command: %w", err)
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, p.probeTimeout)
-	defer cancel()
-
-	res, runErr := fa.RunCommand(probeCtx, cmd)
+	res, runErr := fa.RunCommand(ctx, cmd)
 	if runErr != nil {
 		return nil, fmt.Errorf("run agy --output-format json models: %w", runErr)
 	}
@@ -280,15 +280,15 @@ func (p *Prober) probeAgyTSV(ctx context.Context, fa adapter.FileAccess, driver 
 		return nil, fmt.Errorf("build agy models command: %w", err)
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, p.probeTimeout)
-	defer cancel()
-
-	res, runErr := fa.RunCommand(probeCtx, cmd)
+	res, runErr := fa.RunCommand(ctx, cmd)
 	if runErr != nil {
 		return nil, fmt.Errorf("run agy models: %w", runErr)
 	}
 	if res.ExitCode != 0 {
 		return nil, formatAgyExitError("agy models", res)
+	}
+	if err := ValidateAgyTSVStderr(res.Stderr); err != nil {
+		return nil, err
 	}
 	return ParseAgyModelsTSV(res.Stdout)
 }

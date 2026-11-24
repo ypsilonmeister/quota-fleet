@@ -183,6 +183,45 @@ func TestParseAgyModelsTSV(t *testing.T) {
 	}
 }
 
+func TestValidateAgyTSVStderr(t *testing.T) {
+	okCases := []struct {
+		name   string
+		stderr string
+	}{
+		{name: "empty", stderr: ""},
+		{name: "whitespace only", stderr: " \n\r\n\t "},
+		{name: "known non-tty progress", stderr: "Fetching available models...\n"},
+		{name: "crlf progress", stderr: "Fetching available models...\r\n"},
+		{name: "spinner and ansi progress", stderr: "\r⠋ Fetching available models...\r\x1b[KFetching available models...\n"},
+	}
+	for _, tc := range okCases {
+		t.Run("ok/"+tc.name, func(t *testing.T) {
+			if err := ValidateAgyTSVStderr(tc.stderr); err != nil {
+				t.Errorf("ValidateAgyTSVStderr(%q) = %v, want nil", tc.stderr, err)
+			}
+		})
+	}
+
+	errCases := []struct {
+		name   string
+		stderr string
+	}{
+		{name: "interrupted", stderr: "Catalog retrieval interrupted\n"},
+		{name: "progress then interrupted", stderr: "Fetching available models...\nCatalog retrieval interrupted\n"},
+		{name: "progress with trailing failure", stderr: "Fetching available models... failed\n"},
+		{name: "warning", stderr: "Warning: partial list\n"},
+		{name: "non-ascii error", stderr: "エラー: モデル一覧の取得に失敗しました\n"},
+		{name: "cr overwritten diagnostic", stderr: "Catalog retrieval interrupted\rFetching available models...\n"},
+	}
+	for _, tc := range errCases {
+		t.Run("err/"+tc.name, func(t *testing.T) {
+			if err := ValidateAgyTSVStderr(tc.stderr); err == nil {
+				t.Errorf("ValidateAgyTSVStderr(%q) = nil, want error", tc.stderr)
+			}
+		})
+	}
+}
+
 func TestProberAgyJSONPrimaryAndSeparatedStreams(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-json-primary"})
@@ -466,6 +505,217 @@ func TestProberAgyPreservesCatalogAndLogsWhenBothJSONAndTSVFail(t *testing.T) {
 	if !strings.Contains(logged, "agy probe failed for ubuntu/agy") {
 		t.Errorf("expected explicit failure log for ubuntu/agy, got %q", logged)
 	}
+}
+
+func TestProberAgyTSVRejectsUnexpectedStderrAndPreservesCatalog(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-tsv-stderr"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		InstanceID: "agy-tsv-stderr",
+		Hosts: map[string]config.HostConfig{
+			"ubuntu": {
+				OS: "linux",
+				Agents: map[string]config.HostAgentOverride{
+					"agy": {},
+				},
+			},
+		},
+	}
+
+	interrupted := false
+	provider := &fakeHostProvider{
+		hosts: map[string]adapter.FileAccess{
+			"ubuntu": &fakeFileAccess{
+				runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+					if !interrupted && strings.Contains(cmd, "--output-format json models") {
+						return adapter.ExecResult{
+							ExitCode: 0,
+							Stdout:   `{"status":"SUCCESS","command":{"name":"models","data":{"models":[{"id":"gemini-4-neon-medium","label":"Gemini 4 Neon (Medium)"},{"id":"claude-opus-5-5-high","label":"Claude Opus 5.5 (High)"}]}}}`,
+							Stderr:   "Fetching available models...\n",
+						}, nil
+					}
+					if strings.Contains(cmd, "--output-format json models") {
+						return adapter.ExecResult{ExitCode: 2, Stderr: "unknown flag: --output-format\n"}, nil
+					}
+					// Legacy TSV path exits 0 with partial stdout and an interruption diagnostic on stderr.
+					return adapter.ExecResult{
+						ExitCode: 0,
+						Stdout:   "gemini-4-neon-medium\tGemini\n",
+						Stderr:   "Fetching available models...\nCatalog retrieval interrupted\n",
+					}, nil
+				},
+			},
+		},
+	}
+
+	var logBuf bytes.Buffer
+	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	now := t1
+	prober, err := NewProber(ProberOptions{
+		Store:    st,
+		Config:   cfg,
+		Provider: provider,
+		Now:      func() time.Time { return now },
+		Logger:   log.New(&logBuf, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewProber: %v", err)
+	}
+
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("first Probe: %v", err)
+	}
+
+	interrupted = true
+	now = t1.Add(24 * time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("second Probe: %v", err)
+	}
+
+	got, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels: %v", err)
+	}
+	if got.Status != store.AgentModelStatusError {
+		t.Errorf("status = %q, want error", got.Status)
+	}
+	if !strings.Contains(got.ErrorDetail, "Catalog retrieval interrupted") {
+		t.Errorf("error_detail = %q, want stderr diagnostic recorded", got.ErrorDetail)
+	}
+	if len(got.Models) != 2 || got.Models[0].ID != "gemini-4-neon-medium" || got.Models[1].ID != "claude-opus-5-5-high" {
+		t.Errorf("previous catalog was NOT preserved: %+v", got.Models)
+	}
+	if got.UpdatedAt == nil || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("updated_at = %v, want preserved %v", got.UpdatedAt, t1)
+	}
+	if !strings.Contains(logBuf.String(), "Catalog retrieval interrupted") {
+		t.Errorf("expected interruption diagnostic in logs, got %q", logBuf.String())
+	}
+}
+
+func TestProberAgySharesProbeTimeoutAcrossJSONAndTSV(t *testing.T) {
+	t.Run("json timeout stops before tsv fallback", func(t *testing.T) {
+		ctx := context.Background()
+		st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-timeout-stop"})
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		defer st.Close()
+
+		cfg := &config.Config{
+			InstanceID: "agy-timeout-stop",
+			Hosts: map[string]config.HostConfig{
+				"ubuntu": {
+					OS: "linux",
+					Agents: map[string]config.HostAgentOverride{
+						"agy": {},
+					},
+				},
+			},
+		}
+
+		var cmds []string
+		provider := &fakeHostProvider{
+			hosts: map[string]adapter.FileAccess{
+				"ubuntu": &fakeFileAccess{
+					runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+						cmds = append(cmds, cmd)
+						<-ctx.Done()
+						return adapter.ExecResult{}, ctx.Err()
+					},
+				},
+			},
+		}
+
+		prober, err := NewProber(ProberOptions{
+			Store:        st,
+			Config:       cfg,
+			Provider:     provider,
+			ProbeTimeout: 50 * time.Millisecond,
+			Logger:       log.New(io.Discard, "", 0),
+		})
+		if err != nil {
+			t.Fatalf("NewProber: %v", err)
+		}
+
+		if err := prober.Probe(ctx); err != nil {
+			t.Fatalf("Probe: %v", err)
+		}
+		if len(cmds) != 1 {
+			t.Fatalf("expected TSV fallback not to run after shared timeout expired, got %d commands: %v", len(cmds), cmds)
+		}
+	})
+
+	t.Run("json and tsv share the same deadline", func(t *testing.T) {
+		ctx := context.Background()
+		st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-timeout-share"})
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		defer st.Close()
+
+		cfg := &config.Config{
+			InstanceID: "agy-timeout-share",
+			Hosts: map[string]config.HostConfig{
+				"ubuntu": {
+					OS: "linux",
+					Agents: map[string]config.HostAgentOverride{
+						"agy": {},
+					},
+				},
+			},
+		}
+
+		var deadlines []time.Time
+		provider := &fakeHostProvider{
+			hosts: map[string]adapter.FileAccess{
+				"ubuntu": &fakeFileAccess{
+					runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+						dl, ok := ctx.Deadline()
+						if !ok {
+							t.Errorf("expected context deadline for %q", cmd)
+						}
+						deadlines = append(deadlines, dl)
+						if strings.Contains(cmd, "--output-format json models") {
+							time.Sleep(15 * time.Millisecond)
+							return adapter.ExecResult{ExitCode: 2, Stderr: "unknown flag: --output-format\n"}, nil
+						}
+						return adapter.ExecResult{
+							ExitCode: 0,
+							Stdout:   "gemini-4-neon-medium\tGemini 4 Neon (Medium)\n",
+							Stderr:   "Fetching available models...\n",
+						}, nil
+					},
+				},
+			},
+		}
+
+		prober, err := NewProber(ProberOptions{
+			Store:        st,
+			Config:       cfg,
+			Provider:     provider,
+			ProbeTimeout: 500 * time.Millisecond,
+			Logger:       log.New(io.Discard, "", 0),
+		})
+		if err != nil {
+			t.Fatalf("NewProber: %v", err)
+		}
+
+		if err := prober.Probe(ctx); err != nil {
+			t.Fatalf("Probe: %v", err)
+		}
+		if len(deadlines) != 2 {
+			t.Fatalf("expected 2 commands, got %d", len(deadlines))
+		}
+		if !deadlines[0].Equal(deadlines[1]) {
+			t.Errorf("JSON deadline (%v) and TSV deadline (%v) must match (shared per-host/agent timeout)", deadlines[0], deadlines[1])
+		}
+	})
 }
 
 func TestParseCodexModelsCache(t *testing.T) {

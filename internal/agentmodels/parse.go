@@ -4,13 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
+
+var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
 
 type agyModelsJSONEnvelope struct {
 	Status  string                `json:"status"`
@@ -81,6 +85,36 @@ func ParseAgyModelsJSON(data []byte) ([]store.AgentModelItem, error) {
 		return nil, errors.New("agy models json contained no valid models")
 	}
 	return items, nil
+}
+
+// ValidateAgyTSVStderr checks stderr from a legacy non-TTY `agy models` invocation.
+// On success, `agy models` writes nothing or only its known progress line
+// ("Fetching available models..."). Any other non-empty stderr segment is treated
+// as an error so partial stdout from an interrupted fetch does not overwrite a
+// previously stored catalog.
+func ValidateAgyTSVStderr(stderr string) error {
+	for _, rawLine := range strings.Split(stderr, "\n") {
+		clean := ansiEscapeRe.ReplaceAllString(rawLine, "")
+		for _, part := range strings.Split(clean, "\r") {
+			seg := strings.TrimSpace(part)
+			if seg == "" {
+				continue
+			}
+			if isKnownAgyProgressLine(seg) {
+				continue
+			}
+			return fmt.Errorf("agy models wrote unexpected stderr output: %q", seg)
+		}
+	}
+	return nil
+}
+
+func isKnownAgyProgressLine(line string) bool {
+	trimmed := line
+	if r, size := utf8.DecodeRuneInString(trimmed); r >= 0x2800 && r <= 0x28FF {
+		trimmed = strings.TrimSpace(trimmed[size:])
+	}
+	return strings.EqualFold(trimmed, "Fetching available models...")
 }
 
 // ParseAgyModelsTSV parses the non-TTY stdout of legacy `agy models`, where each non-empty line
