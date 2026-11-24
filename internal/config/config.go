@@ -434,6 +434,8 @@ type APIConfig struct {
 	// MCPAllowedOriginHosts lists host names (no scheme or port), in addition to loopback,
 	// whose Origin header /mcp accepts, e.g. the server's tailnet host name.
 	MCPAllowedOriginHosts []string `yaml:"mcp_allowed_origin_hosts"`
+	// JobEvents enables the job status SSE endpoint at GET /events (docs/14). Default false.
+	JobEvents bool `yaml:"job_events"`
 }
 
 // HasAuthTokens reports whether any legacy or named API token is configured.

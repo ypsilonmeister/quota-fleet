@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-//go:embed index.html assets/style.css assets/direction.js assets/app.js
+//go:embed index.html assets/style.css assets/direction.js assets/notify.js assets/app.js
 var assetsFS embed.FS
 
 // ContentSecurityPolicy is the strict CSP header attached to UI shell and static asset responses.
@@ -15,6 +15,7 @@ var (
 	indexHTML   []byte
 	styleCSS    []byte
 	directionJS []byte
+	notifyJS    []byte
 	appJS       []byte
 )
 
@@ -28,6 +29,9 @@ func init() {
 	}
 	if directionJS, err = assetsFS.ReadFile("assets/direction.js"); err != nil {
 		panic("ui: read embedded assets/direction.js: " + err.Error())
+	}
+	if notifyJS, err = assetsFS.ReadFile("assets/notify.js"); err != nil {
+		panic("ui: read embedded assets/notify.js: " + err.Error())
 	}
 	if appJS, err = assetsFS.ReadFile("assets/app.js"); err != nil {
 		panic("ui: read embedded assets/app.js: " + err.Error())
@@ -77,6 +81,14 @@ func NewHandler() http.Handler {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(directionJS)
+	})
+
+	mux.HandleFunc("GET /ui/assets/notify.js", func(w http.ResponseWriter, r *http.Request) {
+		setCommonHeaders(w)
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(notifyJS)
 	})
 
 	mux.HandleFunc("GET /ui/assets/app.js", func(w http.ResponseWriter, r *http.Request) {

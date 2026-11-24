@@ -42,6 +42,9 @@ func TestUIShellRoutesReturn200WithStrictCSP(t *testing.T) {
 			if !strings.Contains(body, `src="/ui/assets/direction.js"`) {
 				t.Errorf("GET %s body missing direction.js reference", path)
 			}
+			if !strings.Contains(body, `src="/ui/assets/notify.js"`) {
+				t.Errorf("GET %s body missing notify.js reference", path)
+			}
 			if !strings.Contains(body, `src="/ui/assets/app.js"`) {
 				t.Errorf("GET %s body missing app.js reference", path)
 			}
@@ -73,6 +76,7 @@ func TestUIRedirectAndAssetsAndNotFound(t *testing.T) {
 	}{
 		{path: "/ui/assets/style.css", wantCT: "text/css"},
 		{path: "/ui/assets/direction.js", wantCT: "application/javascript"},
+		{path: "/ui/assets/notify.js", wantCT: "application/javascript"},
 		{path: "/ui/assets/app.js", wantCT: "application/javascript"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
@@ -120,6 +124,7 @@ func TestUIShellAndAssetsFollowSecurityRules(t *testing.T) {
 		src  string
 	}{
 		{name: "direction.js", src: string(directionJS)},
+		{name: "notify.js", src: string(notifyJS)},
 		{name: "app.js", src: string(appJS)},
 	} {
 		for _, forbidden := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"} {

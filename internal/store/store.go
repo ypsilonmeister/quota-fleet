@@ -40,6 +40,7 @@ type Store struct {
 	readDB     *sql.DB
 	sharedDB   bool
 	instanceID string
+	events     jobEventHub
 }
 
 // Open opens (or creates) the SQLite database at dbPath, enables WAL mode and
@@ -182,6 +183,7 @@ func initPragmas(ctx context.Context, db *sql.DB, busyMS int, isMem bool) error 
 
 // Close closes the underlying database connections.
 func (s *Store) Close() error {
+	s.CloseJobEvents()
 	var errs []error
 	if !s.sharedDB && s.readDB != nil {
 		if err := s.readDB.Close(); err != nil {
@@ -296,7 +298,7 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 		created bool
 	)
 
-	err = s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err = s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		// Idempotency check by request_id.
 		existing, err := queryJobByRequestID(ctx, conn, p.RequestID)
 		if err == nil {
@@ -390,6 +392,7 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 		}
 		result = job
 		created = true
+		*changes = append(*changes, statusChange{jobID: jobID, next: status})
 		return nil
 	})
 	if err != nil {
@@ -407,7 +410,7 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 
 	var claimed *Job
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		var currentClaimed int
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE status = 'claimed'`).Scan(&currentClaimed); err != nil {
 			return err
@@ -464,6 +467,7 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 			return err
 		}
 		claimed = job
+		*changes = append(*changes, statusChange{jobID: candidateID, prev: StatusQueued, next: StatusClaimed})
 		return nil
 	})
 	if err != nil {
@@ -482,7 +486,7 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Job, bool, error) {
 	var claimed *Job
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		var statusStr string
 		err := conn.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, jobID).Scan(&statusStr)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -541,6 +545,7 @@ func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Jo
 			return err
 		}
 		claimed = job
+		*changes = append(*changes, statusChange{jobID: jobID, prev: StatusQueued, next: StatusClaimed})
 		return nil
 	})
 	if err != nil {
@@ -557,7 +562,7 @@ func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Jo
 func (s *Store) Complete(ctx context.Context, jobID int64, claimToken, resultText string) (*CompleteResult, error) {
 	var out CompleteResult
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
 
 		res, err := conn.ExecContext(ctx, `
@@ -581,6 +586,8 @@ func (s *Store) Complete(ctx context.Context, jobID int64, claimToken, resultTex
 		if _, err := conn.ExecContext(ctx, `DELETE FROM leases WHERE job_id = ?`, jobID); err != nil {
 			return err
 		}
+
+		*changes = append(*changes, statusChange{jobID: jobID, prev: StatusClaimed, next: StatusDone})
 
 		// Promote direct waiting children to queued.
 		childIDs, err := listDirectWaitingChildren(ctx, conn, jobID)
@@ -606,6 +613,7 @@ func (s *Store) Complete(ctx context.Context, jobID int64, claimToken, resultTex
 					return err
 				}
 				out.PromotedChildIDs = append(out.PromotedChildIDs, cid)
+				*changes = append(*changes, statusChange{jobID: cid, prev: StatusWaiting, next: StatusQueued})
 			}
 		}
 
@@ -634,7 +642,7 @@ func (s *Store) Fail(ctx context.Context, jobID int64, claimToken, reason string
 func (s *Store) FailWithResult(ctx context.Context, jobID int64, claimToken, reason, resultText string) (*FailResult, error) {
 	var out FailResult
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
 
 		res, err := conn.ExecContext(ctx, `
@@ -666,6 +674,8 @@ func (s *Store) FailWithResult(ctx context.Context, jobID int64, claimToken, rea
 			return err
 		}
 		out.CancelledChildIDs = cancelledIDs
+		*changes = append(*changes, statusChange{jobID: jobID, prev: StatusClaimed, next: StatusFailed})
+		*changes = appendCascadeChanges(*changes, cancelledIDs)
 
 		job, err := queryJobByID(ctx, conn, jobID)
 		if err != nil {
@@ -685,8 +695,13 @@ func (s *Store) FailWithResult(ctx context.Context, jobID int64, claimToken, rea
 func (s *Store) Cancel(ctx context.Context, jobID int64, reason string) (*CancelResult, error) {
 	var out CancelResult
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
+
+		prev, err := queryJobStatus(ctx, conn, jobID)
+		if err != nil {
+			return err
+		}
 
 		res, err := conn.ExecContext(ctx, `
 			UPDATE jobs
@@ -712,6 +727,8 @@ func (s *Store) Cancel(ctx context.Context, jobID int64, reason string) (*Cancel
 			return err
 		}
 		out.CancelledChildIDs = cancelledIDs
+		*changes = append(*changes, statusChange{jobID: jobID, prev: prev, next: StatusCancelled})
+		*changes = appendCascadeChanges(*changes, cancelledIDs)
 
 		job, err := queryJobByID(ctx, conn, jobID)
 		if err != nil {
@@ -731,7 +748,7 @@ func (s *Store) Cancel(ctx context.Context, jobID int64, reason string) (*Cancel
 func (s *Store) CancelClaimed(ctx context.Context, jobID int64, claimToken, reason string) (*CancelResult, error) {
 	var out CancelResult
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
 
 		res, err := conn.ExecContext(ctx, `
@@ -762,6 +779,8 @@ func (s *Store) CancelClaimed(ctx context.Context, jobID int64, claimToken, reas
 			return err
 		}
 		out.CancelledChildIDs = cancelledIDs
+		*changes = append(*changes, statusChange{jobID: jobID, prev: StatusClaimed, next: StatusCancelled})
+		*changes = appendCascadeChanges(*changes, cancelledIDs)
 
 		job, err := queryJobByID(ctx, conn, jobID)
 		if err != nil {
@@ -781,8 +800,13 @@ func (s *Store) CancelClaimed(ctx context.Context, jobID int64, claimToken, reas
 func (s *Store) Requeue(ctx context.Context, jobID int64) (*Job, error) {
 	var job *Job
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
+
+		prev, err := queryJobStatus(ctx, conn, jobID)
+		if err != nil {
+			return err
+		}
 
 		res, err := conn.ExecContext(ctx, `
 			UPDATE jobs
@@ -814,6 +838,7 @@ func (s *Store) Requeue(ctx context.Context, jobID int64) (*Job, error) {
 			return err
 		}
 		job = j
+		*changes = append(*changes, statusChange{jobID: jobID, prev: prev, next: StatusQueued})
 		return nil
 	})
 	if err != nil {
@@ -827,7 +852,7 @@ func (s *Store) Requeue(ctx context.Context, jobID int64) (*Job, error) {
 func (s *Store) Reset(ctx context.Context, jobID int64) (*Job, error) {
 	var job *Job
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
 
 		res, err := conn.ExecContext(ctx, `
@@ -861,6 +886,7 @@ func (s *Store) Reset(ctx context.Context, jobID int64) (*Job, error) {
 			return err
 		}
 		job = j
+		*changes = append(*changes, statusChange{jobID: jobID, prev: StatusClaimed, next: StatusQueued})
 		return nil
 	})
 	if err != nil {
@@ -873,7 +899,7 @@ func (s *Store) Reset(ctx context.Context, jobID int64) (*Job, error) {
 func (s *Store) RejectInvalid(ctx context.Context, jobID int64, reason string) (*FailResult, error) {
 	var out FailResult
 
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
 
 		res, err := conn.ExecContext(ctx, `
@@ -900,6 +926,8 @@ func (s *Store) RejectInvalid(ctx context.Context, jobID int64, reason string) (
 			return err
 		}
 		out.CancelledChildIDs = cancelledIDs
+		*changes = append(*changes, statusChange{jobID: jobID, prev: StatusQueued, next: StatusFailed})
+		*changes = appendCascadeChanges(*changes, cancelledIDs)
 
 		job, err := queryJobByID(ctx, conn, jobID)
 		if err != nil {
@@ -1602,13 +1630,19 @@ func scanJob(s rowScanner) (*Job, error) {
 }
 
 func (s *Store) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) error) error {
+	return s.withImmediateTxThen(ctx, fn, nil)
+}
+
+// withImmediateTxThen runs committed (when non-nil) after a successful commit, before the
+// write connection is released to the next writer.
+func (s *Store) withImmediateTxThen(ctx context.Context, fn func(conn *sql.Conn) error, committed func(conn *sql.Conn)) error {
 	var lastErr error
 	for attempt := 0; attempt < maxBusyRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		err := s.runImmediateTxOnce(ctx, fn)
+		err := s.runImmediateTxOnce(ctx, fn, committed)
 		if err == nil {
 			return nil
 		}
@@ -1632,7 +1666,7 @@ func (s *Store) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) err
 	return fmt.Errorf("sqlite busy after %d retries: %w", maxBusyRetries, lastErr)
 }
 
-func (s *Store) runImmediateTxOnce(ctx context.Context, fn func(conn *sql.Conn) error) error {
+func (s *Store) runImmediateTxOnce(ctx context.Context, fn func(conn *sql.Conn) error, committed func(conn *sql.Conn)) error {
 	conn, err := s.writeDB.Conn(ctx)
 	if err != nil {
 		return err
@@ -1651,6 +1685,9 @@ func (s *Store) runImmediateTxOnce(ctx context.Context, fn func(conn *sql.Conn) 
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		return err
+	}
+	if committed != nil {
+		committed(conn)
 	}
 	return nil
 }
@@ -1730,6 +1767,24 @@ func cascadeCancelWaitingDescendants(ctx context.Context, conn *sql.Conn, rootID
 		}
 	}
 	return cancelled, nil
+}
+
+// queryJobStatus returns the job's status, or "" when it does not exist (the following
+// guarded UPDATE then affects no rows and reports the error).
+func queryJobStatus(ctx context.Context, conn *sql.Conn, jobID int64) (Status, error) {
+	var status string
+	err := conn.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, jobID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return Status(status), err
+}
+
+func appendCascadeChanges(changes []statusChange, cancelledIDs []int64) []statusChange {
+	for _, id := range cancelledIDs {
+		changes = append(changes, statusChange{jobID: id, prev: StatusWaiting, next: StatusCancelled})
+	}
+	return changes
 }
 
 func classifyClaimedConflict(ctx context.Context, conn *sql.Conn, jobID int64, claimToken string) error {

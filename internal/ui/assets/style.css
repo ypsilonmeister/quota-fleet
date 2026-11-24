@@ -347,6 +347,19 @@ html[data-direction="ledger"] .nav-link.active {
   flex-wrap: wrap;
 }
 
+/* Job notification toggle (docs/14) */
+#btn-notify[aria-pressed="true"] {
+  background: var(--text-strong);
+  border-color: var(--text-strong);
+  color: var(--surface);
+  font-weight: 600;
+}
+
+#btn-notify.notify-problem {
+  border-style: dashed;
+  text-decoration: line-through;
+}
+
 /* Direction Switcher */
 .direction-switch {
   display: inline-flex;
