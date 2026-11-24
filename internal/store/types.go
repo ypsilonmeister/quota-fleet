@@ -162,11 +162,47 @@ func (s DeliveryStatus) Valid() bool {
 	}
 }
 
-// GateDecisionsFilter specifies optional filters for ListGateDecisionsFiltered.
+// GateDecisionsFilter specifies optional filters and cursor pagination for ListGateDecisionsPage.
 type GateDecisionsFilter struct {
 	JobID  *int64
 	HeldID string
+	Cursor int64
 	Limit  int
+}
+
+// ListGateDecisionsPage holds one page of gate_decisions results.
+type ListGateDecisionsPage struct {
+	Decisions  []*GateDecision
+	NextCursor int64
+	HasMore    bool
+}
+
+// ListDeliveriesFilter specifies filtering and cursor pagination for ListDeliveriesPage.
+type ListDeliveriesFilter struct {
+	Status DeliveryStatus
+	Cursor string
+	Limit  int
+}
+
+// ListDeliveriesPage holds one page of delivery results.
+type ListDeliveriesPage struct {
+	Jobs       []*Job
+	NextCursor string
+	HasMore    bool
+}
+
+// ListHeldJobsFilter specifies filtering and cursor pagination for ListHeldJobsPage.
+type ListHeldJobsFilter struct {
+	Status HeldStatus
+	Cursor string
+	Limit  int
+}
+
+// ListHeldJobsPage holds one page of held_jobs results.
+type ListHeldJobsPage struct {
+	Held       []*HeldJob
+	NextCursor string
+	HasMore    bool
 }
 
 // ListJobsPage holds one page of ListJobs results.

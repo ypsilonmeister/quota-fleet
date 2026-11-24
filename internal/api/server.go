@@ -663,7 +663,11 @@ func (s *Server) handleListHeldJobs(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	items, err := s.store.ListHeldJobs(r.Context(), status, limit)
+	page, err := s.store.ListHeldJobsPage(r.Context(), store.ListHeldJobsFilter{
+		Status: status,
+		Cursor: strings.TrimSpace(q.Get("cursor")),
+		Limit:  limit,
+	})
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -674,7 +678,9 @@ func (s *Server) handleListHeldJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ListHeldJobsResponse{
-		Held: toHeldJobDTOs(items),
+		Held:       toHeldJobDTOs(page.Held),
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
 	})
 }
 
@@ -776,6 +782,14 @@ func (s *Server) handleListGateDecisions(w http.ResponseWriter, r *http.Request)
 	if v := strings.TrimSpace(q.Get("held_id")); v != "" {
 		filter.HeldID = v
 	}
+	if v := strings.TrimSpace(q.Get("cursor")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid cursor %q", v))
+			return
+		}
+		filter.Cursor = n
+	}
 	if v := strings.TrimSpace(q.Get("limit")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
@@ -785,7 +799,7 @@ func (s *Server) handleListGateDecisions(w http.ResponseWriter, r *http.Request)
 		filter.Limit = n
 	}
 
-	decisions, err := s.store.ListGateDecisionsFiltered(r.Context(), filter)
+	page, err := s.store.ListGateDecisionsPage(r.Context(), filter)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -796,7 +810,9 @@ func (s *Server) handleListGateDecisions(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, ListGateDecisionsResponse{
-		Decisions: toGateDecisionDTOs(decisions),
+		Decisions:  toGateDecisionDTOs(page.Decisions),
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
 	})
 }
 
@@ -1267,7 +1283,11 @@ func (s *Server) handleDeliveries(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	jobs, err := s.store.ListDeliveries(r.Context(), status, limit)
+	page, err := s.store.ListDeliveriesPage(r.Context(), store.ListDeliveriesFilter{
+		Status: status,
+		Cursor: strings.TrimSpace(q.Get("cursor")),
+		Limit:  limit,
+	})
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -1278,7 +1298,9 @@ func (s *Server) handleDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, DeliveriesResponse{
-		Jobs: toJobDTOs(jobs),
+		Jobs:       toJobDTOs(page.Jobs),
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
 	})
 }
 

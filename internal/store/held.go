@@ -151,12 +151,27 @@ func (s *Store) GetHeldJobByRequestID(ctx context.Context, requestID string) (*H
 // ListHeldJobs returns held_jobs filtered by status, ordered oldest-first (created_at ASC, id ASC).
 // Empty status defaults to HeldStatusHeld. Pass status="all" to include all statuses.
 func (s *Store) ListHeldJobs(ctx context.Context, status HeldStatus, limit int) ([]*HeldJob, error) {
+	page, err := s.ListHeldJobsPage(ctx, ListHeldJobsFilter{
+		Status: status,
+		Limit:  limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return page.Held, nil
+}
+
+// ListHeldJobsPage returns a cursor-paginated page of held_jobs ordered oldest-first (created_at ASC, id ASC).
+// Cursor format is "<created_at RFC3339Nano>|<held_id>".
+func (s *Store) ListHeldJobsPage(ctx context.Context, filter ListHeldJobsFilter) (*ListHeldJobsPage, error) {
+	status := filter.Status
 	if status == "" {
 		status = HeldStatusHeld
 	}
 	if status != "all" && !status.Valid() {
 		return nil, fmt.Errorf("%w: invalid held status %q", ErrInvalidInput, status)
 	}
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = DefaultListLimit
 	}
@@ -165,25 +180,30 @@ func (s *Store) ListHeldJobs(ctx context.Context, status HeldStatus, limit int) 
 	}
 
 	var (
-		rows *sql.Rows
-		err  error
+		conditions []string
+		args       []any
 	)
-	if status == "all" {
-		rows, err = s.readDB.QueryContext(ctx, `
-			SELECT `+heldJobColumns+`
-			FROM held_jobs
-			ORDER BY created_at ASC, id ASC
-			LIMIT ?
-		`, limit)
-	} else {
-		rows, err = s.readDB.QueryContext(ctx, `
-			SELECT `+heldJobColumns+`
-			FROM held_jobs
-			WHERE status = ?
-			ORDER BY created_at ASC, id ASC
-			LIMIT ?
-		`, string(status), limit)
+	if status != "all" {
+		conditions = append(conditions, "status = ?")
+		args = append(args, string(status))
 	}
+	if cursor := strings.TrimSpace(filter.Cursor); cursor != "" {
+		cursorTime, cursorID, err := parseCompositeTimeStringCursor(cursor)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid cursor %q: %v", ErrInvalidInput, cursor, err)
+		}
+		conditions = append(conditions, "(created_at > ? OR (created_at = ? AND id > ?))")
+		args = append(args, cursorTime, cursorTime, cursorID)
+	}
+
+	query := `SELECT ` + heldJobColumns + ` FROM held_jobs`
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, " AND ")
+	}
+	query += ` ORDER BY created_at ASC, id ASC LIMIT ?`
+	args = append(args, limit+1)
+
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +220,18 @@ func (s *Store) ListHeldJobs(ctx context.Context, status HeldStatus, limit int) 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return out, nil
+
+	page := &ListHeldJobsPage{}
+	if len(out) > limit {
+		page.HasMore = true
+		out = out[:limit]
+	}
+	page.Held = out
+	if page.HasMore && len(out) > 0 {
+		last := out[len(out)-1]
+		page.NextCursor = formatCompositeTimeStringCursor(last.CreatedAt, last.ID)
+	}
+	return page, nil
 }
 
 // CancelHeldJob transitions a held entry from status='held' to status='cancelled' without

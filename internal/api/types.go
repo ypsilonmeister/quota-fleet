@@ -202,7 +202,9 @@ type StatusResponse struct {
 
 // DeliveriesResponse is returned by GET /deliveries.
 type DeliveriesResponse struct {
-	Jobs []*JobDTO `json:"jobs"`
+	Jobs       []*JobDTO `json:"jobs"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+	HasMore    bool      `json:"has_more"`
 }
 
 // ErrorResponse is the uniform JSON error envelope.
@@ -287,7 +289,9 @@ type HoldJobResponse struct {
 
 // ListHeldJobsResponse is returned by GET /gate/held.
 type ListHeldJobsResponse struct {
-	Held []*HeldJobDTO `json:"held"`
+	Held       []*HeldJobDTO `json:"held"`
+	NextCursor string        `json:"next_cursor,omitempty"`
+	HasMore    bool          `json:"has_more"`
 }
 
 // HeldJobActionResponse is returned by DELETE /gate/held/{id}.
@@ -362,7 +366,9 @@ func toGateDecisionDTOs(items []*store.GateDecision) []*GateDecisionDTO {
 
 // ListGateDecisionsResponse is returned by GET /gate/decisions.
 type ListGateDecisionsResponse struct {
-	Decisions []*GateDecisionDTO `json:"decisions"`
+	Decisions  []*GateDecisionDTO `json:"decisions"`
+	NextCursor int64              `json:"next_cursor,omitempty"`
+	HasMore    bool               `json:"has_more"`
 }
 
 // PoolSummaryDTO describes the current quota summary for a configured pool.
