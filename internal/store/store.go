@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +97,10 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 	if err := ensureWorktreeSpecColumn(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs.worktree_spec: %w", err)
+	}
+	if err := ensureCreatedByColumn(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs.created_by: %w", err)
 	}
 	if err := ensureHeldJobsColumns(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
@@ -344,17 +349,17 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 				request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 				instructions, acceptance_criteria, parent_id,
 				claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-				created_at, updated_at, model, pool, alt_pools, session_id
+				created_at, updated_at, model, pool, alt_pools, session_id, created_by
 			) VALUES (
 				?, ?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?,
 				'', NULL, 0, '', '', NULL,
-				?, ?, ?, ?, ?, ?
+				?, ?, ?, ?, ?, ?, ?
 			)
 		`,
 			p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
 			p.Instructions, p.AcceptanceCriteria, parentArg,
-			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID,
+			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy),
 		)
 		if err != nil {
 			if isUniqueConstraintError(err) {
@@ -1053,12 +1058,27 @@ func (s *Store) ListUndelivered(ctx context.Context, limit int) ([]*Job, error) 
 // ListDeliveries returns done and failed jobs filtered by delivery status.
 // Empty status defaults to DeliveryStatusUndelivered.
 func (s *Store) ListDeliveries(ctx context.Context, status DeliveryStatus, limit int) ([]*Job, error) {
+	page, err := s.ListDeliveriesPage(ctx, ListDeliveriesFilter{
+		Status: status,
+		Limit:  limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return page.Jobs, nil
+}
+
+// ListDeliveriesPage returns a cursor-paginated page of done/failed jobs filtered by delivery status.
+// Cursor format is "<timestamp RFC3339Nano>|<job_id>".
+func (s *Store) ListDeliveriesPage(ctx context.Context, filter ListDeliveriesFilter) (*ListDeliveriesPage, error) {
+	status := filter.Status
 	if status == "" {
 		status = DeliveryStatusUndelivered
 	}
 	if !status.Valid() {
 		return nil, fmt.Errorf("%w: invalid delivery status %q", ErrInvalidInput, status)
 	}
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = DefaultListLimit
 	}
@@ -1066,35 +1086,48 @@ func (s *Store) ListDeliveries(ctx context.Context, status DeliveryStatus, limit
 		limit = MaxListLimit
 	}
 
-	var query string
+	var (
+		conditions []string
+		args       []any
+		orderBy    string
+		timeCol    string
+		asc        bool
+	)
 	switch status {
 	case DeliveryStatusUndelivered:
-		query = `
-			SELECT ` + jobColumns + `
-			FROM jobs
-			WHERE status IN ('done', 'failed') AND delivered_at IS NULL
-			ORDER BY updated_at ASC, id ASC
-			LIMIT ?
-		`
+		conditions = append(conditions, "status IN ('done', 'failed')", "delivered_at IS NULL")
+		orderBy = "ORDER BY updated_at ASC, id ASC"
+		timeCol = "updated_at"
+		asc = true
 	case DeliveryStatusDelivered:
-		query = `
-			SELECT ` + jobColumns + `
-			FROM jobs
-			WHERE status IN ('done', 'failed') AND delivered_at IS NOT NULL
-			ORDER BY delivered_at DESC, id DESC
-			LIMIT ?
-		`
+		conditions = append(conditions, "status IN ('done', 'failed')", "delivered_at IS NOT NULL")
+		orderBy = "ORDER BY delivered_at DESC, id DESC"
+		timeCol = "delivered_at"
+		asc = false
 	case DeliveryStatusAll:
-		query = `
-			SELECT ` + jobColumns + `
-			FROM jobs
-			WHERE status IN ('done', 'failed')
-			ORDER BY updated_at DESC, id DESC
-			LIMIT ?
-		`
+		conditions = append(conditions, "status IN ('done', 'failed')")
+		orderBy = "ORDER BY updated_at DESC, id DESC"
+		timeCol = "updated_at"
+		asc = false
 	}
 
-	rows, err := s.readDB.QueryContext(ctx, query, limit)
+	if cursor := strings.TrimSpace(filter.Cursor); cursor != "" {
+		cursorTime, cursorID, err := parseCompositeTimeIDCursor(cursor)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid cursor %q: %v", ErrInvalidInput, cursor, err)
+		}
+		if asc {
+			conditions = append(conditions, fmt.Sprintf("(%s > ? OR (%s = ? AND id > ?))", timeCol, timeCol))
+		} else {
+			conditions = append(conditions, fmt.Sprintf("(%s < ? OR (%s = ? AND id < ?))", timeCol, timeCol))
+		}
+		args = append(args, cursorTime, cursorTime, cursorID)
+	}
+
+	query := `SELECT ` + jobColumns + ` FROM jobs WHERE ` + strings.Join(conditions, " AND ") + ` ` + orderBy + ` LIMIT ?`
+	args = append(args, limit+1)
+
+	rows, err := s.readDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1111,7 +1144,22 @@ func (s *Store) ListDeliveries(ctx context.Context, status DeliveryStatus, limit
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return jobs, nil
+
+	page := &ListDeliveriesPage{}
+	if len(jobs) > limit {
+		page.HasMore = true
+		jobs = jobs[:limit]
+	}
+	page.Jobs = jobs
+	if page.HasMore && len(jobs) > 0 {
+		last := jobs[len(jobs)-1]
+		cursorTS := last.UpdatedAt
+		if status == DeliveryStatusDelivered && last.DeliveredAt != nil {
+			cursorTS = *last.DeliveredAt
+		}
+		page.NextCursor = formatCompositeTimeIDCursor(cursorTS, last.ID)
+	}
+	return page, nil
 }
 
 // CountByStatus returns a map containing the count for every defined job status.
@@ -1339,12 +1387,25 @@ func (s *Store) ListGateDecisions(ctx context.Context, limit int) ([]*GateDecisi
 // ListGateDecisionsFiltered returns recorded gate decisions matching optional job_id/held_id filters,
 // ordered newest-first (id DESC).
 func (s *Store) ListGateDecisionsFiltered(ctx context.Context, filter GateDecisionsFilter) ([]*GateDecision, error) {
+	page, err := s.ListGateDecisionsPage(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	return page.Decisions, nil
+}
+
+// ListGateDecisionsPage returns a cursor-paginated page of gate decisions matching optional
+// job_id/held_id filters, ordered newest-first (id DESC). When filter.Cursor > 0, returns rows with id < cursor.
+func (s *Store) ListGateDecisionsPage(ctx context.Context, filter GateDecisionsFilter) (*ListGateDecisionsPage, error) {
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = DefaultListLimit
 	}
 	if limit > MaxListLimit {
 		limit = MaxListLimit
+	}
+	if filter.Cursor < 0 {
+		return nil, fmt.Errorf("%w: invalid cursor %d", ErrInvalidInput, filter.Cursor)
 	}
 
 	var (
@@ -1359,6 +1420,10 @@ func (s *Store) ListGateDecisionsFiltered(ctx context.Context, filter GateDecisi
 		conditions = append(conditions, "held_id = ?")
 		args = append(args, heldID)
 	}
+	if filter.Cursor > 0 {
+		conditions = append(conditions, "id < ?")
+		args = append(args, filter.Cursor)
+	}
 
 	query := `
 		SELECT
@@ -1370,7 +1435,7 @@ func (s *Store) ListGateDecisionsFiltered(ctx context.Context, filter GateDecisi
 		query += ` WHERE ` + strings.Join(conditions, " AND ")
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
+	args = append(args, limit+1)
 
 	rows, err := s.readDB.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1422,7 +1487,17 @@ func (s *Store) ListGateDecisionsFiltered(ctx context.Context, filter GateDecisi
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return decisions, nil
+
+	page := &ListGateDecisionsPage{}
+	if len(decisions) > limit {
+		page.HasMore = true
+		decisions = decisions[:limit]
+	}
+	page.Decisions = decisions
+	if page.HasMore && len(decisions) > 0 {
+		page.NextCursor = decisions[len(decisions)-1].ID
+	}
+	return page, nil
 }
 
 // --- internal helpers ---
@@ -1439,7 +1514,7 @@ const jobColumns = `
 	id, request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 	instructions, acceptance_criteria, parent_id,
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-	created_at, updated_at, model, pool, alt_pools, session_id
+	created_at, updated_at, model, pool, alt_pools, session_id, created_by
 `
 
 func queryJobByID(ctx context.Context, q queryRower, jobID int64) (*Job, error) {
@@ -1477,7 +1552,7 @@ func scanJob(s rowScanner) (*Job, error) {
 		&j.Agent, &j.Host, &j.Workdir, &worktreeSpecStr, &j.TargetRef,
 		&j.Instructions, &j.AcceptanceCriteria, &parentID,
 		&j.ClaimedBy, &claimedAt, &j.Attempts, &j.ResultText, &j.LastError, &deliveredAt,
-		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID,
+		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy,
 	)
 	if err != nil {
 		return nil, err
@@ -1745,6 +1820,14 @@ func decodeWorktreeSpec(raw string) (*WorktreeSpec, error) {
 }
 
 func ensureWorktreeSpecColumn(ctx context.Context, db *sql.DB) error {
+	return ensureJobsColumn(ctx, db, "worktree_spec", `ALTER TABLE jobs ADD COLUMN worktree_spec TEXT NOT NULL DEFAULT ''`)
+}
+
+func ensureCreatedByColumn(ctx context.Context, db *sql.DB) error {
+	return ensureJobsColumn(ctx, db, "created_by", `ALTER TABLE jobs ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`)
+}
+
+func ensureJobsColumn(ctx context.Context, db *sql.DB, colName, alterSQL string) error {
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(jobs)`)
 	if err != nil {
 		return err
@@ -1763,14 +1846,14 @@ func ensureWorktreeSpecColumn(ctx context.Context, db *sql.DB) error {
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
 			return err
 		}
-		if name == "worktree_spec" {
+		if name == colName {
 			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN worktree_spec TEXT NOT NULL DEFAULT ''`)
+	_, err = db.ExecContext(ctx, alterSQL)
 	return err
 }
 
@@ -1780,6 +1863,46 @@ func formatTime(t time.Time) string {
 
 func parseTime(s string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
+}
+
+func formatCompositeTimeIDCursor(t time.Time, id int64) string {
+	return formatTime(t) + "|" + strconv.FormatInt(id, 10)
+}
+
+func parseCompositeTimeIDCursor(cursor string) (string, int64, error) {
+	tsRaw, idRaw, ok := strings.Cut(cursor, "|")
+	if !ok || strings.Contains(idRaw, "|") {
+		return "", 0, errors.New("expected '<RFC3339Nano>|<id>'")
+	}
+	t, err := parseTime(strings.TrimSpace(tsRaw))
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid timestamp: %w", err)
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(idRaw), 10, 64)
+	if err != nil || id <= 0 {
+		return "", 0, errors.New("invalid positive integer id")
+	}
+	return formatTime(t), id, nil
+}
+
+func formatCompositeTimeStringCursor(t time.Time, id string) string {
+	return formatTime(t) + "|" + id
+}
+
+func parseCompositeTimeStringCursor(cursor string) (string, string, error) {
+	tsRaw, idRaw, ok := strings.Cut(cursor, "|")
+	if !ok || strings.Contains(idRaw, "|") {
+		return "", "", errors.New("expected '<RFC3339Nano>|<id>'")
+	}
+	t, err := parseTime(strings.TrimSpace(tsRaw))
+	if err != nil {
+		return "", "", fmt.Errorf("invalid timestamp: %w", err)
+	}
+	id := strings.TrimSpace(idRaw)
+	if id == "" {
+		return "", "", errors.New("empty id")
+	}
+	return formatTime(t), id, nil
 }
 
 func randomHex(nBytes int) (string, error) {

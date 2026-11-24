@@ -1489,3 +1489,84 @@ func TestMigratePhase31GateDecisionsSchema(t *testing.T) {
 		t.Errorf("legacy preserved decision = %+v", decs[1])
 	}
 }
+
+func TestCreatedByPersistenceAndMigration(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "created_by.db")
+
+	// Simulate an older DB whose jobs table does not yet have a created_by column.
+	st1, err := Open(ctx, dbPath, Options{InstanceID: "mig-created-by"})
+	if err != nil {
+		t.Fatalf("Open initial: %v", err)
+	}
+	_, err = st1.writeDB.ExecContext(ctx, `
+		DROP TABLE jobs;
+		CREATE TABLE jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			request_id TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL CHECK(length(trim(title)) > 0),
+			status TEXT NOT NULL CHECK(status IN ('draft','queued','claimed','waiting','done','failed','cancelled')),
+			agent TEXT NOT NULL DEFAULT '',
+			host TEXT NOT NULL DEFAULT '',
+			workdir TEXT NOT NULL DEFAULT '',
+			worktree_spec TEXT NOT NULL DEFAULT '',
+			target_ref TEXT NOT NULL DEFAULT '',
+			instructions TEXT NOT NULL DEFAULT '',
+			acceptance_criteria TEXT NOT NULL DEFAULT '',
+			parent_id INTEGER NULL REFERENCES jobs(id),
+			claimed_by TEXT NOT NULL DEFAULT '',
+			claimed_at TEXT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			result_text TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT '',
+			delivered_at TEXT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			model TEXT NOT NULL DEFAULT '',
+			pool TEXT NOT NULL DEFAULT '',
+			alt_pools TEXT NOT NULL DEFAULT '[]',
+			session_id TEXT NOT NULL DEFAULT ''
+		);
+		INSERT INTO jobs (request_id, title, status, created_at, updated_at)
+		VALUES ('pre-mig-1', 'Existing Job', 'queued', '2026-11-23T00:00:00Z', '2026-11-23T00:00:00Z');
+	`)
+	if err != nil {
+		t.Fatalf("create pre-migration jobs table: %v", err)
+	}
+	_ = st1.Close()
+
+	// Re-open: migration adds created_by column with default ''.
+	st2, err := Open(ctx, dbPath, Options{InstanceID: "mig-created-by"})
+	if err != nil {
+		t.Fatalf("Open migrated: %v", err)
+	}
+	defer st2.Close()
+
+	legacyJob, err := st2.GetJobByRequestID(ctx, "pre-mig-1")
+	if err != nil {
+		t.Fatalf("GetJobByRequestID(pre-mig-1): %v", err)
+	}
+	if legacyJob.CreatedBy != "" {
+		t.Errorf("existing job CreatedBy = %q, want empty", legacyJob.CreatedBy)
+	}
+
+	newJob, created, err := st2.CreateJob(ctx, CreateJobParams{
+		RequestID: "post-mig-1",
+		Title:     "New Audited Job",
+		CreatedBy: "mcp-register",
+	})
+	if err != nil || !created {
+		t.Fatalf("CreateJob = (%+v, %v, %v)", newJob, created, err)
+	}
+	if newJob.CreatedBy != "mcp-register" {
+		t.Errorf("newJob.CreatedBy = %q, want %q", newJob.CreatedBy, "mcp-register")
+	}
+
+	got, err := st2.GetJob(ctx, newJob.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.CreatedBy != "mcp-register" {
+		t.Errorf("GetJob.CreatedBy = %q, want %q", got.CreatedBy, "mcp-register")
+	}
+}

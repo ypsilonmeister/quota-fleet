@@ -50,6 +50,7 @@ type Options struct {
 	InstanceID  string
 	MaxClaimed  int
 	Token       string
+	Tokens      []config.APITokenConfig
 	RequireAuth bool
 	Logger      *log.Logger
 
@@ -74,12 +75,53 @@ type Options struct {
 	SnapshotLoader func() (*quota.Snapshot, error)
 }
 
+type apiToken struct {
+	name     string
+	token    string
+	scopes   []string
+	scopeSet map[string]struct{}
+}
+
+type authContextKey struct{}
+
+type authPrincipal struct {
+	name     string
+	scopes   []string
+	scopeSet map[string]struct{}
+}
+
+func (p authPrincipal) hasScope(scope string) bool {
+	_, ok := p.scopeSet[scope]
+	return ok
+}
+
+func authPrincipalFromContext(ctx context.Context) (authPrincipal, bool) {
+	p, ok := ctx.Value(authContextKey{}).(authPrincipal)
+	return p, ok
+}
+
+func normalizeScopes(scopes []string) ([]string, map[string]struct{}) {
+	rawSet := make(map[string]struct{}, len(scopes))
+	for _, sc := range scopes {
+		if config.ValidAPIScope(sc) {
+			rawSet[sc] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(rawSet))
+	for _, sc := range config.AllAPIScopes {
+		if _, ok := rawSet[sc]; ok {
+			out = append(out, sc)
+		}
+	}
+	return out, rawSet
+}
+
 // Server exposes the quota-fleet Job Store over an HTTP JSON API.
 type Server struct {
 	store           *store.Store
 	instanceID      string
 	maxClaimed      int
-	token           string
+	tokens          []apiToken
 	requireAuth     bool
 	logger          *log.Logger
 	gateMode        string
@@ -133,11 +175,34 @@ func NewServer(st *store.Store, opts Options) *Server {
 		agentNames = append(agentNames, opts.Config.AllAgents()...)
 	}
 
+	tokens := make([]apiToken, 0, len(opts.Tokens)+1)
+	if opts.Token != "" {
+		allScopes, allScopeSet := normalizeScopes(config.AllAPIScopes)
+		tokens = append(tokens, apiToken{
+			name:     config.LegacyTokenName,
+			token:    opts.Token,
+			scopes:   allScopes,
+			scopeSet: allScopeSet,
+		})
+	}
+	for _, t := range opts.Tokens {
+		if t.Token == "" {
+			continue
+		}
+		sc, scSet := normalizeScopes(t.Scopes)
+		tokens = append(tokens, apiToken{
+			name:     strings.TrimSpace(t.Name),
+			token:    t.Token,
+			scopes:   sc,
+			scopeSet: scSet,
+		})
+	}
+
 	s := &Server{
 		store:           st,
 		instanceID:      opts.InstanceID,
 		maxClaimed:      maxClaimed,
-		token:           opts.Token,
+		tokens:          tokens,
 		requireAuth:     opts.RequireAuth,
 		logger:          logger,
 		gateMode:        gateMode,
@@ -154,33 +219,33 @@ func NewServer(st *store.Store, opts Options) *Server {
 		snapshotLoader:  opts.SnapshotLoader,
 	}
 
-	if s.token == "" && !s.requireAuth {
-		s.logger.Printf("WARNING: api.token is empty; HTTP API is running without authentication (intended for localhost only)")
+	if len(s.tokens) == 0 && !s.requireAuth {
+		s.logger.Printf("WARNING: api.token and api.tokens are empty; HTTP API is running without authentication (intended for localhost only)")
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /jobs", s.handleCreateJob)
-	mux.HandleFunc("GET /jobs", s.handleListJobs)
-	mux.HandleFunc("GET /jobs/{id}", s.handleGetJob)
-	mux.HandleFunc("POST /jobs/{id}/claim", s.handleClaimJob)
-	mux.HandleFunc("POST /jobs/{id}/complete", s.handleCompleteJob)
-	mux.HandleFunc("POST /jobs/{id}/fail", s.handleFailJob)
-	mux.HandleFunc("POST /jobs/{id}/cancel", s.handleCancelJob)
-	mux.HandleFunc("POST /jobs/{id}/cancel-claimed", s.handleCancelClaimedJob)
-	mux.HandleFunc("POST /jobs/{id}/requeue", s.handleRequeueJob)
-	mux.HandleFunc("POST /jobs/{id}/reset", s.handleResetJob)
-	mux.HandleFunc("POST /jobs/{id}/reject-invalid", s.handleRejectInvalidJob)
-	mux.HandleFunc("POST /jobs/{id}/deliver", s.handleDeliverJob)
-	mux.HandleFunc("GET /status", s.handleStatus)
-	mux.HandleFunc("GET /meta", s.handleMeta)
-	mux.HandleFunc("GET /deliveries", s.handleDeliveries)
-	mux.HandleFunc("GET /gate/held", s.handleListHeldJobs)
-	mux.HandleFunc("POST /gate/held/{id}/release", s.handleReleaseHeldJob)
-	mux.HandleFunc("DELETE /gate/held/{id}", s.handleCancelHeldJob)
-	mux.HandleFunc("GET /gate/decisions", s.handleListGateDecisions)
-	mux.HandleFunc("GET /agents", s.handleGetAgents)
-	mux.HandleFunc("GET /agents/events", s.handleListAgentEvents)
-	mux.HandleFunc("POST /agents/check", s.handleCheckAgents)
+	mux.HandleFunc("POST /jobs", s.requireScope(config.ScopeRegister, s.handleCreateJob))
+	mux.HandleFunc("GET /jobs", s.requireScope(config.ScopeRead, s.handleListJobs))
+	mux.HandleFunc("GET /jobs/{id}", s.requireScope(config.ScopeRead, s.handleGetJob))
+	mux.HandleFunc("POST /jobs/{id}/claim", s.requireScope(config.ScopeWorker, s.handleClaimJob))
+	mux.HandleFunc("POST /jobs/{id}/complete", s.requireScope(config.ScopeWorker, s.handleCompleteJob))
+	mux.HandleFunc("POST /jobs/{id}/fail", s.requireScope(config.ScopeWorker, s.handleFailJob))
+	mux.HandleFunc("POST /jobs/{id}/cancel", s.requireScope(config.ScopeOperate, s.handleCancelJob))
+	mux.HandleFunc("POST /jobs/{id}/cancel-claimed", s.requireScope(config.ScopeWorker, s.handleCancelClaimedJob))
+	mux.HandleFunc("POST /jobs/{id}/requeue", s.requireScope(config.ScopeOperate, s.handleRequeueJob))
+	mux.HandleFunc("POST /jobs/{id}/reset", s.requireScope(config.ScopeOperate, s.handleResetJob))
+	mux.HandleFunc("POST /jobs/{id}/reject-invalid", s.requireScope(config.ScopeWorker, s.handleRejectInvalidJob))
+	mux.HandleFunc("POST /jobs/{id}/deliver", s.requireScope(config.ScopeOperate, s.handleDeliverJob))
+	mux.HandleFunc("GET /status", s.requireScope(config.ScopeRead, s.handleStatus))
+	mux.HandleFunc("GET /meta", s.requireScope(config.ScopeRead, s.handleMeta))
+	mux.HandleFunc("GET /deliveries", s.requireScope(config.ScopeRead, s.handleDeliveries))
+	mux.HandleFunc("GET /gate/held", s.requireScope(config.ScopeRead, s.handleListHeldJobs))
+	mux.HandleFunc("POST /gate/held/{id}/release", s.requireScope(config.ScopeOperate, s.handleReleaseHeldJob))
+	mux.HandleFunc("DELETE /gate/held/{id}", s.requireScope(config.ScopeOperate, s.handleCancelHeldJob))
+	mux.HandleFunc("GET /gate/decisions", s.requireScope(config.ScopeRead, s.handleListGateDecisions))
+	mux.HandleFunc("GET /agents", s.requireScope(config.ScopeRead, s.handleGetAgents))
+	mux.HandleFunc("GET /agents/events", s.requireScope(config.ScopeRead, s.handleListAgentEvents))
+	mux.HandleFunc("POST /agents/check", s.requireScope(config.ScopeOperate, s.handleCheckAgents))
 
 	apiHandler := s.authMiddleware(mux)
 	uiHandler := ui.NewHandler()
@@ -207,28 +272,62 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	allScopes, allScopeSet := normalizeScopes(config.AllAPIScopes)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.token == "" {
+		if len(s.tokens) == 0 {
 			if s.requireAuth {
 				writeError(w, http.StatusUnauthorized, "unauthorized: server api token is not configured")
 				return
 			}
-			next.ServeHTTP(w, r)
+			ctx := context.WithValue(r.Context(), authContextKey{}, authPrincipal{
+				name:     "",
+				scopes:   allScopes,
+				scopeSet: allScopeSet,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
 		authHeader := r.Header.Get("Authorization")
-		scheme, token, ok := strings.Cut(authHeader, " ")
+		scheme, presented, ok := strings.Cut(authHeader, " ")
 		if !ok || !strings.EqualFold(scheme, "Bearer") {
 			writeError(w, http.StatusUnauthorized, "unauthorized: missing or invalid bearer token")
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
+
+		presentedBytes := []byte(presented)
+		var matched *apiToken
+		for i := range s.tokens {
+			if subtle.ConstantTimeCompare(presentedBytes, []byte(s.tokens[i].token)) == 1 && matched == nil {
+				matched = &s.tokens[i]
+			}
+		}
+		if matched == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized: invalid bearer token")
 			return
 		}
-		next.ServeHTTP(w, r)
+
+		ctx := context.WithValue(r.Context(), authContextKey{}, authPrincipal{
+			name:     matched.name,
+			scopes:   matched.scopes,
+			scopeSet: matched.scopeSet,
+		})
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (s *Server) requireScope(scope string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p, ok := authPrincipalFromContext(r.Context())
+		if !ok || !p.hasScope(scope) {
+			writeJSON(w, http.StatusForbidden, ForbiddenResponse{
+				Error:         fmt.Sprintf("forbidden: missing required scope %q", scope),
+				RequiredScope: scope,
+			})
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +338,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resolvedPool := s.resolveRequestPool(req)
+
+	createdBy := ""
+	if p, ok := authPrincipalFromContext(r.Context()); ok {
+		createdBy = p.name
+	}
 	params := store.CreateJobParams{
 		RequestID:          req.RequestID,
 		Title:              req.Title,
@@ -255,6 +359,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		Pool:               resolvedPool,
 		AltPools:           req.AltPools,
 		SessionID:          req.SessionID,
+		CreatedBy:          createdBy,
 	}
 
 	if s.gateMode == config.GateModeEnforce {
@@ -569,7 +674,11 @@ func (s *Server) handleListHeldJobs(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	items, err := s.store.ListHeldJobs(r.Context(), status, limit)
+	page, err := s.store.ListHeldJobsPage(r.Context(), store.ListHeldJobsFilter{
+		Status: status,
+		Cursor: strings.TrimSpace(q.Get("cursor")),
+		Limit:  limit,
+	})
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -580,7 +689,9 @@ func (s *Server) handleListHeldJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ListHeldJobsResponse{
-		Held: toHeldJobDTOs(items),
+		Held:       toHeldJobDTOs(page.Held),
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
 	})
 }
 
@@ -682,6 +793,14 @@ func (s *Server) handleListGateDecisions(w http.ResponseWriter, r *http.Request)
 	if v := strings.TrimSpace(q.Get("held_id")); v != "" {
 		filter.HeldID = v
 	}
+	if v := strings.TrimSpace(q.Get("cursor")); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid cursor %q", v))
+			return
+		}
+		filter.Cursor = n
+	}
 	if v := strings.TrimSpace(q.Get("limit")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
@@ -691,7 +810,7 @@ func (s *Server) handleListGateDecisions(w http.ResponseWriter, r *http.Request)
 		filter.Limit = n
 	}
 
-	decisions, err := s.store.ListGateDecisionsFiltered(r.Context(), filter)
+	page, err := s.store.ListGateDecisionsPage(r.Context(), filter)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -702,7 +821,9 @@ func (s *Server) handleListGateDecisions(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, ListGateDecisionsResponse{
-		Decisions: toGateDecisionDTOs(decisions),
+		Decisions:  toGateDecisionDTOs(page.Decisions),
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
 	})
 }
 
@@ -1125,6 +1246,11 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	scopes := []string{}
+	if p, ok := authPrincipalFromContext(r.Context()); ok && len(p.scopes) > 0 {
+		scopes = append([]string(nil), p.scopes...)
+	}
+
 	writeJSON(w, http.StatusOK, MetaResponse{
 		Hosts:         hosts,
 		Agents:        agents,
@@ -1135,6 +1261,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		GateMode:      s.gateMode,
 		EvaluatorMode: s.evaluatorMode,
 		PoolSummaries: summaries,
+		Scopes:        scopes,
 	})
 }
 
@@ -1268,7 +1395,11 @@ func (s *Server) handleDeliveries(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	jobs, err := s.store.ListDeliveries(r.Context(), status, limit)
+	page, err := s.store.ListDeliveriesPage(r.Context(), store.ListDeliveriesFilter{
+		Status: status,
+		Cursor: strings.TrimSpace(q.Get("cursor")),
+		Limit:  limit,
+	})
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -1279,7 +1410,9 @@ func (s *Server) handleDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, DeliveriesResponse{
-		Jobs: toJobDTOs(jobs),
+		Jobs:       toJobDTOs(page.Jobs),
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
 	})
 }
 

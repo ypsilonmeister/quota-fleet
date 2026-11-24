@@ -1,14 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/mcpserver"
 )
 
 const (
@@ -21,8 +27,9 @@ const (
 
 func runMCP(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		printMCPUsage(stderr)
-		return 1
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runMCPServeContext(ctx, &mcp.StdioTransport{}, stderr)
 	}
 
 	switch args[0] {
@@ -32,14 +39,35 @@ func runMCP(args []string, stdout, stderr io.Writer) int {
 		printMCPUsage(stdout)
 		return 0
 	default:
-		fmt.Fprintf(stderr, "unknown mcp subcommand %q (MCP server runtime is planned for Phase UI-2)\n\n", args[0])
+		fmt.Fprintf(stderr, "unknown mcp subcommand %q\n\n", args[0])
 		printMCPUsage(stderr)
 		return 1
 	}
 }
 
+func runMCPServeContext(ctx context.Context, transport mcp.Transport, stderr io.Writer) int {
+	apiURL := resolveDefaultAPIURL()
+	token := strings.TrimSpace(os.Getenv("QUOTA_FLEET_TOKEN"))
+
+	srv, err := mcpserver.NewServer(mcpserver.Options{
+		APIURL: apiURL,
+		Token:  token,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "mcp server init failed: %v\n", err)
+		return 1
+	}
+
+	if err := srv.Run(ctx, transport); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(stderr, "mcp server error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func printMCPUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  quota-fleet mcp")
 	fmt.Fprintln(w, "  quota-fleet mcp config [--format all|claude-code|json] [--url http://127.0.0.1:8737] [--binary quota-fleet]")
 }
 
