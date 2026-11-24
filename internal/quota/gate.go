@@ -431,26 +431,24 @@ func ResolvePoolByAppliesTo(pools map[string]config.PoolConfig, agent, model str
 }
 
 func matchesModelFamily(model, family string) bool {
-	m := strings.ToLower(strings.TrimSpace(model))
-	f := strings.ToLower(strings.TrimSpace(family))
-	if m == "" || f == "" {
+	canonical := ModelFamily(model)
+	if canonical == ModelFamilyUnknown {
 		return false
 	}
-	if m == f || strings.Contains(m, f) {
+	f := strings.ToLower(strings.TrimSpace(family))
+	if f == "" {
+		return false
+	}
+	if canonical == f {
 		return true
 	}
-	// Support composite family tags like "claude-gpt" by matching any component token.
+	// Support composite family tags like "claude-gpt" by matching any component token
+	// against the canonical family (e.g. "claude" or "gpt").
 	tokens := strings.FieldsFunc(f, func(r rune) bool {
 		return r == '-' || r == '/' || r == ',' || r == '_'
 	})
 	for _, tok := range tokens {
-		if len(tok) < 2 {
-			continue
-		}
-		if strings.Contains(m, tok) {
-			return true
-		}
-		if tok == "claude" && (strings.Contains(m, "sonnet") || strings.Contains(m, "opus") || strings.Contains(m, "haiku")) {
+		if tok == canonical {
 			return true
 		}
 	}

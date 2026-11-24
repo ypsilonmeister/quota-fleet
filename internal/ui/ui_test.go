@@ -741,12 +741,14 @@ func TestUIModelPickerAndPoolAutoAssetsPresent(t *testing.T) {
 	js := string(appJS)
 	for _, token := range []string{
 		"getHostsForAgent",
+		"formatNoMatchingHostNotice",
 		"getModelsForHostAgent",
 		"formatModelOptionLabel",
 		"deriveModelFamily",
 		"derivePoolForSelection",
 		"formatDerivedPoolLabel",
 		"derived-pool-display",
+		"host-empty-notice",
 		"model_select",
 		"Pool（自動判定）",
 	} {
@@ -817,6 +819,17 @@ assert.deepStrictEqual(ui.getHostsForAgent(meta, "claude"), ["home-win", "ubuntu
 assert.deepStrictEqual(ui.getHostsForAgent(meta, "codex"), ["home-win", "ubuntu"]);
 assert.deepStrictEqual(ui.getHostsForAgent(meta, ""), ["home-win", "ubuntu"]);
 
+// 1b. Zero matching hosts when host_agents is present must stay empty (not fall back to all hosts)
+const agyOnlyMeta = {
+  hosts: ["ubuntu"],
+  agents: ["agy", "claude"],
+  host_agents: { "ubuntu": ["agy"] }
+};
+assert.deepStrictEqual(ui.getHostsForAgent(agyOnlyMeta, "claude"), []);
+assert.strictEqual(ui.formatNoMatchingHostNotice("claude", []), "選択中の agent (claude) に対応するホストがありません。");
+assert.strictEqual(ui.formatNoMatchingHostNotice("agy", ["ubuntu"]), "");
+assert.strictEqual(ui.formatNoMatchingHostNotice("", []), "");
+
 // 2. Model catalog lookup per host x agent (and empty fallback when missing)
 assert.strictEqual(ui.getModelsForHostAgent(meta, "ubuntu", "agy").length, 3);
 assert.strictEqual(ui.getModelsForHostAgent(meta, "home-win", "codex").length, 1);
@@ -839,13 +852,15 @@ assert.strictEqual(ui.deriveModelFamily("claude-opus-5-5-high"), "claude");
 assert.strictEqual(ui.deriveModelFamily("gpt-oss-120b-medium"), "gpt");
 assert.strictEqual(ui.deriveModelFamily("custom-model"), "unknown");
 
-// 5. Pool auto-derivation (including agy gemini vs claude/gpt branching)
+// 5. Pool auto-derivation (including agy gemini vs claude/gpt branching via canonical family)
 assert.strictEqual(ui.derivePoolForSelection(meta, "claude", "claude-sonnet-4-6"), "claude");
 assert.strictEqual(ui.derivePoolForSelection(meta, "claude", ""), "claude");
 assert.strictEqual(ui.derivePoolForSelection(meta, "codex", "gpt-6.2-sol"), "codex");
 assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "gemini-4-carbon-medium"), "agy-gemini");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "gemini-gpt-preview"), "agy-gemini");
 assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "claude-opus-5-5-high"), "agy-3p");
 assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "gpt-oss-120b-medium"), "agy-3p");
+assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "custom-gpt-model"), "");
 assert.strictEqual(ui.derivePoolForSelection(meta, "agy", "custom-model"), "");
 assert.strictEqual(ui.derivePoolForSelection(meta, "agy", ""), "");
 

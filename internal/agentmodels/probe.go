@@ -124,10 +124,10 @@ func (p *Prober) probeOne(
 ) error {
 	switch strings.ToLower(strings.TrimSpace(agentName)) {
 	case "claude":
+		// For claude, fleet.yaml (agents.claude.models) is the source of truth.
+		// Always upsert (including an empty slice) so deleting models from config
+		// clears any previously stored snapshot.
 		items := CatalogFromConfig(p.cfg, agentName)
-		if len(items) == 0 {
-			return nil
-		}
 		return p.store.UpsertAgentModels(ctx, store.AgentModelCatalog{
 			Host:      hostName,
 			Agent:     agentName,

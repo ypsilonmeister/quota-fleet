@@ -14,13 +14,18 @@ import (
 )
 
 var (
-	ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
-	modelIDRe    = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$`)
+	ansiEscapeRe     = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+	agyModelIDRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*$`)
+	agyColSepRe      = regexp.MustCompile(`(?:\t| {2,})`)
+	agySlugMarkerRe  = regexp.MustCompile(`[-_./0-9]`)
 )
 
 // ParseAgyModelsOutput parses the stdout/combined output of `agy models` into a model catalog.
 // It tolerates terminal spinner lines separated by '\r' and ANSI escape codes, and extracts
-// `<id>   <display_name>` rows. Returns an error if no valid models are parsed.
+// `<id>   <display_name>` rows (two-column tabular output separated by 2+ spaces or a tab, or
+// a bare lowercase slug ID on its own line). Diagnostic / prose lines such as "No models available"
+// are rejected so an empty-list message never overwrites a previously stored catalog.
+// Returns an error if no valid models are parsed.
 func ParseAgyModelsOutput(output string) ([]store.AgentModelItem, error) {
 	lines := strings.Split(output, "\n")
 	seen := make(map[string]struct{})
@@ -39,12 +44,8 @@ func ParseAgyModelsOutput(output string) ([]store.AgentModelItem, error) {
 			continue
 		}
 
-		id, displayName := splitIDAndDisplayName(seg)
-		if id == "" || !modelIDRe.MatchString(id) {
-			continue
-		}
-		// Require model IDs to look like actual slugs (avoid matching prose words like "Error:").
-		if strings.HasSuffix(id, ":") {
+		id, displayName, ok := parseAgyModelRow(seg)
+		if !ok {
 			continue
 		}
 		if _, dup := seen[id]; dup {
@@ -94,7 +95,7 @@ func isSpinnerOrHeaderLine(line string) bool {
 	}
 	fields := strings.Fields(lower)
 	if len(fields) >= 2 {
-		if (fields[0] == "id" || fields[0] == "model" || fields[0] == "slug") &&
+		if (fields[0] == "id" || fields[0] == "model" || fields[0] == "model-id" || fields[0] == "model_id" || fields[0] == "slug") &&
 			(fields[1] == "name" || fields[1] == "display" || fields[1] == "display_name" || fields[1] == "description") {
 			return true
 		}
@@ -102,14 +103,42 @@ func isSpinnerOrHeaderLine(line string) bool {
 	return false
 }
 
-func splitIDAndDisplayName(line string) (string, string) {
-	idx := strings.IndexAny(line, " \t")
-	if idx < 0 {
-		return strings.TrimSpace(line), ""
+// parseAgyModelRow extracts (id, displayName, true) from a single trimmed `agy models` line.
+// Real `agy models` rows are tabular (`<slug-id>  +<display name>` or `<slug-id>\t<display name>`),
+// or a single bare slug ID. Single-space prose sentences like "No models available" are rejected.
+func parseAgyModelRow(line string) (string, string, bool) {
+	if !strings.ContainsAny(line, " \t") {
+		if isValidAgyModelID(line) {
+			return line, "", true
+		}
+		return "", "", false
 	}
-	id := strings.TrimSpace(line[:idx])
-	rest := strings.TrimSpace(line[idx:])
-	return id, rest
+	loc := agyColSepRe.FindStringIndex(line)
+	if loc == nil {
+		// Words separated only by single spaces (e.g. "No models available") are prose, not a table row.
+		return "", "", false
+	}
+	id := strings.TrimSpace(line[:loc[0]])
+	rest := strings.TrimSpace(line[loc[1]:])
+	if !isValidAgyModelID(id) {
+		return "", "", false
+	}
+	return id, rest, true
+}
+
+func isValidAgyModelID(id string) bool {
+	if id == "" || strings.ContainsAny(id, " \t") {
+		return false
+	}
+	if strings.HasSuffix(id, ":") || strings.HasSuffix(id, ".") {
+		return false
+	}
+	if !agyModelIDRe.MatchString(id) {
+		return false
+	}
+	// Require at least one slug separator or digit so plain English words ("no", "none", "empty")
+	// are never mistaken for model IDs.
+	return agySlugMarkerRe.MatchString(id)
 }
 
 type codexModelsCache struct {

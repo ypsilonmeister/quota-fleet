@@ -74,8 +74,18 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		}
 	}
 
-	if _, err := ParseAgyModelsOutput("\r⠋ Fetching available models...\n"); err == nil {
-		t.Errorf("expected error for spinner-only output")
+	for _, diag := range []string{
+		"\r⠋ Fetching available models...\n",
+		"No models available\n",
+		"no models available\n",
+		"No models found.\n",
+		"Failed to fetch models\n",
+		"Authentication required. Run agy login\n",
+		"ID   Display Name\n---\n",
+	} {
+		if got, err := ParseAgyModelsOutput(diag); err == nil {
+			t.Errorf("ParseAgyModelsOutput(%q) succeeded with %+v, want error", diag, got)
+		}
 	}
 }
 
@@ -257,5 +267,137 @@ func TestProberPersistsCatalogAndPreservesOnFailure(t *testing.T) {
 	}
 	if len(codexAfterFail.Models) != 1 || codexAfterFail.Models[0].ID != "gpt-6.2-sol" {
 		t.Errorf("previous codex catalog was NOT preserved on failure: %+v", codexAfterFail)
+	}
+}
+
+func TestProberPreservesAgyCatalogOnDiagnosticMessageWithExitZero(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-diag-test"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		InstanceID: "agy-diag-test",
+		Hosts: map[string]config.HostConfig{
+			"ubuntu": {
+				OS: "linux",
+				Agents: map[string]config.HostAgentOverride{
+					"agy": {},
+				},
+			},
+		},
+	}
+
+	output := "gemini-4-neon-medium           Gemini 4 Neon (Medium)\nclaude-opus-5-5-high           Claude Opus 5.5 (High)\n"
+	provider := &fakeHostProvider{
+		hosts: map[string]adapter.FileAccess{
+			"ubuntu": &fakeFileAccess{
+				runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+					return adapter.ExecResult{ExitCode: 0, Output: output}, nil
+				},
+			},
+		},
+	}
+
+	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	now := t1
+	prober, err := NewProber(ProberOptions{
+		Store:    st,
+		Config:   cfg,
+		Provider: provider,
+		Now:      func() time.Time { return now },
+		Logger:   log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewProber: %v", err)
+	}
+
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("first Probe: %v", err)
+	}
+
+	// Second probe exits 0 but only returns a diagnostic empty-list message.
+	output = "No models available\n"
+	now = t1.Add(24 * time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("second Probe: %v", err)
+	}
+
+	got, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels: %v", err)
+	}
+	if got.Status != store.AgentModelStatusError {
+		t.Errorf("status = %q, want error", got.Status)
+	}
+	if len(got.Models) != 2 || got.Models[0].ID != "gemini-4-neon-medium" || got.Models[1].ID != "claude-opus-5-5-high" {
+		t.Errorf("previous agy catalog must be preserved when exit-0 output is diagnostic only, got %+v", got.Models)
+	}
+	if got.UpdatedAt == nil || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("updated_at = %v, want preserved %v", got.UpdatedAt, t1)
+	}
+}
+
+func TestProberClearsClaudeCatalogWhenRemovedFromConfig(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "claude-clear-test"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		InstanceID: "claude-clear-test",
+		Hosts: map[string]config.HostConfig{
+			"ubuntu": {
+				OS: "linux",
+				Agents: map[string]config.HostAgentOverride{
+					"claude": {},
+				},
+			},
+		},
+		Agents: map[string]config.AgentConfig{
+			"claude": {
+				Models: []config.ModelConfig{
+					{ID: "claude-sonnet-4-6", DisplayName: "Claude Sonnet 4.6"},
+				},
+			},
+		},
+	}
+
+	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	now := t1
+	prober, err := NewProber(ProberOptions{
+		Store:  st,
+		Config: cfg,
+		Now:    func() time.Time { return now },
+		Logger: log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewProber: %v", err)
+	}
+
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("first Probe: %v", err)
+	}
+	first, err := st.GetAgentModels(ctx, "ubuntu", "claude")
+	if err != nil || len(first.Models) != 1 {
+		t.Fatalf("first claude catalog = %+v, err=%v", first, err)
+	}
+
+	// Remove all claude models from config and probe again.
+	cfg.Agents["claude"] = config.AgentConfig{}
+	now = t1.Add(time.Hour)
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("second Probe: %v", err)
+	}
+	second, err := st.GetAgentModels(ctx, "ubuntu", "claude")
+	if err != nil {
+		t.Fatalf("GetAgentModels after clear: %v", err)
+	}
+	if len(second.Models) != 0 {
+		t.Errorf("expected claude catalog in DB to be cleared, got %+v", second.Models)
 	}
 }

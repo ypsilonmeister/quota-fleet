@@ -1210,6 +1210,10 @@ html[data-direction="ledger"] .btn:hover:not(:disabled) {
   font-size: 12.5px;
 }
 
+.host-empty-notice {
+  color: var(--warn);
+}
+
 input[type="text"],
 input[type="password"],
 input[type="number"],

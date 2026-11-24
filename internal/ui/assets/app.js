@@ -622,14 +622,24 @@
     if (!target || !meta || !meta.host_agents || typeof meta.host_agents !== "object") {
       return allHosts.slice();
     }
-    const matched = allHosts.filter(function (h) {
+    if (Object.keys(meta.host_agents).length === 0) {
+      return allHosts.slice();
+    }
+    return allHosts.filter(function (h) {
       const list = meta.host_agents[h];
       if (!Array.isArray(list) || list.length === 0) {
         return true;
       }
       return list.includes(target);
     });
-    return matched.length > 0 ? matched : allHosts.slice();
+  }
+
+  function formatNoMatchingHostNotice(agent, filteredHosts) {
+    const a = String(agent || "").trim();
+    if (!a || (Array.isArray(filteredHosts) && filteredHosts.length > 0)) {
+      return "";
+    }
+    return "選択中の agent (" + a + ") に対応するホストがありません。";
   }
 
   function getModelsForHostAgent(meta, host, agent) {
@@ -678,23 +688,17 @@
   }
 
   function matchesModelFamily(model, family) {
-    const m = String(model || "").trim().toLowerCase();
+    const canonical = deriveModelFamily(model);
     const f = String(family || "").trim().toLowerCase();
-    if (!m || !f) {
+    if (!f || canonical === "unknown") {
       return false;
     }
-    if (m === f || m.includes(f)) {
+    if (canonical === f) {
       return true;
     }
     const tokens = f.split(/[-/,_]+/);
     for (const tok of tokens) {
-      if (tok.length < 2) {
-        continue;
-      }
-      if (m.includes(tok)) {
-        return true;
-      }
-      if (tok === "claude" && (m.includes("sonnet") || m.includes("opus") || m.includes("haiku"))) {
+      if (tok && tok === canonical) {
         return true;
       }
     }
@@ -749,6 +753,7 @@
       formatDirectChildrenFetchErrorNotice: formatDirectChildrenFetchErrorNotice,
       formatChainTruncationNotice: formatChainTruncationNotice,
       getHostsForAgent: getHostsForAgent,
+      formatNoMatchingHostNotice: formatNoMatchingHostNotice,
       getModelsForHostAgent: getModelsForHostAgent,
       formatModelOptionLabel: formatModelOptionLabel,
       deriveModelFamily: deriveModelFamily,
@@ -2092,6 +2097,11 @@
     ]);
 
     const hostSelect = el("select", { name: "host" });
+    const hostNotice = el("div", {
+      className: "host-empty-notice small",
+      "aria-live": "polite",
+      hidden: true
+    });
 
     const workdirInput = el("input", {
       type: "text",
@@ -2157,24 +2167,37 @@
     }
 
     function updateHostOptions() {
-      const filteredHosts = getHostsForAgent(state.meta, agentSelect.value);
+      const selectedAgent = agentSelect.value;
+      const filteredHosts = getHostsForAgent(state.meta, selectedAgent);
+      const notice = formatNoMatchingHostNotice(selectedAgent, filteredHosts);
       const prevHost = hostSelect.value;
-      const opts = [el("option", { value: "", text: "-- 選択 --" })];
-      let hasPrev = false;
-      for (let i = 0; i < filteredHosts.length; i += 1) {
-        const h = filteredHosts[i];
-        if (h === prevHost) {
-          hasPrev = true;
-        }
-        opts.push(el("option", { value: h, text: h }));
-      }
-      hostSelect.replaceChildren(...opts);
-      if (hasPrev) {
-        hostSelect.value = prevHost;
-      } else if (filteredHosts.length > 0) {
-        hostSelect.value = filteredHosts[0];
-      } else {
+      if (notice) {
+        hostSelect.replaceChildren(el("option", { value: "", text: "（対応ホストなし）" }));
         hostSelect.value = "";
+        hostSelect.disabled = true;
+        hostNotice.textContent = notice;
+        hostNotice.hidden = false;
+      } else {
+        const opts = [el("option", { value: "", text: "-- 選択 --" })];
+        let hasPrev = false;
+        for (let i = 0; i < filteredHosts.length; i += 1) {
+          const h = filteredHosts[i];
+          if (h === prevHost) {
+            hasPrev = true;
+          }
+          opts.push(el("option", { value: h, text: h }));
+        }
+        hostSelect.replaceChildren(...opts);
+        hostSelect.disabled = false;
+        if (hasPrev) {
+          hostSelect.value = prevHost;
+        } else if (filteredHosts.length > 0) {
+          hostSelect.value = filteredHosts[0];
+        } else {
+          hostSelect.value = "";
+        }
+        hostNotice.textContent = "";
+        hostNotice.hidden = true;
       }
       updateModelControl();
     }
@@ -2382,7 +2405,8 @@
         ]),
         el("label", { className: "field" }, [
           el("span", { className: "field-label", text: "Host" }),
-          hostSelect
+          hostSelect,
+          hostNotice
         ]),
         el("div", { className: "field" }, [
           el("span", { className: "field-label", text: "Model" }),

@@ -1165,6 +1165,11 @@ func (s *Server) buildMetaModels(ctx context.Context) map[string]map[string][]Mo
 				if row == nil || len(row.Models) == 0 {
 					continue
 				}
+				// claude's catalog is governed strictly by the current config (docs/11 §3);
+				// ignore any stale DB snapshot when config is available so deletions take effect immediately.
+				if s.cfg != nil && strings.EqualFold(strings.TrimSpace(row.Agent), "claude") {
+					continue
+				}
 				setModels(row.Host, row.Agent, row.Models)
 			}
 		} else {
