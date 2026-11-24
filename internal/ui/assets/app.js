@@ -780,7 +780,10 @@
     renderSeq: 0,
     rendering: 0,
     viewDirty: false,
-    flatPages: 1
+    flatPages: 1,
+    // The button of the latest unanswered "さらに読み込む", and the number of clicks.
+    loadMoreButton: null,
+    loadMoreSeq: 0
   };
 
   const dom = {
@@ -1164,20 +1167,28 @@
     return focused || state.viewDirty;
   }
 
+  // True while the displayed list waits for another page; redrawing it would drop that page.
+  function isLoadingMore() {
+    return Boolean(state.loadMoreButton && state.loadMoreButton.isConnected);
+  }
+
   // refreshListView redraws the current list view without a loading placeholder.
-  // It returns false when it has to be retried later (a render or user input is in progress).
+  // It returns false when it has to be retried later (a render, "load more" or user input
+  // is in progress).
   async function refreshListView() {
     const route = parseRoute(new URL(window.location.href));
     if (!LIVE_ROUTES.has(route.name) || dom.app.hidden || !hasCredentialsConfigured()) {
       return true;
     }
-    if (state.rendering > 0 || isEditingView()) {
+    if (state.rendering > 0 || isLoadingMore() || isEditingView()) {
       return false;
     }
     const seq = state.renderSeq;
+    const loadMoreSeq = state.loadMoreSeq;
     const view = {
       isStale: function () {
-        return seq !== state.renderSeq || dom.app.hidden || isEditingView();
+        return seq !== state.renderSeq || loadMoreSeq !== state.loadMoreSeq ||
+          dom.app.hidden || isEditingView();
       }
     };
     if (route.name === "dashboard") {
@@ -1187,7 +1198,8 @@
     } else {
       await renderDeliveries(route.search, view);
     }
-    return !(seq === state.renderSeq && isEditingView());
+    // Retry a refresh of this view that was dropped for "load more" or user input.
+    return !(seq === state.renderSeq && (loadMoreSeq !== state.loadMoreSeq || isEditingView()));
   }
 
   // ==================== 1. Dashboard (/ui/) ====================
@@ -1734,10 +1746,16 @@
         onClick: async function () {
           btn.disabled = true;
           btn.textContent = "読み込み中...";
+          state.loadMoreSeq += 1;
+          state.loadMoreButton = btn;
           try {
             const nextParams = new URLSearchParams(flatParams.toString());
             nextParams.set("cursor", String(nextCursor));
             const moreRes = await apiFetch("/jobs?" + nextParams.toString());
+            // The list was redrawn while waiting: this page belongs to the old one.
+            if (!btn.isConnected) {
+              return;
+            }
             if (!moreRes.ok) {
               showBanner("error", errorMessageFromResp(moreRes, "追加取得に失敗しました"));
               return;
@@ -1747,12 +1765,15 @@
             nextCursor = moreRes.data ? moreRes.data.next_cursor : 0;
             hasMore = Boolean(moreRes.data && moreRes.data.has_more);
             state.flatPages += 1;
-            state.renderSeq += 1;
             tableContainer.replaceChildren(buildJobsTable(loadedJobs, "該当するジョブはありません。"));
             updateLoadMore();
           } catch (err) {
             if (!err || err.status !== 401) {
               showBanner("error", "追加取得エラー: " + (err ? err.message : String(err)));
+            }
+          } finally {
+            if (state.loadMoreButton === btn) {
+              state.loadMoreButton = null;
             }
           }
         }
@@ -3252,6 +3273,7 @@
     getNotification: getNotificationCtor,
     isSecureContext: function () { return window.isSecureContext !== false; },
     hasCredentials: hasCredentialsConfigured,
+    hasToken: function () { return getStoredToken() !== ""; },
     createStream: function (handlers) {
       return notifyHelper.createEventStream(Object.assign({
         url: "/events",

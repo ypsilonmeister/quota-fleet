@@ -224,12 +224,13 @@ async function main() {
     const store = new Map(opts.stored ? [[n.NOTIFY_KEY, opts.stored]] : []);
     const log = { streams: [], messages: [], views: [], notified: [], listChanged: 0, unauthorized: 0 };
     const N = "notification" in opts ? opts.notification : fakeNotification("default", "granted");
-    const env = { secure: true, credentials: true };
+    const env = { secure: true, credentials: true, token: true };
     const controller = n.createNotifyController({
       storage: { getItem: k => store.has(k) ? store.get(k) : null, setItem: (k, v) => store.set(k, v) },
       getNotification: () => N,
       isSecureContext: () => env.secure,
       hasCredentials: () => env.credentials,
+      hasToken: () => env.token,
       createStream: handlers => {
         const s = { handlers, running: false, start() { this.running = true; }, stop() { this.running = false; } };
         // Like the real stream, a fatal status ends the connection before reporting it.
@@ -304,6 +305,16 @@ async function main() {
     assert.strictEqual(f.log.unauthorized, 1);
     f.controller.restart(); // new token
     assert.strictEqual(f.running(), 1);
+
+    // Without a token there is nothing to re-enter, so the auth gate stays closed.
+    f.env.token = false;
+    const messages = f.log.messages.length;
+    f.log.streams[f.log.streams.length - 1].fatal(401);
+    assert.strictEqual(f.log.unauthorized, 1, "no auth gate without a token");
+    assert.strictEqual(f.log.messages.length, messages + 1);
+    assert.ok(f.view().problem.includes("API トークンが必要"));
+    f.controller.sync();
+    assert.strictEqual(f.running(), 0, "no retry without a token");
   }
   {
     const f = controllerFixture({ notification: fakeNotification("default", "denied") });

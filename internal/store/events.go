@@ -32,6 +32,10 @@ type statusChange struct {
 // jobEventHub fans committed transitions out to in-process subscribers. The zero value is
 // ready to use.
 type jobEventHub struct {
+	// commitMu orders subscriptions against commits: a subscriber receives a transition
+	// only if it subscribed before that transition was committed.
+	commitMu sync.Mutex
+
 	mu     sync.Mutex
 	subs   map[chan JobEvent]struct{}
 	closed bool
@@ -39,6 +43,8 @@ type jobEventHub struct {
 
 func (h *jobEventHub) subscribe() (<-chan JobEvent, func()) {
 	ch := make(chan JobEvent, jobEventBuffer)
+	h.commitMu.Lock()
+	defer h.commitMu.Unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
@@ -64,17 +70,32 @@ func (h *jobEventHub) dropLocked(ch chan JobEvent) {
 	}
 }
 
-func (h *jobEventHub) hasSubscribers() bool {
+// commit runs commitTx and returns the subscribers that existed when it took effect.
+// subscribe waits meanwhile; publishing and cancelling do not.
+func (h *jobEventHub) commit(commitTx func() error) ([]chan JobEvent, error) {
+	h.commitMu.Lock()
+	defer h.commitMu.Unlock()
+	if err := commitTx(); err != nil {
+		return nil, err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return len(h.subs) > 0
+	recipients := make([]chan JobEvent, 0, len(h.subs))
+	for ch := range h.subs {
+		recipients = append(recipients, ch)
+	}
+	return recipients, nil
 }
 
-// publish never blocks: a subscriber whose buffer is full is dropped (its channel closed).
-func (h *jobEventHub) publish(ev JobEvent) {
+// publish sends ev to the recipients that are still subscribed. It never blocks: a
+// subscriber whose buffer is full is dropped (its channel closed).
+func (h *jobEventHub) publish(ev JobEvent, recipients []chan JobEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for ch := range h.subs {
+	for _, ch := range recipients {
+		if _, ok := h.subs[ch]; !ok {
+			continue
+		}
 		select {
 		case ch <- ev:
 		default:
@@ -109,19 +130,27 @@ func (s *Store) CloseJobEvents() {
 // fn appends are published to subscribers only after a successful commit.
 func (s *Store) withJobTx(ctx context.Context, fn func(conn *sql.Conn, changes *[]statusChange) error) error {
 	var changes []statusChange
-	return s.withImmediateTxThen(ctx, func(conn *sql.Conn) error {
+	return s.withImmediateTxCommit(ctx, func(conn *sql.Conn) error {
 		changes = changes[:0] // fn reruns when the database is busy.
 		return fn(conn, &changes)
-	}, func(conn *sql.Conn) {
-		s.publishJobEvents(context.WithoutCancel(ctx), conn, changes)
+	}, func(conn *sql.Conn, commitTx func() error) error {
+		recipients, err := s.events.commit(commitTx)
+		if err != nil {
+			return err
+		}
+		if s.afterJobCommit != nil {
+			s.afterJobCommit()
+		}
+		s.publishJobEvents(context.WithoutCancel(ctx), conn, changes, recipients)
+		return nil
 	})
 }
 
 // publishJobEvents runs while the single write connection is still held, so events are
 // published in commit order. The transition is already committed: a failed lookup only
 // loses the notification.
-func (s *Store) publishJobEvents(ctx context.Context, conn *sql.Conn, changes []statusChange) {
-	if !s.events.hasSubscribers() {
+func (s *Store) publishJobEvents(ctx context.Context, conn *sql.Conn, changes []statusChange, recipients []chan JobEvent) {
+	if len(recipients) == 0 {
 		return
 	}
 	for _, c := range changes {
@@ -135,6 +164,6 @@ func (s *Store) publishJobEvents(ctx context.Context, conn *sql.Conn, changes []
 		if ev.UpdatedAt, err = parseTime(updatedAt); err != nil {
 			continue
 		}
-		s.events.publish(ev)
+		s.events.publish(ev, recipients)
 	}
 }

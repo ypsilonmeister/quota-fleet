@@ -263,10 +263,6 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("GET /agents", s.requireScope(config.ScopeRead, s.handleGetAgents))
 	mux.HandleFunc("GET /agents/events", s.requireScope(config.ScopeRead, s.handleListAgentEvents))
 	mux.HandleFunc("POST /agents/check", s.requireScope(config.ScopeOperate, s.handleCheckAgents))
-	if opts.JobEvents {
-		mux.HandleFunc("GET /events", s.requireScope(config.ScopeRead, s.handleJobEvents))
-	}
-
 	apiHandler := s.authMiddleware(mux)
 	uiHandler := ui.NewHandler()
 
@@ -279,6 +275,11 @@ func NewServer(st *store.Store, opts Options) *Server {
 		mcpHandler := s.requireTokenAuth(opts.MCPHandler(apiHandler))
 		rootMux.Handle("/mcp", mcpHandler)
 		rootMux.Handle("/mcp/", mcpHandler)
+	}
+	if opts.JobEvents {
+		// docs/14: /events always needs a bearer token. Unlike the JSON API it has no
+		// anonymous fallback.
+		rootMux.Handle("GET /events", s.requireTokenAuth(s.requireScope(config.ScopeRead, s.handleJobEvents)))
 	}
 	rootMux.Handle("/", apiHandler)
 

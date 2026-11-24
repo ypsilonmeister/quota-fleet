@@ -160,6 +160,46 @@ func TestJobEventsAuth(t *testing.T) {
 	}
 }
 
+// docs/14: /events has no anonymous fallback, even where the JSON API has one.
+func TestJobEventsRequireTokenWithoutConfiguredTokens(t *testing.T) {
+	for _, requireAuth := range []bool{false, true} {
+		t.Run(fmt.Sprintf("require_auth=%v", requireAuth), func(t *testing.T) {
+			_, _, ts := newTestServer(t, Options{
+				InstanceID: "inst-sse", MaxClaimed: 5, JobEvents: true, RequireAuth: requireAuth,
+			})
+			// A deadline, so that an accepted stream fails the test instead of hanging it.
+			client := &http.Client{Timeout: 5 * time.Second}
+			for _, token := range []string{"", "anything"} {
+				req, err := http.NewRequest(http.MethodGet, ts.URL+"/events", nil)
+				if err != nil {
+					t.Fatalf("NewRequest: %v", err)
+				}
+				if token != "" {
+					req.Header.Set("Authorization", "Bearer "+token)
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatalf("GET /events: %v", err)
+				}
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusUnauthorized {
+					t.Errorf("GET /events with token %q = %d, want 401", token, resp.StatusCode)
+				}
+			}
+
+			wantJSON := http.StatusOK
+			if requireAuth {
+				wantJSON = http.StatusUnauthorized
+			}
+			resp := doJSON(t, http.MethodGet, ts.URL+"/status", "", nil)
+			_ = resp.Body.Close()
+			if resp.StatusCode != wantJSON {
+				t.Errorf("anonymous GET /status = %d, want %d (unchanged)", resp.StatusCode, wantJSON)
+			}
+		})
+	}
+}
+
 func TestJobEventsDisabledByDefault404(t *testing.T) {
 	opts := eventsTestOptions()
 	opts.JobEvents = false

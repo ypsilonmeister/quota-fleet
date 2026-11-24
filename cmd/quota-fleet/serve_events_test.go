@@ -33,6 +33,7 @@ state_dir: "%s"
 api:
   listen: "%s"
   job_events: true
+  token: "serve-events-token"
 runtime:
   adapter: "mock"
   dispatch_interval: "15ms"
@@ -63,6 +64,7 @@ evaluator:
 		if err != nil {
 			t.Fatalf("NewRequest: %v", err)
 		}
+		req.Header.Set("Authorization", "Bearer serve-events-token")
 		if resp, err = http.DefaultClient.Do(req); err == nil {
 			break
 		}
@@ -80,8 +82,14 @@ evaluator:
 		t.Fatalf("first line = %q, err = %v", sc.Text(), sc.Err())
 	}
 
-	created, err := http.Post("http://"+addr+"/jobs", "application/json",
+	createReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "http://"+addr+"/jobs",
 		strings.NewReader(`{"request_id":"serve-events-1","title":"Events E2E","acceptance_criteria":"build ok"}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	createReq.Header.Set("Authorization", "Bearer serve-events-token")
+	createReq.Header.Set("Content-Type", "application/json")
+	created, err := http.DefaultClient.Do(createReq)
 	if err != nil {
 		t.Fatalf("POST /jobs: %v", err)
 	}

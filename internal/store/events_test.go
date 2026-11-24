@@ -182,6 +182,83 @@ func TestJobEventsSlowSubscriberIsDroppedWithoutBlockingWriters(t *testing.T) {
 	}
 }
 
+// A transition committed before a subscription is in the past, even while it has not been
+// published yet.
+func TestJobEventsSubscribeAfterCommitBeforePublish(t *testing.T) {
+	ctx := context.Background()
+	st := openEventsStore(t)
+	job, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "boundary", Title: "t"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	claimed, ok, err := st.ClaimByID(ctx, job.ID, 1)
+	if err != nil || !ok {
+		t.Fatalf("ClaimByID: ok=%v err=%v", ok, err)
+	}
+
+	early, cancelEarly := st.SubscribeJobEvents()
+	defer cancelEarly()
+	var late <-chan JobEvent
+	var cancelLate func()
+	st.afterJobCommit = func() {
+		if late == nil {
+			late, cancelLate = st.SubscribeJobEvents()
+		}
+	}
+	if _, err := st.Complete(ctx, job.ID, claimed.ClaimedBy, "ok"); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if late == nil {
+		t.Fatal("no subscription between commit and publication")
+	}
+	defer cancelLate()
+
+	if got, want := drain(early), []string{fmt.Sprintf("%d:claimed>done", job.ID)}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("earlier subscriber got %v, want %v", got, want)
+	}
+	if got := drain(late); len(got) != 0 {
+		t.Fatalf("subscriber added after the commit got %v, want nothing", got)
+	}
+
+	next, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "boundary-next", Title: "t"})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	want := []string{fmt.Sprintf("%d:>queued", next.ID)}
+	for name, events := range map[string]<-chan JobEvent{"early": early, "late": late} {
+		if got := drain(events); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("%s subscriber got %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A subscription requested while a commit is running starts after it, so it cannot fall
+// between the commit and the choice of recipients.
+func TestJobEventsSubscribeWaitsForCommit(t *testing.T) {
+	var hub jobEventHub
+	subscribed := make(chan struct{})
+	recipients, err := hub.commit(func() error {
+		go func() {
+			hub.subscribe()
+			close(subscribed)
+		}()
+		select {
+		case <-subscribed:
+			t.Error("subscribe returned during a commit")
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
+	})
+	if err != nil || len(recipients) != 0 {
+		t.Fatalf("commit = %d recipients, %v; want none", len(recipients), err)
+	}
+	select {
+	case <-subscribed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscribe still blocked after the commit")
+	}
+}
+
 func TestJobEventsCancelAndClose(t *testing.T) {
 	st := openEventsStore(t)
 

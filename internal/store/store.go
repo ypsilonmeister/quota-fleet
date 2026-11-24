@@ -41,6 +41,8 @@ type Store struct {
 	sharedDB   bool
 	instanceID string
 	events     jobEventHub
+	// afterJobCommit, set only by tests, runs between a job commit and its publication.
+	afterJobCommit func()
 }
 
 // Open opens (or creates) the SQLite database at dbPath, enables WAL mode and
@@ -1630,19 +1632,23 @@ func scanJob(s rowScanner) (*Job, error) {
 }
 
 func (s *Store) withImmediateTx(ctx context.Context, fn func(conn *sql.Conn) error) error {
-	return s.withImmediateTxThen(ctx, fn, nil)
+	return s.withImmediateTxCommit(ctx, fn, nil)
 }
 
-// withImmediateTxThen runs committed (when non-nil) after a successful commit, before the
-// write connection is released to the next writer.
-func (s *Store) withImmediateTxThen(ctx context.Context, fn func(conn *sql.Conn) error, committed func(conn *sql.Conn)) error {
+// commitHook wraps COMMIT while the write connection is still held, so no other writer
+// runs until it returns. It must call commitTx once and return an error only if that
+// call failed.
+type commitHook func(conn *sql.Conn, commitTx func() error) error
+
+// withImmediateTxCommit is withImmediateTx with an optional commit hook.
+func (s *Store) withImmediateTxCommit(ctx context.Context, fn func(conn *sql.Conn) error, hook commitHook) error {
 	var lastErr error
 	for attempt := 0; attempt < maxBusyRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		err := s.runImmediateTxOnce(ctx, fn, committed)
+		err := s.runImmediateTxOnce(ctx, fn, hook)
 		if err == nil {
 			return nil
 		}
@@ -1666,7 +1672,7 @@ func (s *Store) withImmediateTxThen(ctx context.Context, fn func(conn *sql.Conn)
 	return fmt.Errorf("sqlite busy after %d retries: %w", maxBusyRetries, lastErr)
 }
 
-func (s *Store) runImmediateTxOnce(ctx context.Context, fn func(conn *sql.Conn) error, committed func(conn *sql.Conn)) error {
+func (s *Store) runImmediateTxOnce(ctx context.Context, fn func(conn *sql.Conn) error, hook commitHook) error {
 	conn, err := s.writeDB.Conn(ctx)
 	if err != nil {
 		return err
@@ -1682,12 +1688,18 @@ func (s *Store) runImmediateTxOnce(ctx context.Context, fn func(conn *sql.Conn) 
 		return err
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+	commitTx := func() error {
+		_, err := conn.ExecContext(ctx, "COMMIT")
 		return err
 	}
-	if committed != nil {
-		committed(conn)
+	if hook != nil {
+		err = hook(conn, commitTx)
+	} else {
+		err = commitTx()
+	}
+	if err != nil {
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		return err
 	}
 	return nil
 }

@@ -14,6 +14,8 @@
     403: "通知ストリームには read スコープのトークンが必要です（403）。",
     404: "サーバー側でジョブ通知が無効です（fleet.yaml の api.job_events）。"
   };
+  const NO_TOKEN_MESSAGE =
+    "通知には read スコープの API トークンが必要です。トークンなしの接続では利用できません。";
   const MIN_RETRY_MS = 1000;
   const MAX_RETRY_MS = 30000;
   // The server sends a heartbeat every 25s; silence this long means a dead connection.
@@ -285,9 +287,12 @@
 
     function handleFatal(status) {
       stream = null;
-      problem = FATAL_MESSAGES[status];
+      // A server without tokens serves the UI anonymously but rejects the stream. Asking
+      // for a token there would keep the user from the rest of the UI.
+      const noToken = status === 401 && !options.hasToken();
+      problem = noToken ? NO_TOKEN_MESSAGE : FATAL_MESSAGES[status];
       options.onChange({ enabled: isEnabled(), problem: problem });
-      if (status === 401) {
+      if (status === 401 && !noToken) {
         options.onUnauthorized(problem);
       } else {
         options.onMessage(problem);
