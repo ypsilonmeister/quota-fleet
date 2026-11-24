@@ -3,6 +3,13 @@
 
   const TOKEN_KEY = "quota_fleet_token";
   const AUTH_MODE_KEY = "quota_fleet_auth_mode";
+  const directionHelper =
+    (typeof globalThis !== "undefined" && globalThis.__qfDirection) ||
+    (typeof window !== "undefined" && window.__qfDirection) ||
+    (typeof require === "function" ? require("./direction.js") : null);
+  const DIRECTION_KEY = directionHelper ? directionHelper.DIRECTION_KEY : "qf-direction";
+  const detectPreferredDirection = directionHelper.detectPreferredDirection;
+  const resolveDirection = directionHelper.resolveDirection;
   const ALL_STATUSES = [
     "draft",
     "queued",
@@ -610,6 +617,8 @@
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+      detectPreferredDirection: detectPreferredDirection,
+      resolveDirection: resolveDirection,
       buildJobForest: buildJobForest,
       summarizeChainProgress: summarizeChainProgress,
       formatChainProgressSummary: formatChainProgressSummary,
@@ -642,9 +651,20 @@
     btnConnectNoAuth: document.getElementById("btn-connect-no-auth"),
     btnRefresh: document.getElementById("btn-refresh"),
     btnToken: document.getElementById("btn-token"),
+    directionSwitch: document.getElementById("direction-switch"),
     metaBadges: document.getElementById("meta-badges"),
     bannerArea: document.getElementById("banner-area")
   };
+
+  function readStoredDirection() {
+    return directionHelper.readStoredDirection();
+  }
+
+  function applyDirection(dir, persist) {
+    return directionHelper.applyDirection(dir, persist);
+  }
+
+  applyDirection(readStoredDirection(), false);
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -1054,7 +1074,10 @@
             lines.push(el("div", { className: "small", text: "短期残量: " + ps.short_remaining_percent + "%" }));
           }
           if (ps.measured_at) {
-            lines.push(el("div", { className: "small muted", text: "測定: " + formatTime(ps.measured_at) }));
+            lines.push(el("div", { className: "small muted" }, [
+              "測定: ",
+              el("span", { className: "mono small", text: formatTime(ps.measured_at) })
+            ]));
           }
         }
         if (ps.reason) {
@@ -1114,7 +1137,7 @@
         el("td", { text: title }),
         el("td", { text: h.pool || "-" }),
         el("td", { text: h.reason || "-" }),
-        el("td", { className: "small muted", text: formatTime(h.created_at) })
+        el("td", { className: "mono small muted", text: formatTime(h.created_at) })
       ]);
     });
     return el("div", { className: "table-wrap" }, [
@@ -1147,7 +1170,7 @@
         el("td", null, [navLink("/ui/jobs/" + j.id, j.title || "(無題)")]),
         el("td", null, [statusBadge(j.status)]),
         el("td", { className: "mono", text: agentHost }),
-        el("td", { className: "small muted", text: formatTime(j.created_at) }),
+        el("td", { className: "mono small muted", text: formatTime(j.created_at) }),
         el("td", null, [parentCell])
       ]);
     });
@@ -1227,7 +1250,7 @@
           el("td", null, [el("div", { className: "chain-node-cell" }, cellChildren)]),
           el("td", null, [statusBadge(j.status)]),
           el("td", { className: "mono", text: agentHost }),
-          el("td", { className: "small muted", text: formatTime(j.created_at) })
+          el("td", { className: "mono small muted", text: formatTime(j.created_at) })
         ]));
       }
     }
@@ -1723,10 +1746,10 @@
       kv("Worktree Spec", el("span", { className: "mono", text: wtText })),
       kv("Attempts", String(job.attempts || 0)),
       kv("Claimed By", el("span", { className: "mono", text: job.claimed_by || "-" })),
-      kv("Claimed At", formatTime(job.claimed_at)),
-      kv("Created At", formatTime(job.created_at)),
-      kv("Updated At", formatTime(job.updated_at)),
-      kv("Delivered At", formatTime(job.delivered_at)),
+      kv("Claimed At", el("span", { className: "mono", text: formatTime(job.claimed_at) })),
+      kv("Created At", el("span", { className: "mono", text: formatTime(job.created_at) })),
+      kv("Updated At", el("span", { className: "mono", text: formatTime(job.updated_at) })),
+      kv("Delivered At", el("span", { className: "mono", text: formatTime(job.delivered_at) })),
       kv("Session ID", el("span", { className: "mono", text: job.session_id || "-" }))
     ]);
 
@@ -1814,7 +1837,7 @@
       return el("div", { className: "card" }, [
         el("div", { className: "kv-grid" }, [
           kv("納品状態", badge),
-          kv("納品時刻", formatTime(job.delivered_at)),
+          kv("納品時刻", el("span", { className: "mono", text: formatTime(job.delivered_at) })),
           kv("ジョブ状態", statusBadge(job.status))
         ])
       ]);
@@ -2374,7 +2397,7 @@
           el("td", { className: "mono small", text: poolsText }),
           el("td", { text: h.reason || "-" }),
           el("td", { className: "mono small", text: h.snapshot_summary || "-" }),
-          el("td", { className: "small muted", text: formatTime(h.created_at) }),
+          el("td", { className: "mono small muted", text: formatTime(h.created_at) }),
           el("td", null, actionCellChildren)
         ]);
       });
@@ -2491,8 +2514,8 @@
         el("td", { className: "mono small", text: d.selected_pool || "-" }),
         el("td", { className: "small", text: d.blocked_by || (d.bypassed ? "bypassed" : "-") }),
         el("td", { className: "small", text: d.reason || "-" }),
-        el("td", { className: "small muted", text: formatTime(d.measured_at) }),
-        el("td", { className: "small muted", text: formatTime(d.decided_at) })
+        el("td", { className: "mono small muted", text: formatTime(d.measured_at) }),
+        el("td", { className: "mono small muted", text: formatTime(d.decided_at) })
       ]);
     });
     return el("div", { className: "table-wrap" }, [
@@ -2589,7 +2612,7 @@
         });
         actionNodes.push(markBtn);
       } else {
-        actionNodes.push(el("span", { className: "small muted", text: formatTime(j.delivered_at) }));
+        actionNodes.push(el("span", { className: "mono small muted", text: formatTime(j.delivered_at) }));
       }
 
       return el("tr", null, [
@@ -2599,7 +2622,7 @@
         el("td", null, [deliveredBadge]),
         el("td", { className: "mono small", text: (j.agent || "-") + " / " + (j.host || "-") }),
         el("td", { className: "preview-cell small", text: previewText }),
-        el("td", { className: "small muted", text: formatTime(j.updated_at) }),
+        el("td", { className: "mono small muted", text: formatTime(j.updated_at) }),
         el("td", null, actionNodes)
       ]);
     });
@@ -2862,7 +2885,7 @@
       cellChildren.push(el("div", { className: "small muted mono", text: c.version_raw }));
     }
     if (c.checked_at) {
-      cellChildren.push(el("div", { className: "small muted", text: formatTime(c.checked_at) }));
+      cellChildren.push(el("div", { className: "mono small muted", text: formatTime(c.checked_at) }));
     }
 
     return el("td", { className: tdClass }, cellChildren);
@@ -2884,7 +2907,7 @@
       }
       return el("tr", null, [
         el("td", { className: "mono small", text: "#" + ev.id }),
-        el("td", { className: "small muted", text: formatTime(ev.created_at) }),
+        el("td", { className: "mono small muted", text: formatTime(ev.created_at) }),
         el("td", null, [statusBadge(ev.event_type)]),
         el("td", { className: "mono small", text: ev.agent || "-" }),
         el("td", { className: "mono small", text: ev.host || "-" }),
@@ -2965,6 +2988,22 @@
 
   dom.btnToken.addEventListener("click", function () {
     showAuthGate("");
+  });
+
+  if (dom.directionSwitch) {
+    dom.directionSwitch.addEventListener("click", function (ev) {
+      const btn = ev.target && ev.target.closest ? ev.target.closest("[data-set-direction]") : null;
+      if (!btn) {
+        return;
+      }
+      applyDirection(btn.getAttribute("data-set-direction"), true);
+    });
+  }
+
+  window.addEventListener("storage", function (ev) {
+    if (ev && ev.key === DIRECTION_KEY) {
+      applyDirection(ev.newValue, false);
+    }
   });
 
   document.addEventListener("click", function (ev) {
