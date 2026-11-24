@@ -53,7 +53,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_jobs",
-		Description: "List jobs filtered by status (required) and optional agent, host, title query (q), parent_id, cursor, limit, and desc (GET /jobs). Pages are capped to fit the MCP frame byte budget; if truncated=true, continue with next_cursor.",
+		Description: "List jobs filtered by status (required) and optional agent, host, title query (q), parent_id, cursor, limit, and desc (GET /jobs). Long text fields are projected to a bounded preview (marked in fields_truncated; call get_job for full text). Pages are capped to fit the MCP frame byte budget; when has_more=true (or truncated=true), continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListJobsInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.ListJobs(ctx, in)
 		if err != nil {
@@ -108,7 +108,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_held",
-		Description: "List jobs held by Quota Gate (GET /gate/held).",
+		Description: "List jobs held by Quota Gate with optional status, cursor, and limit (GET /gate/held). Long text fields are projected to a bounded preview (marked in fields_truncated). When has_more=true (or truncated=true), continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListHeldInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.ListHeld(ctx, in)
 		if err != nil {
@@ -141,7 +141,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "gate_decisions",
-		Description: "List recent Quota Gate decisions, optionally filtered by job_id, held_id, or limit (GET /gate/decisions).",
+		Description: "List recent Quota Gate decisions, optionally filtered by job_id, held_id, cursor, or limit (GET /gate/decisions). Long text fields are projected to a bounded preview (marked in fields_truncated). When has_more=true (or truncated=true), continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in GateDecisionsInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.GateDecisions(ctx, in)
 		if err != nil {
@@ -152,7 +152,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_deliveries",
-		Description: "List job deliveries filtered by status (undelivered, delivered, or all) and optional limit (GET /deliveries).",
+		Description: "List job deliveries filtered by status (undelivered, delivered, or all), cursor, and optional limit (GET /deliveries). Long text fields are projected to a bounded preview (marked in fields_truncated; call get_job for full text). When has_more=true (or truncated=true), continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListDeliveriesInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.ListDeliveries(ctx, in)
 		if err != nil {

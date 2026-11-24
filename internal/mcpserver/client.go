@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -24,17 +26,19 @@ const (
 	// (instructions/create payload, result_text, last_error); Go's encoding/json expands
 	// HTML-escaped bytes (<, >, &) up to 6x (~18 MiB/job + metadata).
 	defaultMaxSingleResponseBytes = int64(32) << 20 // 32 MiB
-	// List 2xx HTTP stream cap: element-by-element streaming decode stops as soon as the
-	// MCP frame byte budget is reached, so at most one budgeted page (~7 MiB JSON) plus
-	// one overflowing item (~18 MiB worst-case job) is ever read from upstream.
+	// List 2xx HTTP stream cap: streaming element-by-element decoding validates the full
+	// 2xx JSON response to EOF while keeping only bounded list projections in memory.
 	defaultMaxListResponseBytes = int64(64) << 20 // 64 MiB
 	// MCP SDK v1.8.0 DefaultMaxLineLength is 16 MiB per JSON-RPC frame. Because mcp.AddTool
 	// emits both structuredContent (raw JSON) and content[0].text (JSON-escaped string of
-	// the same JSON), list tools budget output to <= 14 MiB on the wire (2 MiB below 16 MiB).
-	defaultMaxMCPFrameBytes = int64(14) << 20 // 14 MiB
-	mcpFrameEnvelopeReserve = int64(4) << 10  // 4 KiB reserve for JSON-RPC + list envelope
-	maxErrorResponseBytes   = 64 << 10        // 64 KiB cap for non-2xx error bodies
-	maxErrorMessageRunes    = 256
+	// the same JSON), list tools budget the entire serialized output + JSON-RPC wrapper
+	// to <= 14 MiB on the wire (2 MiB below 16 MiB).
+	defaultMaxMCPFrameBytes  = int64(14) << 20 // 14 MiB
+	mcpJSONRPCWrapperReserve = int64(512)      // reserve for JSON-RPC envelope around tool result
+	defaultMaxListTextBytes  = 4096            // max UTF-8 bytes per long text field in list projections
+	maxListCursorStringBytes = 256             // safety cap on upstream string cursors
+	maxErrorResponseBytes    = 64 << 10        // 64 KiB cap for non-2xx error bodies
+	maxErrorMessageRunes     = 256
 )
 
 var errResponseTooLarge = errors.New("response body exceeded size limit")
@@ -53,6 +57,7 @@ type Client struct {
 	httpClient       *http.Client
 	maxResponseBytes int64
 	maxMCPFrameBytes int64
+	maxListTextBytes int
 }
 
 // APIError represents a non-success HTTP response from the quota-fleet API.
@@ -151,6 +156,60 @@ func (c *Client) effectiveMCPFrameBudget() int64 {
 	return defaultMaxMCPFrameBytes
 }
 
+func (c *Client) effectiveListTextLimit() int {
+	if c.maxListTextBytes > 0 {
+		return c.maxListTextBytes
+	}
+	return defaultMaxListTextBytes
+}
+
+// ListJobsResult is the typed response envelope for list_jobs.
+type ListJobsResult struct {
+	Jobs            []json.RawMessage `json:"jobs"`
+	NextCursor      int64             `json:"next_cursor,omitempty"`
+	HasMore         bool              `json:"has_more"`
+	Truncated       bool              `json:"truncated,omitempty"`
+	TruncatedReason string            `json:"truncated_reason,omitempty"`
+}
+
+// ListHeldResult is the typed response envelope for list_held.
+type ListHeldResult struct {
+	Held            []json.RawMessage `json:"held"`
+	NextCursor      string            `json:"next_cursor,omitempty"`
+	HasMore         bool              `json:"has_more"`
+	Truncated       bool              `json:"truncated,omitempty"`
+	TruncatedReason string            `json:"truncated_reason,omitempty"`
+}
+
+// GateDecisionsResult is the typed response envelope for gate_decisions.
+type GateDecisionsResult struct {
+	Decisions       []json.RawMessage `json:"decisions"`
+	NextCursor      int64             `json:"next_cursor,omitempty"`
+	HasMore         bool              `json:"has_more"`
+	Truncated       bool              `json:"truncated,omitempty"`
+	TruncatedReason string            `json:"truncated_reason,omitempty"`
+}
+
+// ListDeliveriesResult is the typed response envelope for list_deliveries.
+type ListDeliveriesResult struct {
+	Jobs            []json.RawMessage `json:"jobs"`
+	NextCursor      string            `json:"next_cursor,omitempty"`
+	HasMore         bool              `json:"has_more"`
+	Truncated       bool              `json:"truncated,omitempty"`
+	TruncatedReason string            `json:"truncated_reason,omitempty"`
+}
+
+type listCursorMode int
+
+const (
+	listCursorInt64ID listCursorMode = iota
+	listCursorHeldCreatedID
+	listCursorDeliveryUpdatedID
+	listCursorDeliveryDeliveredID
+)
+
+const listTruncatedReason = "response exceeded MCP frame byte budget"
+
 // mcpWireItemBytes computes the exact upper-bound byte contribution of a single
 // compact HTML-escaped JSON item to an MCP CallToolResult JSON-RPC frame.
 // Because mcp.AddTool emits both structuredContent (raw JSON) and content[0].text
@@ -166,6 +225,188 @@ func mcpWireItemBytes(compactHTMLJSON []byte) int64 {
 	return int64(len(compactHTMLJSON))*2 + extra + 2
 }
 
+// mcpWireFrameBytes computes the exact upper-bound wire byte size of an MCP CallToolResult
+// JSON-RPC frame carrying compactHTMLJSON as both structuredContent and content[0].text,
+// including the JSON-RPC wrapper reserve.
+func mcpWireFrameBytes(compactHTMLJSON []byte) int64 {
+	var extra int64
+	for _, b := range compactHTMLJSON {
+		if b == '"' || b == '\\' {
+			extra++
+		}
+	}
+	return int64(len(compactHTMLJSON))*2 + extra + 2 + mcpJSONRPCWrapperReserve
+}
+
+// skipJSONValue consumes and validates a single JSON value from dec without retaining it.
+func skipJSONValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	if delim != '{' && delim != '[' {
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	depth := 1
+	for depth > 0 {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := t.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+		}
+	}
+	return nil
+}
+
+func truncateUTF8Bytes(s string, maxBytes int) (string, bool) {
+	if len(s) <= maxBytes {
+		return s, false
+	}
+	if maxBytes <= 0 {
+		return "", true
+	}
+	if maxBytes <= 3 {
+		n := 0
+		for n < len(s) {
+			_, size := utf8.DecodeRuneInString(s[n:])
+			if n+size > maxBytes {
+				break
+			}
+			n += size
+		}
+		return s[:n], true
+	}
+	target := maxBytes - 3
+	n := 0
+	for n < len(s) {
+		_, size := utf8.DecodeRuneInString(s[n:])
+		if n+size > target {
+			break
+		}
+		n += size
+	}
+	return s[:n] + "...", true
+}
+
+func projectJSONValue(v any, prefix string, maxTextBytes int, depth int, truncated *[]string) any {
+	switch val := v.(type) {
+	case string:
+		if out, did := truncateUTF8Bytes(val, maxTextBytes); did {
+			if prefix != "" {
+				*truncated = append(*truncated, prefix)
+			}
+			return out
+		}
+		return val
+	case map[string]any:
+		if depth >= 4 {
+			return val
+		}
+		for k, child := range val {
+			if k == "fields_truncated" {
+				continue
+			}
+			path := k
+			if prefix != "" {
+				path = prefix + "." + k
+			}
+			val[k] = projectJSONValue(child, path, maxTextBytes, depth+1, truncated)
+		}
+		return val
+	case []any:
+		if depth >= 4 {
+			return val
+		}
+		var elemTruncated bool
+		for i, elem := range val {
+			if s, ok := elem.(string); ok {
+				if out, did := truncateUTF8Bytes(s, maxTextBytes); did {
+					val[i] = out
+					elemTruncated = true
+				}
+			} else {
+				var nested []string
+				val[i] = projectJSONValue(elem, prefix, maxTextBytes, depth+1, &nested)
+				if len(nested) > 0 {
+					elemTruncated = true
+				}
+			}
+		}
+		if elemTruncated && prefix != "" {
+			*truncated = append(*truncated, prefix)
+		}
+		return val
+	default:
+		return v
+	}
+}
+
+// projectListItem bounds long string fields inside a list item to maxTextBytes (UTF-8 safe)
+// and records any truncated field paths in "fields_truncated".
+func projectListItem(raw json.RawMessage, maxTextBytes int) (json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var val any
+	if err := dec.Decode(&val); err != nil {
+		return nil, err
+	}
+	obj, ok := val.(map[string]any)
+	if !ok {
+		return json.Marshal(val)
+	}
+	var truncated []string
+	projectJSONValue(obj, "", maxTextBytes, 0, &truncated)
+	if len(truncated) > 0 {
+		sort.Strings(truncated)
+		dedup := truncated[:0]
+		for _, f := range truncated {
+			if len(dedup) == 0 || dedup[len(dedup)-1] != f {
+				dedup = append(dedup, f)
+			}
+		}
+		obj["fields_truncated"] = dedup
+	}
+	return json.Marshal(obj)
+}
+
+// projectMinimalItem produces a minimal identifying stub for a list item when even the
+// normal bounded projection exceeds a tight MCP frame budget, ensuring forward pagination
+// can still proceed.
+func projectMinimalItem(raw json.RawMessage) (json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var val any
+	if err := dec.Decode(&val); err != nil {
+		return nil, err
+	}
+	obj, ok := val.(map[string]any)
+	if !ok {
+		return json.Marshal(val)
+	}
+	stub := make(map[string]any, 8)
+	for _, key := range []string{"id", "status", "created_at", "updated_at", "delivered_at"} {
+		if v, exists := obj[key]; exists {
+			stub[key] = v
+		}
+	}
+	if title, ok := obj["title"].(string); ok {
+		stub["title"], _ = truncateUTF8Bytes(title, 128)
+	}
+	stub["fields_truncated"] = []string{"*"}
+	return json.Marshal(stub)
+}
+
 func extractInt64ID(raw []byte) (int64, bool) {
 	var envelope struct {
 		ID *int64 `json:"id"`
@@ -176,13 +417,132 @@ func extractInt64ID(raw []byte) (int64, bool) {
 	return 0, false
 }
 
+func extractHeldCursor(raw []byte) (string, bool) {
+	var envelope struct {
+		ID        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.ID != "" && envelope.CreatedAt != "" {
+		return envelope.CreatedAt + "|" + envelope.ID, true
+	}
+	return "", false
+}
+
+func extractDeliveryCursor(raw []byte, useDeliveredAt bool) (string, bool) {
+	var envelope struct {
+		ID          *int64 `json:"id"`
+		UpdatedAt   string `json:"updated_at"`
+		DeliveredAt string `json:"delivered_at"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.ID == nil || *envelope.ID <= 0 {
+		return "", false
+	}
+	ts := envelope.UpdatedAt
+	if useDeliveredAt && envelope.DeliveredAt != "" {
+		ts = envelope.DeliveredAt
+	}
+	if ts == "" {
+		return "", false
+	}
+	return ts + "|" + strconv.FormatInt(*envelope.ID, 10), true
+}
+
+type budgetedListPage struct {
+	items           []json.RawMessage
+	nextCursorInt   int64
+	nextCursorStr   string
+	hasMore         bool
+	truncated       bool
+	truncatedReason string
+}
+
+func computeCursorFromLastItem(mode listCursorMode, item json.RawMessage) (int64, string) {
+	switch mode {
+	case listCursorInt64ID:
+		if id, ok := extractInt64ID(item); ok {
+			return id, ""
+		}
+	case listCursorHeldCreatedID:
+		if c, ok := extractHeldCursor(item); ok {
+			return 0, c
+		}
+	case listCursorDeliveryUpdatedID:
+		if c, ok := extractDeliveryCursor(item, false); ok {
+			return 0, c
+		}
+	case listCursorDeliveryDeliveredID:
+		if c, ok := extractDeliveryCursor(item, true); ok {
+			return 0, c
+		}
+	}
+	return 0, ""
+}
+
+func buildTypedListEnvelope(itemsKey string, cursorMode listCursorMode, page *budgetedListPage) any {
+	items := page.items
+	if items == nil {
+		items = []json.RawMessage{}
+	}
+	switch {
+	case itemsKey == "jobs" && cursorMode == listCursorInt64ID:
+		return &ListJobsResult{
+			Jobs:            items,
+			NextCursor:      page.nextCursorInt,
+			HasMore:         page.hasMore,
+			Truncated:       page.truncated,
+			TruncatedReason: page.truncatedReason,
+		}
+	case itemsKey == "held":
+		return &ListHeldResult{
+			Held:            items,
+			NextCursor:      page.nextCursorStr,
+			HasMore:         page.hasMore,
+			Truncated:       page.truncated,
+			TruncatedReason: page.truncatedReason,
+		}
+	case itemsKey == "decisions":
+		return &GateDecisionsResult{
+			Decisions:       items,
+			NextCursor:      page.nextCursorInt,
+			HasMore:         page.hasMore,
+			Truncated:       page.truncated,
+			TruncatedReason: page.truncatedReason,
+		}
+	default:
+		return &ListDeliveriesResult{
+			Jobs:            items,
+			NextCursor:      page.nextCursorStr,
+			HasMore:         page.hasMore,
+			Truncated:       page.truncated,
+			TruncatedReason: page.truncatedReason,
+		}
+	}
+}
+
 // decodeBudgetedList decodes a list envelope JSON object element-by-element so that
-// json.Decoder only buffers a single array item at a time. It stops collecting items
-// before the resulting MCP JSON-RPC frame would exceed maxMCPFrameBytes.
-// When truncation occurs, truncated=true and truncated_reason are set; if cursorByID
-// is true (e.g. GET /jobs), has_more=true and next_cursor=<last kept item id> are set
-// so callers can continue pagination cleanly.
-func decodeBudgetedList(r io.Reader, itemsKey string, cursorByID bool, maxMCPFrameBytes int64) (map[string]any, error) {
+// json.Decoder only retains projected items within the MCP frame byte budget.
+//
+// Contract guarantees:
+//  1. Trailing validation: Always validates the entire 2xx JSON stream to EOF (including
+//     skipped array items, closing delimiters, remaining envelope keys, and trailing data),
+//     whether truncated or not.
+//  2. Output-wide budget: Only known typed envelope fields are retained (unknown keys are
+//     validated and discarded), and the exact serialized envelope + JSON-RPC wrapper wire
+//     size is verified to fit within maxMCPFrameBytes.
+//  3. Continuability: Long text fields are projected to <= maxTextBytes (marking
+//     fields_truncated) so single large items never block pagination; truncated pages set
+//     truncated=true, has_more=true, and next_cursor from the last kept item.
+func decodeBudgetedList(
+	r io.Reader,
+	itemsKey string,
+	cursorMode listCursorMode,
+	maxMCPFrameBytes int64,
+	maxTextBytes int,
+) (any, error) {
+	if maxTextBytes <= 0 {
+		maxTextBytes = defaultMaxListTextBytes
+	}
+
 	dec := json.NewDecoder(r)
 	tok, err := dec.Token()
 	if err != nil {
@@ -192,20 +552,30 @@ func decodeBudgetedList(r io.Reader, itemsKey string, cursorByID bool, maxMCPFra
 		return nil, fmt.Errorf("expected JSON object, got %v", tok)
 	}
 
-	reserve := mcpFrameEnvelopeReserve
-	if maxMCPFrameBytes <= reserve {
-		reserve = 512
-		if maxMCPFrameBytes <= reserve {
-			reserve = 0
-		}
+	// Measure the empty-envelope overhead (including worst-case truncation metadata)
+	// so incremental item budgeting closely tracks the final serialized frame size.
+	probePage := &budgetedListPage{
+		items:           []json.RawMessage{},
+		nextCursorInt:   9223372036854775807,
+		nextCursorStr:   strings.Repeat("x", 64),
+		hasMore:         true,
+		truncated:       true,
+		truncatedReason: listTruncatedReason,
 	}
-	itemBudget := maxMCPFrameBytes - reserve
+	probeJSON, err := json.Marshal(buildTypedListEnvelope(itemsKey, cursorMode, probePage))
+	if err != nil {
+		return nil, err
+	}
+	envelopeOverhead := mcpWireFrameBytes(probeJSON)
+	itemBudget := maxMCPFrameBytes - envelopeOverhead
+	if itemBudget < 0 {
+		itemBudget = 0
+	}
 
-	out := make(map[string]any)
-	var (
-		usedWireBytes int64
-		truncated     bool
-	)
+	page := &budgetedListPage{
+		items: make([]json.RawMessage, 0),
+	}
+	var usedWireBytes int64
 
 	for dec.More() {
 		keyTok, err := dec.Token()
@@ -217,70 +587,103 @@ func decodeBudgetedList(r io.Reader, itemsKey string, cursorByID bool, maxMCPFra
 			return nil, fmt.Errorf("expected object key string, got %T", keyTok)
 		}
 
-		if key != itemsKey {
-			var val any
-			if err := dec.Decode(&val); err != nil {
-				return nil, err
-			}
-			out[key] = val
-			continue
-		}
-
-		arrTok, err := dec.Token()
-		if err != nil {
-			return nil, err
-		}
-		if arrTok == nil {
-			out[itemsKey] = nil
-			continue
-		}
-		if delim, ok := arrTok.(json.Delim); !ok || delim != '[' {
-			return nil, fmt.Errorf("expected JSON array for %q, got %v", itemsKey, arrTok)
-		}
-
-		kept := make([]json.RawMessage, 0)
-		for dec.More() {
-			var rawItem json.RawMessage
-			if err := dec.Decode(&rawItem); err != nil {
-				return nil, err
-			}
-			normalized, err := json.Marshal(rawItem)
+		switch key {
+		case itemsKey:
+			arrTok, err := dec.Token()
 			if err != nil {
 				return nil, err
 			}
-			itemWire := mcpWireItemBytes(normalized)
-			if usedWireBytes+itemWire > itemBudget {
-				if len(kept) == 0 {
-					return nil, fmt.Errorf("first item in %q (%d wire bytes) exceeds MCP frame budget (%d bytes)", itemsKey, itemWire, maxMCPFrameBytes)
-				}
-				truncated = true
-				break
+			if arrTok == nil {
+				page.items = []json.RawMessage{}
+				continue
 			}
-			usedWireBytes += itemWire
-			kept = append(kept, json.RawMessage(normalized))
-		}
+			if delim, ok := arrTok.(json.Delim); !ok || delim != '[' {
+				return nil, fmt.Errorf("expected JSON array for %q, got %v", itemsKey, arrTok)
+			}
 
-		out[itemsKey] = kept
-		if truncated {
-			out["truncated"] = true
-			out["truncated_reason"] = "response exceeded MCP frame byte budget"
-			if cursorByID {
-				out["has_more"] = true
-				if id, ok := extractInt64ID(kept[len(kept)-1]); ok {
-					out["next_cursor"] = id
+			for dec.More() {
+				if page.truncated {
+					if err := skipJSONValue(dec); err != nil {
+						return nil, err
+					}
+					continue
+				}
+
+				var rawItem json.RawMessage
+				if err := dec.Decode(&rawItem); err != nil {
+					return nil, err
+				}
+				projected, err := projectListItem(rawItem, maxTextBytes)
+				if err != nil {
+					return nil, err
+				}
+				itemWire := mcpWireItemBytes(projected)
+				if usedWireBytes+itemWire > itemBudget {
+					if len(page.items) == 0 {
+						// Even the first projected item exceeded the tight budget;
+						// fall back to a minimal identifying stub so pagination can still advance.
+						stub, stubErr := projectMinimalItem(rawItem)
+						if stubErr != nil {
+							return nil, stubErr
+						}
+						stubWire := mcpWireItemBytes(stub)
+						if stubWire <= itemBudget {
+							usedWireBytes += stubWire
+							page.items = append(page.items, stub)
+							continue
+						}
+						return nil, fmt.Errorf("first item in %q (%d wire bytes) exceeds MCP frame budget (%d bytes)", itemsKey, stubWire, maxMCPFrameBytes)
+					}
+					page.truncated = true
+					continue
+				}
+				usedWireBytes += itemWire
+				page.items = append(page.items, projected)
+			}
+
+			endArr, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			if delim, ok := endArr.(json.Delim); !ok || delim != ']' {
+				return nil, fmt.Errorf("expected closing ']' for %q, got %v", itemsKey, endArr)
+			}
+
+		case "has_more":
+			var hm bool
+			if err := dec.Decode(&hm); err != nil {
+				return nil, err
+			}
+			page.hasMore = hm
+
+		case "next_cursor":
+			if cursorMode == listCursorInt64ID {
+				var nc *int64
+				if err := dec.Decode(&nc); err != nil {
+					return nil, err
+				}
+				if nc != nil {
+					page.nextCursorInt = *nc
+				}
+			} else {
+				var nc *string
+				if err := dec.Decode(&nc); err != nil {
+					return nil, err
+				}
+				if nc != nil {
+					if len(*nc) > maxListCursorStringBytes {
+						return nil, fmt.Errorf("next_cursor length %d exceeds limit %d", len(*nc), maxListCursorStringBytes)
+					}
+					page.nextCursorStr = *nc
 				}
 			}
-			// Stop reading upstream immediately so remaining items beyond the budget
-			// are neither buffered nor decoded.
-			return out, nil
-		}
 
-		endArr, err := dec.Token()
-		if err != nil {
-			return nil, err
-		}
-		if delim, ok := endArr.(json.Delim); !ok || delim != ']' {
-			return nil, fmt.Errorf("expected closing ']' for %q, got %v", itemsKey, endArr)
+		default:
+			// Validate and discard unknown top-level envelope fields so arbitrary
+			// upstream metadata cannot bloat the MCP frame beyond the budget.
+			if err := skipJSONValue(dec); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -295,17 +698,54 @@ func decodeBudgetedList(r io.Reader, itemsKey string, cursorByID bool, maxMCPFra
 	if err := ensureJSONEOF(dec); err != nil {
 		return nil, err
 	}
-	return out, nil
+
+	if page.truncated {
+		page.truncatedReason = listTruncatedReason
+		page.hasMore = true
+		if len(page.items) > 0 {
+			page.nextCursorInt, page.nextCursorStr = computeCursorFromLastItem(cursorMode, page.items[len(page.items)-1])
+		}
+	}
+
+	// Exact whole-output wire verification: marshal the complete typed envelope
+	// and trim items if needed so the actual serialized frame never exceeds maxMCPFrameBytes.
+	for {
+		env := buildTypedListEnvelope(itemsKey, cursorMode, page)
+		rawEnv, err := json.Marshal(env)
+		if err != nil {
+			return nil, err
+		}
+		wireSize := mcpWireFrameBytes(rawEnv)
+		if wireSize <= maxMCPFrameBytes {
+			return env, nil
+		}
+		if len(page.items) > 1 {
+			page.items = page.items[:len(page.items)-1]
+			page.truncated = true
+			page.truncatedReason = listTruncatedReason
+			page.hasMore = true
+			page.nextCursorInt, page.nextCursorStr = computeCursorFromLastItem(cursorMode, page.items[len(page.items)-1])
+			continue
+		}
+		if len(page.items) == 1 {
+			stub, stubErr := projectMinimalItem(page.items[0])
+			if stubErr == nil && !bytes.Equal(stub, page.items[0]) {
+				page.items[0] = stub
+				continue
+			}
+		}
+		return nil, fmt.Errorf("serialized %q response (%d wire bytes) exceeds MCP frame budget (%d bytes)", itemsKey, wireSize, maxMCPFrameBytes)
+	}
 }
 
-func (c *Client) doBudgetedList(ctx context.Context, path string, query url.Values, itemsKey string, cursorByID bool) (map[string]any, error) {
-	var out map[string]any
+func (c *Client) doBudgetedList(ctx context.Context, path string, query url.Values, itemsKey string, cursorMode listCursorMode) (any, error) {
+	var out any
 	err := c.doJSON(ctx, http.MethodGet, path, query, nil, defaultMaxListResponseBytes, func(status int, r io.Reader) error {
 		if status != http.StatusOK {
 			errBody, _ := io.ReadAll(io.LimitReader(r, maxErrorResponseBytes))
 			return c.parseAPIError(status, errBody)
 		}
-		decoded, err := decodeBudgetedList(r, itemsKey, cursorByID, c.effectiveMCPFrameBudget())
+		decoded, err := decodeBudgetedList(r, itemsKey, cursorMode, c.effectiveMCPFrameBudget(), c.effectiveListTextLimit())
 		if err != nil {
 			return err
 		}
@@ -592,7 +1032,7 @@ type ListJobsInput struct {
 	Desc     *bool  `json:"desc,omitempty" jsonschema:"Order descending by job ID"`
 }
 
-func (c *Client) ListJobs(ctx context.Context, in ListJobsInput) (map[string]any, error) {
+func (c *Client) ListJobs(ctx context.Context, in ListJobsInput) (*ListJobsResult, error) {
 	st := strings.TrimSpace(in.Status)
 	if st == "" {
 		return nil, errors.New("status is required")
@@ -621,7 +1061,11 @@ func (c *Client) ListJobs(ctx context.Context, in ListJobsInput) (map[string]any
 		q.Set("desc", strconv.FormatBool(*in.Desc))
 	}
 
-	return c.doBudgetedList(ctx, "/jobs", q, "jobs", true)
+	raw, err := c.doBudgetedList(ctx, "/jobs", q, "jobs", listCursorInt64ID)
+	if err != nil {
+		return nil, err
+	}
+	return raw.(*ListJobsResult), nil
 }
 
 // JobIDInput is the input schema for job-ID-only tools (get_job, requeue_job, mark_delivered).
@@ -670,18 +1114,26 @@ func (c *Client) MarkDelivered(ctx context.Context, id int64) (map[string]any, e
 // ListHeldInput is the input schema for the list_held MCP tool.
 type ListHeldInput struct {
 	Status string `json:"status,omitempty" jsonschema:"Held job status filter: held, released, cancelled, or all (default: held)"`
+	Cursor string `json:"cursor,omitempty" jsonschema:"Pagination cursor from previous response's next_cursor"`
 	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of held jobs to return"`
 }
 
-func (c *Client) ListHeld(ctx context.Context, in ListHeldInput) (map[string]any, error) {
+func (c *Client) ListHeld(ctx context.Context, in ListHeldInput) (*ListHeldResult, error) {
 	q := url.Values{}
 	if v := strings.TrimSpace(in.Status); v != "" {
 		q.Set("status", v)
 	}
+	if v := strings.TrimSpace(in.Cursor); v != "" {
+		q.Set("cursor", v)
+	}
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	return c.doBudgetedList(ctx, "/gate/held", q, "held", false)
+	raw, err := c.doBudgetedList(ctx, "/gate/held", q, "held", listCursorHeldCreatedID)
+	if err != nil {
+		return nil, err
+	}
+	return raw.(*ListHeldResult), nil
 }
 
 // HeldIDInput is the input schema for held-ID-only tools (release_held, cancel_held).
@@ -746,10 +1198,11 @@ func (c *Client) CancelHeld(ctx context.Context, id string) (map[string]any, err
 type GateDecisionsInput struct {
 	JobID  *int64 `json:"job_id,omitempty" jsonschema:"Filter by job ID"`
 	HeldID string `json:"held_id,omitempty" jsonschema:"Filter by held job ID"`
+	Cursor *int64 `json:"cursor,omitempty" jsonschema:"Pagination cursor (decision ID from previous response's next_cursor)"`
 	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of decisions to return"`
 }
 
-func (c *Client) GateDecisions(ctx context.Context, in GateDecisionsInput) (map[string]any, error) {
+func (c *Client) GateDecisions(ctx context.Context, in GateDecisionsInput) (*GateDecisionsResult, error) {
 	q := url.Values{}
 	if in.JobID != nil {
 		q.Set("job_id", strconv.FormatInt(*in.JobID, 10))
@@ -757,27 +1210,47 @@ func (c *Client) GateDecisions(ctx context.Context, in GateDecisionsInput) (map[
 	if v := strings.TrimSpace(in.HeldID); v != "" {
 		q.Set("held_id", v)
 	}
+	if in.Cursor != nil {
+		q.Set("cursor", strconv.FormatInt(*in.Cursor, 10))
+	}
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	return c.doBudgetedList(ctx, "/gate/decisions", q, "decisions", false)
+	raw, err := c.doBudgetedList(ctx, "/gate/decisions", q, "decisions", listCursorInt64ID)
+	if err != nil {
+		return nil, err
+	}
+	return raw.(*GateDecisionsResult), nil
 }
 
 // ListDeliveriesInput is the input schema for the list_deliveries MCP tool.
 type ListDeliveriesInput struct {
 	Status string `json:"status,omitempty" jsonschema:"Delivery status filter: undelivered, delivered, or all (default: undelivered)"`
+	Cursor string `json:"cursor,omitempty" jsonschema:"Pagination cursor from previous response's next_cursor"`
 	Limit  *int   `json:"limit,omitempty" jsonschema:"Maximum number of deliveries to return"`
 }
 
-func (c *Client) ListDeliveries(ctx context.Context, in ListDeliveriesInput) (map[string]any, error) {
+func (c *Client) ListDeliveries(ctx context.Context, in ListDeliveriesInput) (*ListDeliveriesResult, error) {
 	q := url.Values{}
-	if v := strings.TrimSpace(in.Status); v != "" {
-		q.Set("status", v)
+	status := strings.TrimSpace(in.Status)
+	if status != "" {
+		q.Set("status", status)
+	}
+	if v := strings.TrimSpace(in.Cursor); v != "" {
+		q.Set("cursor", v)
 	}
 	if in.Limit != nil {
 		q.Set("limit", strconv.Itoa(*in.Limit))
 	}
-	return c.doBudgetedList(ctx, "/deliveries", q, "jobs", false)
+	cursorMode := listCursorDeliveryUpdatedID
+	if status == "delivered" {
+		cursorMode = listCursorDeliveryDeliveredID
+	}
+	raw, err := c.doBudgetedList(ctx, "/deliveries", q, "jobs", cursorMode)
+	if err != nil {
+		return nil, err
+	}
+	return raw.(*ListDeliveriesResult), nil
 }
 
 // FleetStatusInput is the empty input schema for the fleet_status MCP tool.

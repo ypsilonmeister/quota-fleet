@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -15,8 +16,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/ypsilonmeister/quota-fleet/internal/api"
+	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
 type recordedRequest struct {
@@ -476,13 +480,13 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 	// 7. list_held
 	res, err = session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "list_held",
-		Arguments: map[string]any{"status": "all", "limit": 15},
+		Arguments: map[string]any{"status": "all", "cursor": "2026-11-24T01:00:00Z|held-000", "limit": 15},
 	})
 	if err != nil || res.IsError {
 		t.Fatalf("list_held failed: err=%v res=%+v", err, res)
 	}
 	lr = lastReq()
-	if lr.Method != http.MethodGet || lr.Path != "/gate/held" || !strings.Contains(lr.Query, "status=all") || !strings.Contains(lr.Query, "limit=15") {
+	if lr.Method != http.MethodGet || lr.Path != "/gate/held" || !strings.Contains(lr.Query, "status=all") || !strings.Contains(lr.Query, "limit=15") || !strings.Contains(lr.Query, "cursor=") {
 		t.Errorf("list_held HTTP req = %+v", lr)
 	}
 
@@ -544,7 +548,7 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 	// 10. gate_decisions
 	res, err = session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "gate_decisions",
-		Arguments: map[string]any{"job_id": 101, "held_id": "held-001", "limit": 5},
+		Arguments: map[string]any{"job_id": 101, "held_id": "held-001", "cursor": 50, "limit": 5},
 	})
 	if err != nil || res.IsError {
 		t.Fatalf("gate_decisions failed: err=%v res=%+v", err, res)
@@ -553,7 +557,7 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 	if lr.Method != http.MethodGet || lr.Path != "/gate/decisions" {
 		t.Errorf("gate_decisions HTTP req = %+v", lr)
 	}
-	for _, wantParam := range []string{"job_id=101", "held_id=held-001", "limit=5"} {
+	for _, wantParam := range []string{"job_id=101", "held_id=held-001", "cursor=50", "limit=5"} {
 		if !strings.Contains(lr.Query, wantParam) {
 			t.Errorf("gate_decisions query %q missing %q", lr.Query, wantParam)
 		}
@@ -562,13 +566,13 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 	// 11. list_deliveries
 	res, err = session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "list_deliveries",
-		Arguments: map[string]any{"status": "delivered", "limit": 10},
+		Arguments: map[string]any{"status": "delivered", "cursor": "2026-11-24T01:00:00Z|100", "limit": 10},
 	})
 	if err != nil || res.IsError {
 		t.Fatalf("list_deliveries failed: err=%v res=%+v", err, res)
 	}
 	lr = lastReq()
-	if lr.Method != http.MethodGet || lr.Path != "/deliveries" || !strings.Contains(lr.Query, "status=delivered") || !strings.Contains(lr.Query, "limit=10") {
+	if lr.Method != http.MethodGet || lr.Path != "/deliveries" || !strings.Contains(lr.Query, "status=delivered") || !strings.Contains(lr.Query, "limit=10") || !strings.Contains(lr.Query, "cursor=") {
 		t.Errorf("list_deliveries HTTP req = %+v", lr)
 	}
 
@@ -740,9 +744,28 @@ func TestLargeListResponsesExceeding4MiB(t *testing.T) {
 		t.Fatalf("expected payload > 4 MiB, got %d bytes", len(jobsPayload))
 	}
 
+	deliveriesPayload, err := json.Marshal(map[string]any{
+		"jobs": []map[string]any{
+			{"id": 1, "title": "job-1", "status": "done", "result_text": largeText, "updated_at": "2026-11-24T00:00:01Z"},
+			{"id": 2, "title": "job-2", "status": "done", "result_text": largeText, "updated_at": "2026-11-24T00:00:02Z"},
+			{"id": 3, "title": "job-3", "status": "done", "result_text": largeText, "updated_at": "2026-11-24T00:00:03Z"},
+			{"id": 4, "title": "job-4", "status": "done", "result_text": largeText, "updated_at": "2026-11-24T00:00:04Z"},
+			{"id": 5, "title": "job-5", "status": "done", "result_text": largeText, "updated_at": "2026-11-24T00:00:05Z"},
+		},
+		"next_cursor": "2026-11-24T00:00:05Z|5",
+		"has_more":    true,
+	})
+	if err != nil {
+		t.Fatalf("marshal deliveries payload: %v", err)
+	}
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		if r.URL.Path == "/deliveries" {
+			_, _ = w.Write(deliveriesPayload)
+			return
+		}
 		_, _ = w.Write(jobsPayload)
 	}))
 	defer ts.Close()
@@ -792,10 +815,10 @@ func TestResponseSizeBoundary(t *testing.T) {
 	const boundary int64 = 1024
 	const secret = "boundary-secret-token"
 
-	// Construct JSON payloads of exact length == boundary and length == boundary + 1.
+	// Construct JSON list payloads of exact length == boundary and length == boundary + 1.
 	makePayload := func(targetLen int) []byte {
-		const prefix = `{"data":"`
-		const suffix = `"}`
+		const prefix = `{"jobs":[{"id":1,"title":"`
+		const suffix = `"}],"has_more":false}`
 		padLen := targetLen - len(prefix) - len(suffix)
 		if padLen < 0 {
 			t.Fatalf("targetLen %d too small", targetLen)
@@ -840,8 +863,8 @@ func TestResponseSizeBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListJobs at exact boundary (%d bytes) failed: %v", boundary, err)
 	}
-	if _, ok := got["data"].(string); !ok {
-		t.Errorf("ListJobs at exact boundary missing data field: %+v", got)
+	if len(got.Jobs) != 1 {
+		t.Errorf("ListJobs at exact boundary jobs count = %d, want 1", len(got.Jobs))
 	}
 
 	// One byte over boundary (len == limit + 1) must fail.
@@ -975,13 +998,20 @@ func TestReleaseHeld409SanitizesReason(t *testing.T) {
 }
 
 func TestDecodeJSONRejectsTrailingData(t *testing.T) {
+	// Build two ~400-byte items so a 2000-byte MCP frame budget keeps item 1 and truncates item 2.
+	truncItem1 := `{"id":1,"title":"` + strings.Repeat("a", 300) + `","status":"done"}`
+	truncItem2 := `{"id":2,"title":"` + strings.Repeat("b", 300) + `","status":"done"}`
+	const tightMCPBudget int64 = 2000
+
 	cases := []struct {
-		name      string
-		isList    bool
-		body      string
-		maxBytes  int64
-		wantErr   bool
-		errSubstr string
+		name           string
+		isList         bool
+		body           string
+		maxBytes       int64
+		maxMCPBytes    int64
+		wantErr        bool
+		wantTruncated  bool
+		errSubstr      string
 	}{
 		{
 			name:    "single object with trailing whitespace succeeds",
@@ -994,6 +1024,49 @@ func TestDecodeJSONRejectsTrailingData(t *testing.T) {
 			isList:  true,
 			body:    "{\"jobs\":[{\"id\":1}],\"has_more\":false}  \n\t ",
 			wantErr: false,
+		},
+		{
+			name:          "truncated list with trailing whitespace succeeds",
+			isList:        true,
+			body:          fmt.Sprintf(`{"jobs":[%s,%s],"has_more":false}   `+"\t\r\n ", truncItem1, truncItem2),
+			maxMCPBytes:   tightMCPBudget,
+			wantErr:       false,
+			wantTruncated: true,
+		},
+		{
+			name:        "truncated list followed by second JSON object fails",
+			isList:      true,
+			body:        fmt.Sprintf(`{"jobs":[%s,%s],"has_more":false}{"extra":true}`, truncItem1, truncItem2),
+			maxMCPBytes: tightMCPBudget,
+			wantErr:     true,
+		},
+		{
+			name:        "truncated list followed by trailing garbage fails",
+			isList:      true,
+			body:        fmt.Sprintf(`{"jobs":[%s,%s],"has_more":false} trailing-junk`, truncItem1, truncItem2),
+			maxMCPBytes: tightMCPBudget,
+			wantErr:     true,
+		},
+		{
+			name:        "truncated list with malformed skipped array item fails",
+			isList:      true,
+			body:        fmt.Sprintf(`{"jobs":[%s,%s,{"id":BROKEN}],"has_more":false}`, truncItem1, truncItem2),
+			maxMCPBytes: tightMCPBudget,
+			wantErr:     true,
+		},
+		{
+			name:        "truncated list with missing closing array and object fails",
+			isList:      true,
+			body:        fmt.Sprintf(`{"jobs":[%s,%s`, truncItem1, truncItem2),
+			maxMCPBytes: tightMCPBudget,
+			wantErr:     true,
+		},
+		{
+			name:        "truncated list with malformed trailing envelope field fails",
+			isList:      true,
+			body:        fmt.Sprintf(`{"jobs":[%s,%s],"has_more":notabool}`, truncItem1, truncItem2),
+			maxMCPBytes: tightMCPBudget,
+			wantErr:     true,
 		},
 		{
 			name:    "single object followed by second JSON object fails",
@@ -1064,10 +1137,14 @@ func TestDecodeJSONRejectsTrailingData(t *testing.T) {
 			if tc.maxBytes > 0 {
 				client.maxResponseBytes = tc.maxBytes
 			}
+			if tc.maxMCPBytes > 0 {
+				client.maxMCPFrameBytes = tc.maxMCPBytes
+			}
 
 			ctx := context.Background()
+			var listRes *ListJobsResult
 			if tc.isList {
-				_, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
+				listRes, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
 			} else {
 				_, err = client.GetJob(ctx, 1)
 			}
@@ -1079,19 +1156,30 @@ func TestDecodeJSONRejectsTrailingData(t *testing.T) {
 				if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
 					t.Fatalf("error %q missing substring %q", err.Error(), tc.errSubstr)
 				}
-			} else if err != nil {
-				t.Fatalf("unexpected error for body %q: %v", tc.body, err)
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error for body %q: %v", tc.body, err)
+				}
+				if tc.wantTruncated {
+					if listRes == nil || !listRes.Truncated || !listRes.HasMore || listRes.NextCursor != 1 || len(listRes.Jobs) != 1 {
+						t.Fatalf("expected truncated 1-job result with next_cursor=1, got %+v", listRes)
+					}
+				}
 			}
 		})
 	}
 }
 
 func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
-	// 10 jobs x ~2 MiB result_text each -> ~4 MiB MCP wire bytes/job.
-	// With defaultMaxMCPFrameBytes = 14 MiB, each page fits 3 jobs (~12 MiB wire)
-	// and truncates before the 4th (~16 MiB wire), advancing via next_cursor.
-	const totalJobs = 10
-	bigText := strings.Repeat("a", 2<<20)
+	// Verify:
+	// 1) A single worst-case job with 3 x 1 MiB '<' fields (~18 MiB JSON, > 36 MiB raw MCP wire)
+	//    does NOT block list_jobs (even with limit=1): list_jobs projects long text fields to
+	//    <= defaultMaxListTextBytes, marks fields_truncated, advances next_cursor, and get_job
+	//    retrieves the full untruncated text.
+	// 2) Multi-page cursor continuation collects all jobs cleanly without stalling.
+	const totalJobs = 5
+	hugeHTMLText := strings.Repeat("<", 1<<20) // 1 MiB '<' -> 6 MiB HTML-escaped JSON per field (~18 MiB/job -> >36 MiB raw wire)
+	largePlainText := strings.Repeat("p", 1<<20)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1105,10 +1193,12 @@ func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
 			jobs := make([]map[string]any, 0, totalJobs)
 			for id := cursor + 1; id <= totalJobs && len(jobs) < limit; id++ {
 				jobs = append(jobs, map[string]any{
-					"id":          id,
-					"title":       fmt.Sprintf("job-%d", id),
-					"status":      "done",
-					"result_text": bigText,
+					"id":           id,
+					"title":        fmt.Sprintf("job-%d", id),
+					"status":       "done",
+					"instructions": hugeHTMLText,
+					"result_text":  hugeHTMLText,
+					"last_error":   hugeHTMLText,
 				})
 			}
 			hasMore := len(jobs) > 0 && jobs[len(jobs)-1]["id"].(int) < totalJobs
@@ -1121,17 +1211,14 @@ func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
 				"next_cursor": nextCursor,
 				"has_more":    hasMore,
 			})
-		case "/deliveries":
-			jobs := make([]map[string]any, 0, 5)
-			for id := 1; id <= 5; id++ {
-				jobs = append(jobs, map[string]any{
-					"id":          id,
-					"title":       fmt.Sprintf("delivery-%d", id),
-					"status":      "done",
-					"result_text": bigText,
-				})
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": jobs})
+		case "/jobs/1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":           1,
+				"title":        "job-1",
+				"status":       "done",
+				"instructions": largePlainText,
+				"result_text":  largePlainText,
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1147,18 +1234,13 @@ func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
 
 	ctx := context.Background()
 	var (
-		collectedIDs   []int
-		cursor         int64
-		truncatedPages int
-		pages          int
+		collectedIDs []int
+		cursor       int64
 	)
 
-	for {
-		pages++
-		if pages > totalJobs+1 {
-			t.Fatalf("pagination did not terminate after %d pages", pages)
-		}
-		args := map[string]any{"status": "done", "limit": totalJobs}
+	// Paginate with limit=1 across 5 giant jobs (~18 MiB JSON each).
+	for page := 1; page <= totalJobs+1; page++ {
+		args := map[string]any{"status": "done", "limit": 1}
 		if cursor > 0 {
 			args["cursor"] = cursor
 		}
@@ -1167,81 +1249,91 @@ func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
 			Arguments: args,
 		})
 		if err != nil || res.IsError {
-			t.Fatalf("list_jobs page %d (cursor=%d) failed: err=%v res=%+v", pages, cursor, err, res)
+			t.Fatalf("list_jobs limit=1 page %d (cursor=%d) failed: err=%v res=%+v", page, cursor, err, res)
 		}
 		got := decodeToolResultJSON(t, res)
 		jobs, ok := got["jobs"].([]any)
-		if !ok || len(jobs) == 0 {
-			t.Fatalf("page %d returned empty jobs: %+v", pages, got)
+		if !ok || len(jobs) != 1 {
+			t.Fatalf("page %d expected 1 job, got %+v", page, got)
 		}
-		for _, raw := range jobs {
-			m := raw.(map[string]any)
-			collectedIDs = append(collectedIDs, int(m["id"].(float64)))
+		item := jobs[0].(map[string]any)
+		collectedIDs = append(collectedIDs, int(item["id"].(float64)))
+
+		// Verify long fields were projected and fields_truncated was recorded.
+		for _, field := range []string{"instructions", "result_text", "last_error"} {
+			v, _ := item[field].(string)
+			if len(v) > defaultMaxListTextBytes {
+				t.Errorf("page %d %s len=%d > defaultMaxListTextBytes=%d", page, field, len(v), defaultMaxListTextBytes)
+			}
+			if !strings.HasSuffix(v, "...") {
+				t.Errorf("page %d %s expected '...' suffix after projection", page, field)
+			}
 		}
+		ftRaw, ok := item["fields_truncated"].([]any)
+		if !ok || len(ftRaw) != 3 {
+			t.Errorf("page %d fields_truncated = %v, want 3 entries", page, item["fields_truncated"])
+		}
+
 		hasMore, _ := got["has_more"].(bool)
-		truncated, _ := got["truncated"].(bool)
-		if truncated {
-			truncatedPages++
-			if reason, _ := got["truncated_reason"].(string); reason == "" {
-				t.Errorf("page %d truncated=true but truncated_reason is empty", pages)
-			}
-			if !hasMore {
-				t.Errorf("page %d truncated=true must set has_more=true", pages)
-			}
-		}
 		if !hasMore {
-			if truncated {
-				t.Errorf("final page %d should not be truncated", pages)
-			}
 			break
 		}
 		nextCursorFloat, ok := got["next_cursor"].(float64)
 		if !ok || int64(nextCursorFloat) <= cursor {
-			t.Fatalf("page %d did not advance next_cursor: got %v (prev=%d)", pages, got["next_cursor"], cursor)
+			t.Fatalf("page %d did not advance next_cursor: got %v (prev=%d)", page, got["next_cursor"], cursor)
 		}
 		cursor = int64(nextCursorFloat)
 	}
 
-	if truncatedPages == 0 {
-		t.Fatalf("expected at least one truncated page across %d large jobs, got 0", totalJobs)
-	}
-	wantIDs := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	wantIDs := []int{1, 2, 3, 4, 5}
 	if !reflect.DeepEqual(collectedIDs, wantIDs) {
 		t.Fatalf("collected job IDs = %v, want %v", collectedIDs, wantIDs)
 	}
 
-	// Non-cursor list endpoint (list_deliveries) must also enforce the budget and mark truncated=true.
+	// Verify get_job returns the full untruncated text for job 1.
 	res, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "list_deliveries",
-		Arguments: map[string]any{"status": "undelivered", "limit": 5},
+		Name:      "get_job",
+		Arguments: map[string]any{"id": 1},
 	})
 	if err != nil || res.IsError {
-		t.Fatalf("list_deliveries failed: err=%v res=%+v", err, res)
+		t.Fatalf("get_job(1) failed: err=%v res=%+v", err, res)
 	}
-	gotDeliv := decodeToolResultJSON(t, res)
-	if gotDeliv["truncated"] != true {
-		t.Errorf("list_deliveries expected truncated=true, got %+v", gotDeliv["truncated"])
-	}
-	if reason, _ := gotDeliv["truncated_reason"].(string); reason == "" {
-		t.Errorf("list_deliveries truncated_reason must be non-empty")
-	}
-	delivJobs, _ := gotDeliv["jobs"].([]any)
-	if len(delivJobs) != 3 {
-		t.Errorf("list_deliveries returned %d jobs, want 3 within 14 MiB frame budget", len(delivJobs))
+	full := decodeToolResultJSON(t, res)
+	if gotLen := len(full["result_text"].(string)); gotLen != len(largePlainText) {
+		t.Fatalf("get_job(1) result_text len = %d, want full %d", gotLen, len(largePlainText))
 	}
 }
 
 func TestListByteBudgetBoundary(t *testing.T) {
 	item1 := []byte(`{"id":1,"title":"item-1","status":"done","result_text":"` + strings.Repeat("b", 2000) + `"}`)
 	item2 := []byte(`{"id":2,"title":"item-2","status":"done","result_text":"` + strings.Repeat("c", 2000) + `"}`)
-	item1Wire := mcpWireItemBytes(item1)
-	item2Wire := mcpWireItemBytes(item2)
 
-	payload := fmt.Sprintf(`{"jobs":[%s,%s],"next_cursor":2,"has_more":false}`, item1, item2)
+	// Compute the exact wire size of the complete 2-item typed envelope.
+	twoItemEnv, err := json.Marshal(&ListJobsResult{
+		Jobs:       []json.RawMessage{item1, item2},
+		NextCursor: 2,
+		HasMore:    false,
+	})
+	if err != nil {
+		t.Fatalf("marshal twoItemEnv: %v", err)
+	}
+	exactTwoItemWire := mcpWireFrameBytes(twoItemEnv)
+
+	// Include a huge unknown envelope field ("extra_huge_blob") to verify that non-item
+	// unknown fields are discarded and cannot blow the output-wide MCP frame budget.
+	hugeUnknownBlob := strings.Repeat("Z", 200<<10)
+	payload := fmt.Sprintf(`{"jobs":[%s,%s],"next_cursor":2,"has_more":false,"extra_huge_blob":%q}`, item1, item2, hugeUnknownBlob)
+
+	var mode string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(payload))
+		switch mode {
+		case "oversized_cursor":
+			_, _ = fmt.Fprintf(w, `{"held":[{"id":"h1","created_at":"2026-11-24T00:00:00Z"}],"next_cursor":%q,"has_more":true}`, strings.Repeat("c", maxListCursorStringBytes+1))
+		default:
+			_, _ = w.Write([]byte(payload))
+		}
 	}))
 	defer ts.Close()
 
@@ -1251,42 +1343,351 @@ func TestListByteBudgetBoundary(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Exact fit for 2 items: budget = mcpFrameEnvelopeReserve + item1Wire + item2Wire.
-	exactBudget := mcpFrameEnvelopeReserve + item1Wire + item2Wire
-	client.maxMCPFrameBytes = exactBudget
+	// 1. Comfortable budget: 2 items returned, unknown huge envelope field discarded, whole frame <= budget.
+	client.maxMCPFrameBytes = exactTwoItemWire + 1024
 	got, err := client.ListJobs(ctx, ListJobsInput{Status: "done"})
 	if err != nil {
-		t.Fatalf("ListJobs at exact 2-item budget failed: %v", err)
+		t.Fatalf("ListJobs with comfortable budget failed: %v", err)
 	}
-	if got["truncated"] == true {
-		t.Errorf("expected no truncation at exact budget %d, got truncated=true", exactBudget)
+	if got.Truncated {
+		t.Errorf("expected no truncation, got truncated=true")
 	}
-	if jobs := got["jobs"].([]json.RawMessage); len(jobs) != 2 {
-		t.Errorf("jobs count = %d, want 2 at exact budget", len(jobs))
+	if len(got.Jobs) != 2 {
+		t.Errorf("jobs count = %d, want 2", len(got.Jobs))
+	}
+	gotRaw, _ := json.Marshal(got)
+	if strings.Contains(string(gotRaw), "extra_huge_blob") || strings.Contains(string(gotRaw), "ZZZZ") {
+		t.Errorf("unknown envelope field leaked into typed output")
+	}
+	if wire := mcpWireFrameBytes(gotRaw); wire > client.maxMCPFrameBytes {
+		t.Errorf("actual whole-output wire=%d > budget=%d", wire, client.maxMCPFrameBytes)
 	}
 
-	// 1 byte below exact 2-item budget: must truncate to 1 item with has_more=true, next_cursor=1.
-	client.maxMCPFrameBytes = exactBudget - 1
+	// 2. Exact boundary minus 1 byte: must truncate to 1 item with has_more=true, next_cursor=1,
+	//    and the entire serialized output must fit within exactTwoItemWire-1.
+	client.maxMCPFrameBytes = exactTwoItemWire - 1
 	got, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
 	if err != nil {
-		t.Fatalf("ListJobs at budget-1 failed: %v", err)
+		t.Fatalf("ListJobs at exactTwoItemWire-1 failed: %v", err)
 	}
-	if got["truncated"] != true || got["has_more"] != true || got["next_cursor"] != int64(1) {
-		t.Errorf("expected truncated=true has_more=true next_cursor=1, got truncated=%v has_more=%v next_cursor=%v",
-			got["truncated"], got["has_more"], got["next_cursor"])
+	if !got.Truncated || !got.HasMore || got.NextCursor != 1 || len(got.Jobs) != 1 {
+		t.Errorf("expected truncated=true has_more=true next_cursor=1 len=1, got %+v", got)
 	}
-	if jobs := got["jobs"].([]json.RawMessage); len(jobs) != 1 {
-		t.Errorf("jobs count = %d, want 1 at budget-1", len(jobs))
+	gotRaw, _ = json.Marshal(got)
+	if wire := mcpWireFrameBytes(gotRaw); wire > client.maxMCPFrameBytes {
+		t.Errorf("truncated whole-output wire=%d > budget=%d", wire, client.maxMCPFrameBytes)
 	}
 
-	// Budget smaller than first item alone: must fail rather than emit an oversized MCP frame.
-	client.maxMCPFrameBytes = mcpFrameEnvelopeReserve + item1Wire - 1
+	// 3. Tight budget smaller than item1 full projection, but large enough for minimal stub:
+	//    must still succeed using minimal stub projection so pagination can advance!
+	client.maxMCPFrameBytes = 1500
+	got, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
+	if err != nil {
+		t.Fatalf("ListJobs at minimal-stub budget failed: %v", err)
+	}
+	if !got.Truncated || !got.HasMore || got.NextCursor != 1 || len(got.Jobs) != 1 {
+		t.Errorf("expected stub-projected truncated result with next_cursor=1, got %+v", got)
+	}
+	gotRaw, _ = json.Marshal(got)
+	if wire := mcpWireFrameBytes(gotRaw); wire > client.maxMCPFrameBytes {
+		t.Errorf("minimal-stub whole-output wire=%d > budget=%d", wire, client.maxMCPFrameBytes)
+	}
+	if !strings.Contains(string(got.Jobs[0]), `"fields_truncated":["*"]`) {
+		t.Errorf("expected minimal stub fields_truncated=[\"*\"], got %s", string(got.Jobs[0]))
+	}
+
+	// 4. Impossibly tiny budget (< JSON-RPC wrapper + empty envelope): must fail cleanly.
+	client.maxMCPFrameBytes = 256
 	_, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
 	if err == nil {
-		t.Fatalf("expected error when first item exceeds MCP frame budget, got nil")
+		t.Fatalf("expected error for impossibly tiny budget, got nil")
 	}
 	if !strings.Contains(err.Error(), "exceeds MCP frame budget") {
-		t.Errorf("unexpected error for oversized first item: %v", err)
+		t.Errorf("unexpected error for tiny budget: %v", err)
+	}
+
+	// 5. Oversized upstream string next_cursor must be rejected.
+	mode = "oversized_cursor"
+	client.maxMCPFrameBytes = defaultMaxMCPFrameBytes
+	_, err = client.ListHeld(ctx, ListHeldInput{})
+	if err == nil || !strings.Contains(err.Error(), "next_cursor length") {
+		t.Errorf("expected oversized next_cursor rejection, got: %v", err)
+	}
+}
+
+func TestAllFourListToolsCursorContinuationEndToEnd(t *testing.T) {
+	// End-to-end test against a REAL SQLite store + REAL HTTP API server + REAL MCP server.
+	// Populates jobs, held jobs, gate decisions, and deliveries (undelivered & delivered),
+	// forces MCP frame budget truncation on every list tool, and verifies full cursor
+	// continuation collects 100% of items without duplicates or stalls.
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "fleet.db")
+	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: "mcp-e2e-test"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	longBody := strings.Repeat("X", 6000) // > defaultMaxListTextBytes (4096)
+
+	// 1. Seed 5 done jobs (3 undelivered, 2 delivered).
+	var wantJobIDs, wantUndeliveredIDs, wantDeliveredIDs []int64
+	for i := 1; i <= 5; i++ {
+		job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+			RequestID:    fmt.Sprintf("req-job-%d", i),
+			Title:        fmt.Sprintf("job-%d", i),
+			Agent:        "claude",
+			Host:         "ubuntu",
+			Instructions: longBody,
+		})
+		if err != nil {
+			t.Fatalf("CreateJob %d: %v", i, err)
+		}
+		claimed, ok, err := st.ClaimByID(ctx, job.ID, 10)
+		if err != nil || !ok {
+			t.Fatalf("ClaimByID %d: ok=%v err=%v", job.ID, ok, err)
+		}
+		if _, err := st.Complete(ctx, job.ID, claimed.ClaimedBy, longBody); err != nil {
+			t.Fatalf("Complete %d: %v", job.ID, err)
+		}
+		wantJobIDs = append(wantJobIDs, job.ID)
+		if i <= 2 {
+			if _, err := st.MarkDelivered(ctx, job.ID); err != nil {
+				t.Fatalf("MarkDelivered %d: %v", job.ID, err)
+			}
+			wantDeliveredIDs = append(wantDeliveredIDs, job.ID)
+		} else {
+			wantUndeliveredIDs = append(wantUndeliveredIDs, job.ID)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// 2. Seed 4 held jobs with large payload instructions.
+	var wantHeldIDs []string
+	for i := 1; i <= 4; i++ {
+		held, _, err := st.HoldJob(ctx, store.HoldJobParams{
+			RequestID: fmt.Sprintf("req-held-%d", i),
+			Pool:      "claude",
+			Payload: store.CreateJobParams{
+				RequestID:    fmt.Sprintf("req-held-%d", i),
+				Title:        fmt.Sprintf("held-%d", i),
+				Instructions: longBody,
+			},
+			Reason:          longBody,
+			SnapshotSummary: "claude: exhausted",
+		})
+		if err != nil {
+			t.Fatalf("HoldJob %d: %v", i, err)
+		}
+		wantHeldIDs = append(wantHeldIDs, held.ID)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// 3. Seed 4 gate decisions with large reason text.
+	var wantDecisionIDs []int64
+	for i := 1; i <= 4; i++ {
+		dec, err := st.RecordGateDecision(ctx, store.GateDecision{
+			JobID:         wantJobIDs[0],
+			Mode:          "enforce",
+			RequestedPool: "claude",
+			Decision:      "would_hold",
+			Reason:        longBody,
+			DecidedAt:     time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("RecordGateDecision %d: %v", i, err)
+		}
+		wantDecisionIDs = append(wantDecisionIDs, dec.ID)
+	}
+	// Decisions are returned newest-first (id DESC).
+	for i, j := 0, len(wantDecisionIDs)-1; i < j; i, j = i+1, j-1 {
+		wantDecisionIDs[i], wantDecisionIDs[j] = wantDecisionIDs[j], wantDecisionIDs[i]
+	}
+	// Delivered jobs are returned newest-first (delivered_at DESC, id DESC).
+	for i, j := 0, len(wantDeliveredIDs)-1; i < j; i, j = i+1, j-1 {
+		wantDeliveredIDs[i], wantDeliveredIDs[j] = wantDeliveredIDs[j], wantDeliveredIDs[i]
+	}
+
+	const apiToken = "e2e-cursor-token"
+	apiSrv := api.NewServer(st, api.Options{Token: apiToken})
+	ts := httptest.NewServer(apiSrv)
+	defer ts.Close()
+
+	// Create an MCP client with a tight frame budget (~24 KiB) so that even after
+	// 4 KiB field projection (~10-18 KiB wire per item), each list tool truncates to 1-2 items
+	// per page and must advance via next_cursor!
+	client, err := NewClient(ts.URL, apiToken, ts.Client())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.maxMCPFrameBytes = 24 << 10 // 24 KiB
+
+	// A) list_jobs continuation
+	{
+		var gotIDs []int64
+		var cursor *int64
+		truncatedPages := 0
+		for page := 1; page <= 10; page++ {
+			lim := 50
+			res, err := client.ListJobs(ctx, ListJobsInput{Status: "done", Cursor: cursor, Limit: &lim})
+			if err != nil {
+				t.Fatalf("ListJobs page %d: %v", page, err)
+			}
+			if res.Truncated {
+				truncatedPages++
+			}
+			for _, raw := range res.Jobs {
+				id, ok := extractInt64ID(raw)
+				if !ok {
+					t.Fatalf("missing id in job %s", string(raw))
+				}
+				gotIDs = append(gotIDs, id)
+			}
+			if !res.HasMore {
+				break
+			}
+			if res.NextCursor <= 0 {
+				t.Fatalf("ListJobs page %d has_more=true without next_cursor", page)
+			}
+			nc := res.NextCursor
+			cursor = &nc
+		}
+		if truncatedPages == 0 {
+			t.Errorf("ListJobs expected at least 1 budget-truncated page")
+		}
+		if !reflect.DeepEqual(gotIDs, wantJobIDs) {
+			t.Errorf("ListJobs collected = %v, want %v", gotIDs, wantJobIDs)
+		}
+	}
+
+	// B) list_held continuation
+	{
+		var gotIDs []string
+		var cursor string
+		truncatedPages := 0
+		for page := 1; page <= 10; page++ {
+			lim := 50
+			res, err := client.ListHeld(ctx, ListHeldInput{Status: "held", Cursor: cursor, Limit: &lim})
+			if err != nil {
+				t.Fatalf("ListHeld page %d: %v", page, err)
+			}
+			if res.Truncated {
+				truncatedPages++
+			}
+			for _, raw := range res.Held {
+				var item struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(raw, &item); err != nil || item.ID == "" {
+					t.Fatalf("invalid held item %s", string(raw))
+				}
+				gotIDs = append(gotIDs, item.ID)
+			}
+			if !res.HasMore {
+				break
+			}
+			if res.NextCursor == "" {
+				t.Fatalf("ListHeld page %d has_more=true without next_cursor", page)
+			}
+			cursor = res.NextCursor
+		}
+		if truncatedPages == 0 {
+			t.Errorf("ListHeld expected at least 1 budget-truncated page")
+		}
+		if !reflect.DeepEqual(gotIDs, wantHeldIDs) {
+			t.Errorf("ListHeld collected = %v, want %v", gotIDs, wantHeldIDs)
+		}
+	}
+
+	// C) gate_decisions continuation (tighter budget since decisions have 1 long field)
+	{
+		client.maxMCPFrameBytes = 12 << 10
+		var gotIDs []int64
+		var cursor *int64
+		truncatedPages := 0
+		for page := 1; page <= 10; page++ {
+			lim := 50
+			res, err := client.GateDecisions(ctx, GateDecisionsInput{Cursor: cursor, Limit: &lim})
+			if err != nil {
+				t.Fatalf("GateDecisions page %d: %v", page, err)
+			}
+			if res.Truncated {
+				truncatedPages++
+			}
+			for _, raw := range res.Decisions {
+				id, ok := extractInt64ID(raw)
+				if !ok {
+					t.Fatalf("missing id in decision %s", string(raw))
+				}
+				gotIDs = append(gotIDs, id)
+			}
+			if !res.HasMore {
+				break
+			}
+			if res.NextCursor <= 0 {
+				t.Fatalf("GateDecisions page %d has_more=true without next_cursor", page)
+			}
+			nc := res.NextCursor
+			cursor = &nc
+		}
+		if truncatedPages == 0 {
+			t.Errorf("GateDecisions expected at least 1 budget-truncated page")
+		}
+		if !reflect.DeepEqual(gotIDs, wantDecisionIDs) {
+			t.Errorf("GateDecisions collected = %v, want %v", gotIDs, wantDecisionIDs)
+		}
+	}
+
+	// D) list_deliveries continuation (both undelivered and delivered)
+	client.maxMCPFrameBytes = 24 << 10
+	for _, tc := range []struct {
+		status  string
+		wantIDs []int64
+	}{
+		{status: "undelivered", wantIDs: wantUndeliveredIDs},
+		{status: "delivered", wantIDs: wantDeliveredIDs},
+	} {
+		var gotIDs []int64
+		var cursor string
+		truncatedPages := 0
+		for page := 1; page <= 10; page++ {
+			lim := 50
+			res, err := client.ListDeliveries(ctx, ListDeliveriesInput{Status: tc.status, Cursor: cursor, Limit: &lim})
+			if err != nil {
+				t.Fatalf("ListDeliveries(%s) page %d: %v", tc.status, page, err)
+			}
+			if res.Truncated {
+				truncatedPages++
+			}
+			for _, raw := range res.Jobs {
+				id, ok := extractInt64ID(raw)
+				if !ok {
+					t.Fatalf("missing id in delivery %s", string(raw))
+				}
+				gotIDs = append(gotIDs, id)
+			}
+			if !res.HasMore {
+				break
+			}
+			if res.NextCursor == "" {
+				t.Fatalf("ListDeliveries(%s) page %d has_more=true without next_cursor", tc.status, page)
+			}
+			cursor = res.NextCursor
+		}
+		if truncatedPages == 0 {
+			t.Errorf("ListDeliveries(%s) expected at least 1 budget-truncated page", tc.status)
+		}
+		if !reflect.DeepEqual(gotIDs, tc.wantIDs) {
+			t.Errorf("ListDeliveries(%s) collected = %v, want %v", tc.status, gotIDs, tc.wantIDs)
+		}
+	}
+
+	// E) Invalid cursor returns 400 error on held / deliveries.
+	if _, err := client.ListHeld(ctx, ListHeldInput{Cursor: "not-a-valid-cursor"}); err == nil {
+		t.Errorf("ListHeld with invalid cursor unexpectedly succeeded")
+	}
+	if _, err := client.ListDeliveries(ctx, ListDeliveriesInput{Cursor: "not-a-valid-cursor"}); err == nil {
+		t.Errorf("ListDeliveries with invalid cursor unexpectedly succeeded")
 	}
 }
 
@@ -1323,17 +1724,19 @@ func (w *maxLineTrackingWriter) MaxLine() int {
 }
 
 func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
-	// Stream 200 HTML-escaped jobs (64 KiB '<' each -> ~384 KiB JSON/job, ~76.8 MiB total
-	// if unbudgeted) through a real MCP IOTransport with default 16 MiB DefaultMaxLineLength.
+	// Stream 120 HTML-escaped jobs (4 text fields x 8 KiB '<' each -> ~192 KiB JSON/job,
+	// ~23 MiB total upstream < 64 MiB HTTP cap; after 4 KiB field projection -> ~96 KiB JSON/job
+	// -> ~200 KiB MCP wire/job -> ~24 MiB unbudgeted wire > 14 MiB MCP budget) through a real
+	// MCP IOTransport with default 16 MiB DefaultMaxLineLength.
 	// Verify:
-	// 1) Element-by-element decoding stops early once the 14 MiB MCP frame budget is full.
+	// 1) All 120 upstream items are validated to EOF while only budgeted items are kept.
 	// 2) The actual JSON-RPC wire frame is > 12 MiB, <= 14 MiB, and < 16 MiB SDK limit.
-	// 3) Peak heap / total allocations remain tightly bounded (no full-stream buffering).
+	// 3) Live heap stays tightly bounded even while validating all remaining items to EOF.
 	const (
-		apiMaxListLimit = 200
-		itemChars       = 64 << 10 // 64 KiB '<' -> ~384 KiB JSON/job -> ~832 KiB MCP wire/job
+		totalItems = 120
+		fieldChars = 8 << 10 // 8 KiB '<' -> projected to 4 KiB -> ~24 KiB HTML-escaped JSON/field
 	)
-	itemInstructions := strings.Repeat("<", itemChars)
+	fieldText := strings.Repeat("<", fieldChars)
 	var streamedItems atomic.Int64
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1342,7 +1745,7 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 		flusher, _ := w.(http.Flusher)
 		_, _ = io.WriteString(w, `{"jobs":[`)
 		enc := json.NewEncoder(w)
-		for i := 1; i <= apiMaxListLimit; i++ {
+		for i := 1; i <= totalItems; i++ {
 			if i > 1 {
 				if _, err := io.WriteString(w, ","); err != nil {
 					return
@@ -1350,10 +1753,13 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 			}
 			streamedItems.Add(1)
 			if err := enc.Encode(map[string]any{
-				"id":           i,
-				"title":        "html-escaped-job",
-				"status":       "queued",
-				"instructions": itemInstructions,
+				"id":                  i,
+				"title":               "html-escaped-job",
+				"status":              "queued",
+				"instructions":        fieldText,
+				"acceptance_criteria": fieldText,
+				"result_text":         fieldText,
+				"last_error":          fieldText,
 			}); err != nil {
 				return
 			}
@@ -1361,7 +1767,7 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 				flusher.Flush()
 			}
 		}
-		_, _ = fmt.Fprintf(w, `],"next_cursor":%d,"has_more":false}`, apiMaxListLimit)
+		_, _ = fmt.Fprintf(w, `],"next_cursor":%d,"has_more":false}`, totalItems)
 	}))
 	defer ts.Close()
 
@@ -1406,9 +1812,8 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 		<-serverDone
 	}()
 
-	// Phase 1: Measure decodeBudgetedList directly against a synthetic 200-item (~76.8 MiB)
-	// streaming JSON reader (no httptest/MCP client noise) to verify element-by-element
-	// decoding keeps allocations far below the full 76.8 MiB stream size.
+	// Phase 1: Measure decodeBudgetedList directly against a synthetic 120-item (~23 MiB)
+	// streaming JSON reader validating all items to EOF while keeping live heap bounded.
 	{
 		pr, pw := io.Pipe()
 		go func() {
@@ -1417,58 +1822,59 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 				return
 			}
 			enc := json.NewEncoder(pw)
-			for i := 1; i <= apiMaxListLimit; i++ {
+			for i := 1; i <= totalItems; i++ {
 				if i > 1 {
 					if _, err := io.WriteString(pw, ","); err != nil {
 						return
 					}
 				}
 				if err := enc.Encode(map[string]any{
-					"id":           i,
-					"title":        "html-escaped-job",
-					"status":       "queued",
-					"instructions": itemInstructions,
+					"id":                  i,
+					"title":               "html-escaped-job",
+					"status":              "queued",
+					"instructions":        fieldText,
+					"acceptance_criteria": fieldText,
+					"result_text":         fieldText,
+					"last_error":          fieldText,
 				}); err != nil {
 					return
 				}
 			}
-			_, _ = fmt.Fprintf(pw, `],"next_cursor":%d,"has_more":false}`, apiMaxListLimit)
+			_, _ = fmt.Fprintf(pw, `],"next_cursor":%d,"has_more":false}`, totalItems)
 		}()
 
 		runtime.GC()
 		var decBefore, decAfter runtime.MemStats
 		runtime.ReadMemStats(&decBefore)
 
-		decoded, err := decodeBudgetedList(pr, "jobs", true, defaultMaxMCPFrameBytes)
+		rawDecoded, err := decodeBudgetedList(pr, "jobs", listCursorInt64ID, defaultMaxMCPFrameBytes, defaultMaxListTextBytes)
 		_ = pr.Close()
 		if err != nil {
 			t.Fatalf("decodeBudgetedList direct stream failed: %v", err)
 		}
+		decoded := rawDecoded.(*ListJobsResult)
+		runtime.GC()
 		runtime.ReadMemStats(&decAfter)
-		decAllocDelta := decAfter.TotalAlloc - decBefore.TotalAlloc
 		decLiveHeap := int64(decAfter.HeapAlloc) - int64(decBefore.HeapAlloc)
 
-		decJobs := decoded["jobs"].([]json.RawMessage)
-		if len(decJobs) == 0 || len(decJobs) >= apiMaxListLimit {
-			t.Fatalf("direct decode expected truncated non-empty page (<%d), got %d", apiMaxListLimit, len(decJobs))
+		if len(decoded.Jobs) == 0 || len(decoded.Jobs) >= totalItems {
+			t.Fatalf("direct decode expected truncated non-empty page (<%d), got %d", totalItems, len(decoded.Jobs))
 		}
-		if decoded["truncated"] != true || decoded["has_more"] != true {
-			t.Fatalf("direct decode expected truncated=true has_more=true, got %v / %v", decoded["truncated"], decoded["has_more"])
+		if !decoded.Truncated || !decoded.HasMore {
+			t.Fatalf("direct decode expected truncated=true has_more=true, got %v / %v", decoded.Truncated, decoded.HasMore)
 		}
-		// Full 200-item stream would be ~76.8 MiB raw JSON (plus ~150+ MiB if buffered+unmarshaled).
-		// With element-by-element budgeted decoding, total allocations stay well below 64 MiB.
-		const maxDecodeAlloc = 64 << 20
-		if decAllocDelta > maxDecodeAlloc {
-			t.Errorf("direct decode totalAllocDelta = %d bytes (> %d bytes)", decAllocDelta, maxDecodeAlloc)
+		const maxLiveHeap = 32 << 20
+		if decLiveHeap > maxLiveHeap {
+			t.Errorf("direct decode liveHeapDelta = %d bytes (> %d bytes)", decLiveHeap, maxLiveHeap)
 		}
-		t.Logf("direct stream decode (200-item ~76.8 MiB source): returned=%d jobs, total_alloc_delta=%.2f MiB, live_heap_delta=%.2f MiB",
-			len(decJobs), float64(decAllocDelta)/(1<<20), float64(decLiveHeap)/(1<<20))
+		t.Logf("direct stream decode (%d items validated to EOF): returned=%d jobs, live_heap_delta=%.2f MiB",
+			totalItems, len(decoded.Jobs), float64(decLiveHeap)/(1<<20))
 	}
 
 	// Phase 2: Full end-to-end MCP CallTool over default 16 MiB IOTransport.
 	res, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "list_jobs",
-		Arguments: map[string]any{"status": "queued", "limit": apiMaxListLimit},
+		Arguments: map[string]any{"status": "queued", "limit": totalItems},
 	})
 	if err != nil || res.IsError {
 		t.Fatalf("MCP list_jobs max-page over default 16 MiB IOTransport failed: err=%v res=%+v", err, res)
@@ -1478,8 +1884,8 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 
 	got := decodeToolResultJSON(t, res)
 	jobs, ok := got["jobs"].([]any)
-	if !ok || len(jobs) == 0 || len(jobs) >= apiMaxListLimit {
-		t.Fatalf("expected truncated non-empty page (<%d), got %d jobs", apiMaxListLimit, len(jobs))
+	if !ok || len(jobs) == 0 || len(jobs) >= totalItems {
+		t.Fatalf("expected truncated non-empty page (<%d), got %d jobs", totalItems, len(jobs))
 	}
 	if got["truncated"] != true || got["has_more"] != true {
 		t.Fatalf("expected truncated=true has_more=true, got truncated=%v has_more=%v", got["truncated"], got["has_more"])
@@ -1487,9 +1893,12 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 	if got["next_cursor"] != float64(len(jobs)) {
 		t.Fatalf("next_cursor = %v, want %d", got["next_cursor"], len(jobs))
 	}
+	if streamedItems.Load() != totalItems {
+		t.Errorf("streamedItems = %d, want %d (full stream validated to EOF)", streamedItems.Load(), totalItems)
+	}
 	first := jobs[0].(map[string]any)
-	if first["instructions"] != itemInstructions {
-		t.Fatalf("first job instructions mismatch (got len=%d, want %d)", len(first["instructions"].(string)), len(itemInstructions))
+	if len(first["instructions"].(string)) > defaultMaxListTextBytes {
+		t.Fatalf("first job instructions len=%d > defaultMaxListTextBytes=%d", len(first["instructions"].(string)), defaultMaxListTextBytes)
 	}
 
 	if wireBytes <= 12<<20 {
@@ -1502,8 +1911,8 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 		t.Errorf("measured wire frame = %d bytes >= mcp.DefaultMaxLineLength (%d)", wireBytes, mcp.DefaultMaxLineLength)
 	}
 
-	t.Logf("max MCP list page verified: returned=%d/%d jobs (upstream streamed=%d), wire_frame=%d bytes (%.2f MiB / 16.00 MiB SDK limit)",
-		len(jobs), apiMaxListLimit, streamedItems.Load(),
+	t.Logf("max MCP list page verified: returned=%d/%d jobs (upstream validated=%d), wire_frame=%d bytes (%.2f MiB / 16.00 MiB SDK limit)",
+		len(jobs), totalItems, streamedItems.Load(),
 		wireBytes, float64(wireBytes)/(1<<20))
 }
 
