@@ -584,43 +584,283 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 	if got["instance_id"] != "fleet-test" || got["total"] != float64(7) {
 		t.Errorf("fleet_status result = %+v", got)
 	}
+
+	// Verify every recorded HTTP request across all 12 tools sent the expected Bearer token.
+	mu.Lock()
+	recorded := append([]recordedRequest(nil), reqs...)
+	mu.Unlock()
+	if len(recorded) < 12 {
+		t.Fatalf("expected at least 12 recorded HTTP requests, got %d", len(recorded))
+	}
+	for i, req := range recorded {
+		if req.Auth != "Bearer "+testToken {
+			t.Errorf("request[%d] (%s %s) Authorization = %q, want %q", i, req.Method, req.Path, req.Auth, "Bearer "+testToken)
+		}
+	}
 }
 
 func TestAPIErrorHandlingAndNoTokenLeak(t *testing.T) {
 	const secret = "super-secret-token-xyz"
+	const otherSecret = "other-leaked-bearer-999"
+
+	cases := []struct {
+		name           string
+		status         int
+		contentType    string
+		body           string
+		wantSubstr     []string
+		forbidSubstr   []string
+	}{
+		{
+			name:         "401 json echoing exact token",
+			status:       http.StatusUnauthorized,
+			contentType:  "application/json",
+			body:         `{"error":"unauthorized: invalid bearer token ` + secret + `"}`,
+			wantSubstr:   []string{"401", "unauthorized"},
+			forbidSubstr: []string{secret, "invalid bearer token"},
+		},
+		{
+			name:         "403 json echoing authorization header",
+			status:       http.StatusForbidden,
+			contentType:  "application/json",
+			body:         `{"error":"forbidden: Authorization: Bearer ` + secret + `"}`,
+			wantSubstr:   []string{"403", "forbidden"},
+			forbidSubstr: []string{secret, "Authorization:"},
+		},
+		{
+			name:         "500 json echoing bearer token in error field",
+			status:       http.StatusInternalServerError,
+			contentType:  "application/json",
+			body:         `{"error":"proxy rejected Authorization: Bearer ` + secret + ` and Bearer ` + otherSecret + `"}`,
+			wantSubstr:   []string{"500"},
+			forbidSubstr: []string{secret, otherSecret},
+		},
+		{
+			name:         "409 json echoing token in reason and current_status",
+			status:       http.StatusConflict,
+			contentType:  "application/json",
+			body:         `{"reason":"conflict for token ` + secret + `","current_status":"Bearer ` + secret + `"}`,
+			wantSubstr:   []string{"409"},
+			forbidSubstr: []string{secret},
+		},
+		{
+			name:         "502 plain text proxy error echoing authorization header",
+			status:       http.StatusBadGateway,
+			contentType:  "text/html",
+			body:         `<html><body>502 Bad Gateway: Authorization: Bearer ` + secret + `</body></html>`,
+			wantSubstr:   []string{"502"},
+			forbidSubstr: []string{secret, "<html>", "Authorization:"},
+		},
+		{
+			name:         "400 normal api json error preserves safe message",
+			status:       http.StatusBadRequest,
+			contentType:  "application/json",
+			body:         `{"error":"invalid status \"bogus\""}`,
+			wantSubstr:   []string{"400", "invalid status"},
+			forbidSubstr: []string{secret},
+		},
+		{
+			name:         "409 normal api json error preserves safe current_status",
+			status:       http.StatusConflict,
+			contentType:  "application/json",
+			body:         `{"error":"status conflict: job is not cancellable","current_status":"claimed"}`,
+			wantSubstr:   []string{"409", "job is not cancellable", "current_status=claimed"},
+			forbidSubstr: []string{secret},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.contentType != "" {
+					w.Header().Set("Content-Type", tc.contentType)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer ts.Close()
+
+			session, cleanup := connectTestClient(t, Options{
+				APIURL:     ts.URL,
+				Token:      secret,
+				HTTPClient: ts.Client(),
+			})
+			defer cleanup()
+
+			res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+				Name:      "fleet_status",
+				Arguments: map[string]any{},
+			})
+			if err != nil {
+				t.Fatalf("unexpected protocol error: %v", err)
+			}
+			if !res.IsError {
+				t.Fatalf("expected IsError=true on HTTP %d", tc.status)
+			}
+			textContent, ok := res.Content[0].(*mcp.TextContent)
+			if !ok {
+				t.Fatalf("expected TextContent, got %T", res.Content[0])
+			}
+			for _, want := range tc.wantSubstr {
+				if !strings.Contains(strings.ToLower(textContent.Text), strings.ToLower(want)) {
+					t.Errorf("error text %q missing %q", textContent.Text, want)
+				}
+			}
+			for _, forbid := range tc.forbidSubstr {
+				if strings.Contains(textContent.Text, forbid) {
+					t.Errorf("error text %q leaked forbidden substring %q", textContent.Text, forbid)
+				}
+			}
+		})
+	}
+}
+
+func TestLargeListResponsesExceeding4MiB(t *testing.T) {
+	// Build a legitimate list payload larger than 4 MiB (e.g., 5 jobs x 1 MiB result_text).
+	largeText := strings.Repeat("x", 1<<20)
+	jobsPayload, err := json.Marshal(map[string]any{
+		"jobs": []map[string]any{
+			{"id": 1, "title": "job-1", "status": "done", "result_text": largeText},
+			{"id": 2, "title": "job-2", "status": "done", "result_text": largeText},
+			{"id": 3, "title": "job-3", "status": "done", "result_text": largeText},
+			{"id": 4, "title": "job-4", "status": "done", "result_text": largeText},
+			{"id": 5, "title": "job-5", "status": "done", "result_text": largeText},
+		},
+		"next_cursor": 5,
+		"has_more":    true,
+	})
+	if err != nil {
+		t.Fatalf("marshal large payload: %v", err)
+	}
+	if len(jobsPayload) <= 4<<20 {
+		t.Fatalf("expected payload > 4 MiB, got %d bytes", len(jobsPayload))
+	}
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"unauthorized: invalid bearer token"}`))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(jobsPayload)
 	}))
 	defer ts.Close()
 
 	session, cleanup := connectTestClient(t, Options{
 		APIURL:     ts.URL,
-		Token:      secret,
+		Token:      "large-page-token",
 		HTTPClient: ts.Client(),
 	})
 	defer cleanup()
 
-	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
-		Name:      "fleet_status",
-		Arguments: map[string]any{},
+	ctx := context.Background()
+
+	// list_jobs with > 4 MiB response must succeed and preserve pagination metadata.
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "list_jobs",
+		Arguments: map[string]any{"status": "done", "limit": 5},
 	})
+	if err != nil || res.IsError {
+		t.Fatalf("list_jobs > 4 MiB failed: err=%v res=%+v", err, res)
+	}
+	got := decodeToolResultJSON(t, res)
+	if got["has_more"] != true || got["next_cursor"] != float64(5) {
+		t.Errorf("list_jobs pagination mismatch: has_more=%v next_cursor=%v", got["has_more"], got["next_cursor"])
+	}
+	jobs, ok := got["jobs"].([]any)
+	if !ok || len(jobs) != 5 {
+		t.Errorf("list_jobs count = %d, want 5", len(jobs))
+	}
+
+	// list_deliveries with > 4 MiB response must also succeed.
+	res, err = session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "list_deliveries",
+		Arguments: map[string]any{"status": "undelivered", "limit": 5},
+	})
+	if err != nil || res.IsError {
+		t.Fatalf("list_deliveries > 4 MiB failed: err=%v res=%+v", err, res)
+	}
+	got = decodeToolResultJSON(t, res)
+	jobs, ok = got["jobs"].([]any)
+	if !ok || len(jobs) != 5 {
+		t.Errorf("list_deliveries count = %d, want 5", len(jobs))
+	}
+}
+
+func TestResponseSizeBoundary(t *testing.T) {
+	const boundary int64 = 1024
+	const secret = "boundary-secret-token"
+
+	// Construct JSON payloads of exact length == boundary and length == boundary + 1.
+	makePayload := func(targetLen int) []byte {
+		const prefix = `{"data":"`
+		const suffix = `"}`
+		padLen := targetLen - len(prefix) - len(suffix)
+		if padLen < 0 {
+			t.Fatalf("targetLen %d too small", targetLen)
+		}
+		return []byte(prefix + strings.Repeat("a", padLen) + suffix)
+	}
+
+	exactPayload := makePayload(int(boundary))
+	overPayload := makePayload(int(boundary) + 1)
+	oversizedError := strings.Repeat("e", maxErrorResponseBytes+1024) + " Bearer " + secret
+
+	var mode string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch mode {
+		case "exact":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(exactPayload)
+		case "over":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(overPayload)
+		case "huge_error":
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(oversizedError))
+		}
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(ts.URL, secret, ts.Client())
 	if err != nil {
-		t.Fatalf("unexpected protocol error: %v", err)
+		t.Fatalf("NewClient: %v", err)
 	}
-	if !res.IsError {
-		t.Fatalf("expected IsError=true on HTTP 401")
+	client.maxResponseBytes = boundary
+
+	ctx := context.Background()
+
+	// Exact boundary (len == limit) must succeed.
+	mode = "exact"
+	got, err := client.ListJobs(ctx, ListJobsInput{Status: "done"})
+	if err != nil {
+		t.Fatalf("ListJobs at exact boundary (%d bytes) failed: %v", boundary, err)
 	}
-	tc, ok := res.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("expected TextContent, got %T", res.Content[0])
+	if _, ok := got["data"].(string); !ok {
+		t.Errorf("ListJobs at exact boundary missing data field: %+v", got)
 	}
-	if !strings.Contains(tc.Text, "401") || !strings.Contains(tc.Text, "unauthorized") {
-		t.Errorf("unexpected error text: %q", tc.Text)
+
+	// One byte over boundary (len == limit + 1) must fail.
+	mode = "over"
+	_, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
+	if err == nil {
+		t.Fatalf("ListJobs at boundary+1 (%d bytes) unexpectedly succeeded", boundary+1)
 	}
-	if strings.Contains(tc.Text, secret) {
-		t.Errorf("error text leaked bearer token")
+	if !strings.Contains(err.Error(), "exceeded") {
+		t.Errorf("expected size-exceeded error, got: %v", err)
+	}
+
+	// Non-2xx response larger than maxErrorResponseBytes must still return HTTP status safely without token leak.
+	mode = "huge_error"
+	_, err = client.ListJobs(ctx, ListJobsInput{Status: "done"})
+	if err == nil {
+		t.Fatalf("ListJobs on huge 502 error unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("expected HTTP 502 in error, got: %v", err)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "exceeded") {
+		t.Errorf("unexpected error content for huge 502: %v", err)
 	}
 }
 

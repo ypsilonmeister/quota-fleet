@@ -11,21 +11,33 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
-	defaultHTTPTimeout = 30 * time.Second
-	maxResponseBytes   = 4 << 20 // 4 MiB
+	defaultHTTPTimeout      = 30 * time.Second
+	defaultMaxResponseBytes = 512 << 20 // 512 MiB (accommodates max-limit list pages)
+	maxErrorResponseBytes   = 64 << 10  // 64 KiB cap for non-2xx error bodies
+	maxErrorMessageRunes    = 256
+)
+
+var (
+	authHeaderRe  = regexp.MustCompile(`(?i)\bauthorization\s*[:=]\s*[^\r\n,;"]+`)
+	bearerTokenRe = regexp.MustCompile(`(?i)\bbearer\s+\S+`)
+	basicTokenRe  = regexp.MustCompile(`(?i)\bbasic\s+[A-Za-z0-9+/=]{4,}`)
+	safeStatusRe  = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 )
 
 // Client is a thin HTTP client for the quota-fleet JSON API.
 type Client struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
+	baseURL          string
+	token            string
+	httpClient       *http.Client
+	maxResponseBytes int64
 }
 
 // APIError represents a non-success HTTP response from the quota-fleet API.
@@ -58,9 +70,10 @@ func NewClient(baseURL, token string, httpClient *http.Client) (*Client, error) 
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &Client{
-		baseURL:    trimmed,
-		token:      strings.TrimSpace(token),
-		httpClient: httpClient,
+		baseURL:          trimmed,
+		token:            strings.TrimSpace(token),
+		httpClient:       httpClient,
+		maxResponseBytes: defaultMaxResponseBytes,
 	}, nil
 }
 
@@ -93,21 +106,41 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("request %s %s failed: %w", method, path, err)
+		return 0, nil, fmt.Errorf("request %s %s failed: %s", method, path, c.sanitizeErrorText(err.Error()))
 	}
 	defer resp.Body.Close()
 
-	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil {
-		return resp.StatusCode, nil, fmt.Errorf("read response from %s %s: %w", method, path, err)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBytes))
+		if err != nil {
+			return resp.StatusCode, nil, fmt.Errorf("read response from %s %s: %s", method, path, c.sanitizeErrorText(err.Error()))
+		}
+		return resp.StatusCode, respBytes, nil
 	}
-	if len(respBytes) > maxResponseBytes {
-		return resp.StatusCode, nil, fmt.Errorf("response from %s %s exceeded %d bytes", method, path, maxResponseBytes)
+
+	limit := c.maxResponseBytes
+	if limit <= 0 {
+		limit = defaultMaxResponseBytes
+	}
+	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("read response from %s %s: %s", method, path, c.sanitizeErrorText(err.Error()))
+	}
+	if int64(len(respBytes)) > limit {
+		return resp.StatusCode, nil, fmt.Errorf("response from %s %s exceeded %d bytes", method, path, limit)
 	}
 	return resp.StatusCode, respBytes, nil
 }
 
-func parseAPIError(status int, body []byte) error {
+func (c *Client) parseAPIError(status int, body []byte) error {
+	// Never echo upstream response bodies for authentication/authorization failures.
+	switch status {
+	case http.StatusUnauthorized:
+		return &APIError{StatusCode: status, Message: "unauthorized"}
+	case http.StatusForbidden:
+		return &APIError{StatusCode: status, Message: "forbidden"}
+	}
+
 	var envelope struct {
 		Error         string `json:"error"`
 		Reason        string `json:"reason"`
@@ -118,18 +151,58 @@ func parseAPIError(status int, body []byte) error {
 		if msg == "" {
 			msg = strings.TrimSpace(envelope.Reason)
 		}
+		msg = c.sanitizeErrorText(msg)
 		if msg != "" {
-			if envelope.CurrentStatus != "" && !strings.Contains(msg, envelope.CurrentStatus) {
-				msg = fmt.Sprintf("%s (current_status=%s)", msg, envelope.CurrentStatus)
+			cs := strings.TrimSpace(envelope.CurrentStatus)
+			if cs != "" && safeStatusRe.MatchString(cs) && (c.token == "" || !strings.Contains(cs, c.token)) && !strings.Contains(msg, cs) {
+				msg = fmt.Sprintf("%s (current_status=%s)", msg, cs)
 			}
 			return &APIError{StatusCode: status, Message: msg}
 		}
 	}
-	text := strings.TrimSpace(string(body))
-	if len(text) > 512 {
-		text = text[:512] + "..."
+
+	// Do not echo non-JSON (plain text / HTML) upstream or proxy bodies.
+	return &APIError{StatusCode: status, Message: safeStatusMessage(status)}
+}
+
+func safeStatusMessage(status int) string {
+	if text := strings.TrimSpace(http.StatusText(status)); text != "" {
+		return text
 	}
-	return &APIError{StatusCode: status, Message: text}
+	return "unexpected error"
+}
+
+func (c *Client) sanitizeErrorText(s string) string {
+	if s == "" {
+		return ""
+	}
+	if c.token != "" {
+		s = strings.ReplaceAll(s, c.token, "[REDACTED]")
+	}
+	s = authHeaderRe.ReplaceAllString(s, "Authorization: [REDACTED]")
+	s = bearerTokenRe.ReplaceAllString(s, "Bearer [REDACTED]")
+	s = basicTokenRe.ReplaceAllString(s, "Basic [REDACTED]")
+
+	var b strings.Builder
+	b.Grow(len(s))
+	lastSpace := false
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastSpace = false
+	}
+	out := strings.TrimSpace(b.String())
+	runes := []rune(out)
+	if len(runes) > maxErrorMessageRunes {
+		out = string(runes[:maxErrorMessageRunes]) + "..."
+	}
+	return out
 }
 
 func decodeObject(body []byte) (map[string]any, error) {
@@ -238,7 +311,7 @@ func (c *Client) CreateJob(ctx context.Context, in CreateJobInput) (*CreateJobOu
 		}, nil
 
 	default:
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 }
 
@@ -288,7 +361,7 @@ func (c *Client) ListJobs(ctx context.Context, in ListJobsInput) (map[string]any
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -307,7 +380,7 @@ func (c *Client) GetJob(ctx context.Context, id int64) (map[string]any, error) {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -331,7 +404,7 @@ func (c *Client) CancelJob(ctx context.Context, in CancelJobInput) (map[string]a
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -345,7 +418,7 @@ func (c *Client) RequeueJob(ctx context.Context, id int64) (map[string]any, erro
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -359,7 +432,7 @@ func (c *Client) MarkDelivered(ctx context.Context, id int64) (map[string]any, e
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -383,7 +456,7 @@ func (c *Client) ListHeld(ctx context.Context, in ListHeldInput) (map[string]any
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -422,9 +495,9 @@ func (c *Client) ReleaseHeld(ctx context.Context, id string) (*ReleaseHeldOutput
 		if err := json.Unmarshal(body, &out); err == nil && !out.Released && out.Reason != "" {
 			return &out, nil
 		}
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	default:
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 }
 
@@ -439,7 +512,7 @@ func (c *Client) CancelHeld(ctx context.Context, id string) (map[string]any, err
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -467,7 +540,7 @@ func (c *Client) GateDecisions(ctx context.Context, in GateDecisionsInput) (map[
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -491,7 +564,7 @@ func (c *Client) ListDeliveries(ctx context.Context, in ListDeliveriesInput) (ma
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
@@ -505,7 +578,7 @@ func (c *Client) FleetStatus(ctx context.Context) (map[string]any, error) {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, parseAPIError(status, body)
+		return nil, c.parseAPIError(status, body)
 	}
 	return decodeObject(body)
 }
