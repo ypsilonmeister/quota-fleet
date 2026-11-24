@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 )
 
@@ -198,6 +200,71 @@ func TestCLIMCPConfigSnippetsAndNoTokenLeak(t *testing.T) {
 	errBuf.Reset()
 	if code := run([]string{"mcp", "config", "--format", "yaml"}, &out, &errBuf); code == 0 {
 		t.Errorf("expected non-zero exit for invalid --format")
+	}
+}
+
+func TestCLIMCPServeContextToolsListAndStatus(t *testing.T) {
+	const testToken = "cli-mcp-test-token"
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/status" {
+			_, _ = w.Write([]byte(`{"instance_id":"cli-mcp-inst","counts":{"queued":1},"total":1}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+
+	t.Setenv("QUOTA_FLEET_API_URL", ts.URL)
+	t.Setenv("QUOTA_FLEET_TOKEN", testToken)
+
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	var errBuf bytes.Buffer
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- runMCPServeContext(ctx, st, &errBuf)
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "cli-test-client", Version: "0.0.1"}, nil)
+	session, err := client.Connect(ctx, ct, nil)
+	if err != nil {
+		cancel()
+		t.Fatalf("client.Connect: %v (stderr=%q)", err, errBuf.String())
+	}
+
+	listRes, err := session.ListTools(ctx, nil)
+	if err != nil {
+		_ = session.Close()
+		cancel()
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(listRes.Tools) != 12 {
+		t.Errorf("ListTools count = %d, want 12", len(listRes.Tools))
+	}
+
+	callRes, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "fleet_status",
+		Arguments: map[string]any{},
+	})
+	if err != nil || callRes.IsError {
+		t.Fatalf("fleet_status failed: err=%v res=%+v", err, callRes)
+	}
+	if gotAuth != "Bearer "+testToken {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer "+testToken)
+	}
+
+	_ = session.Close()
+	cancel()
+	select {
+	case code := <-doneCh:
+		if code != 0 {
+			t.Fatalf("runMCPServeContext exit=%d stderr=%q", code, errBuf.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("runMCPServeContext did not exit after cancel")
 	}
 }
 
