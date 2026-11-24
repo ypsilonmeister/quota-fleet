@@ -567,6 +567,11 @@ html[data-direction="ledger"] a.stat-card:hover {
   text-decoration: none;
 }
 
+a.stat-card:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -3px;
+}
+
 .stat-label {
   font-size: 11px;
   color: var(--muted);
@@ -1385,6 +1390,11 @@ html[data-direction="ledger"] .kv-item {
 .view-toggle-btn:focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -2px;
+}
+
+.view-toggle-btn.active:focus-visible {
+  outline: 2px solid var(--primary-ink);
+  outline-offset: -3px;
 }
 
 /* ==========================================================================
