@@ -162,6 +162,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		InstanceID:      cfg.InstanceID,
 		MaxClaimed:      cfg.Limits.MaxClaimed,
 		Token:           cfg.API.Token,
+		Tokens:          cfg.API.Tokens,
 		RequireAuth:     cfg.API.RequireAuth,
 		Logger:          logger,
 		GateMode:        cfg.Quota.EffectiveGateMode(),
@@ -228,9 +229,14 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 	}
 
 	apiAuthSummary := "disabled (no token)"
-	if strings.TrimSpace(cfg.API.Token) != "" {
+	switch {
+	case len(cfg.API.Tokens) > 0 && strings.TrimSpace(cfg.API.Token) != "":
+		apiAuthSummary = fmt.Sprintf("enabled (%d named tokens + legacy token)", len(cfg.API.Tokens))
+	case len(cfg.API.Tokens) > 0:
+		apiAuthSummary = fmt.Sprintf("enabled (%d named tokens)", len(cfg.API.Tokens))
+	case strings.TrimSpace(cfg.API.Token) != "":
 		apiAuthSummary = "enabled (bearer token)"
-	} else if cfg.API.RequireAuth {
+	case cfg.API.RequireAuth:
 		apiAuthSummary = "enabled (require_auth=true, token unset)"
 	}
 

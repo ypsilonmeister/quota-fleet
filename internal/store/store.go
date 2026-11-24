@@ -97,6 +97,10 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs.worktree_spec: %w", err)
 	}
+	if err := ensureCreatedByColumn(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs.created_by: %w", err)
+	}
 	if err := ensureHeldJobsColumns(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate held_jobs: %w", err)
@@ -344,17 +348,17 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 				request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 				instructions, acceptance_criteria, parent_id,
 				claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-				created_at, updated_at, model, pool, alt_pools, session_id
+				created_at, updated_at, model, pool, alt_pools, session_id, created_by
 			) VALUES (
 				?, ?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?,
 				'', NULL, 0, '', '', NULL,
-				?, ?, ?, ?, ?, ?
+				?, ?, ?, ?, ?, ?, ?
 			)
 		`,
 			p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
 			p.Instructions, p.AcceptanceCriteria, parentArg,
-			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID,
+			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy),
 		)
 		if err != nil {
 			if isUniqueConstraintError(err) {
@@ -1439,7 +1443,7 @@ const jobColumns = `
 	id, request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 	instructions, acceptance_criteria, parent_id,
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-	created_at, updated_at, model, pool, alt_pools, session_id
+	created_at, updated_at, model, pool, alt_pools, session_id, created_by
 `
 
 func queryJobByID(ctx context.Context, q queryRower, jobID int64) (*Job, error) {
@@ -1477,7 +1481,7 @@ func scanJob(s rowScanner) (*Job, error) {
 		&j.Agent, &j.Host, &j.Workdir, &worktreeSpecStr, &j.TargetRef,
 		&j.Instructions, &j.AcceptanceCriteria, &parentID,
 		&j.ClaimedBy, &claimedAt, &j.Attempts, &j.ResultText, &j.LastError, &deliveredAt,
-		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID,
+		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy,
 	)
 	if err != nil {
 		return nil, err
@@ -1745,6 +1749,14 @@ func decodeWorktreeSpec(raw string) (*WorktreeSpec, error) {
 }
 
 func ensureWorktreeSpecColumn(ctx context.Context, db *sql.DB) error {
+	return ensureJobsColumn(ctx, db, "worktree_spec", `ALTER TABLE jobs ADD COLUMN worktree_spec TEXT NOT NULL DEFAULT ''`)
+}
+
+func ensureCreatedByColumn(ctx context.Context, db *sql.DB) error {
+	return ensureJobsColumn(ctx, db, "created_by", `ALTER TABLE jobs ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`)
+}
+
+func ensureJobsColumn(ctx context.Context, db *sql.DB, colName, alterSQL string) error {
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(jobs)`)
 	if err != nil {
 		return err
@@ -1763,14 +1775,14 @@ func ensureWorktreeSpecColumn(ctx context.Context, db *sql.DB) error {
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
 			return err
 		}
-		if name == "worktree_spec" {
+		if name == colName {
 			return nil
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `ALTER TABLE jobs ADD COLUMN worktree_spec TEXT NOT NULL DEFAULT ''`)
+	_, err = db.ExecContext(ctx, alterSQL)
 	return err
 }
 

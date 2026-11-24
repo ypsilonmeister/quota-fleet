@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     model TEXT NOT NULL DEFAULT '',
     pool TEXT NOT NULL DEFAULT '',
     alt_pools TEXT NOT NULL DEFAULT '[]',
-    session_id TEXT NOT NULL DEFAULT ''
+    session_id TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id);
