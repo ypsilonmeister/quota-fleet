@@ -11,7 +11,7 @@
 ## 2. 入力
 - **role ヒント**（登録時に任意指定）: implementation / fix / review / research / judge。未指定なら title や指示文からの推定はせず、standard 扱いの既定表を使う。
 - **weight ヒント**（任意）: light / standard / heavy。
-- **チェーン制約**: レビューは実装者と**別系統**にする（系統 = agy(Gemini) / claude / codex の3分類）。親ジョブの agent が分かれば自動で適用する。
+- **チェーン制約**: レビューは実装と**別系統**にする。系統はエージェントではなく**モデル由来**で判定する（系統 = Gemini 系 / Claude 系 / GPT 系）。agy は3系統すべてを内包する（Gemini モデル、3p 経由の Claude、GPT-OSS）ため、エージェント単位の分類では同系統のすり合わせを防げない。親ジョブの model が分かれば自動で適用する（2026-11-24、Claude（かなめ）の指摘を受けて改訂）。
 - **host 制約**: ジョブに host 指定があれば、その host で実行可能な agent／model の中から選ぶ。
 
 ## 3. モデル対応表（2026-11-24、ubuntu-vm の `agy models` で実地確認）
@@ -26,10 +26,11 @@
 |---|---|---|---|
 | implementation | agy Neon Medium / Codex sol | Codex sol / agy Neon Medium / Sonnet 5.5 | Opus 5.5 / Codex astra / agy Neon High |
 | fix | 実装者と同一（セッション継続が既定） | 同左 | 同左 |
-| review | agy Neon Medium（別系統） | Codex sol / Sonnet 5.5（別系統） | Opus 5.5（別系統） |
+| review | agy Neon Medium（別系統） | Codex sol / Sonnet 5.5（別系統） | 実装の系統と排他に選ぶ（下記） |
 | research | agy Flash / Neon Low | Orchestrator (Neon) / Neon Medium | Orchestrator（司令塔 Neon High＋実行 Hydrogen High） |
 | judge | Gemini Decision（評価器） | 同左 | 同左 |
 
+- heavy のレビュー候補は実装側と排他的に構成する: 実装が Claude 系なら Codex astra / Neon High、実装が GPT 系なら Opus 5.5 / Neon High、実装が Gemini 系なら Opus 5.5 / Codex astra。同系統しか残らない場合は Selector で無理に埋めず、保持して判断を仰ぐ。
 - 同格候補の間では「週間リセットまでの近さ × 残量」で失効の近い枠から使う（もったいない順）。
 - fix で実装者のプールが枯渇している場合は、別系統への切替を提案として記録し、Gate の保持に委ねる（勝手に系統を変えない）。
 
@@ -47,3 +48,6 @@
 - Orchestrator のペア指定を launch テンプレへどう渡すか。
 - GPT-OSS 120B の使いどころ（3p プールの節約先としての評価が先）。
 - S1 の比較記録の置き場所（gate_decisions の拡張か、別テーブルか）。
+- Selector と Gate の接点（2026-11-24、Claude の指摘で追加）: 未測定（unknown）プールの扱いを Selector と Gate でどう揃えるか（Gate は未測定をバイパスするが、Selector は候補から外す方針でよいか）。
+- 登録時の alt_pools と Selector の選択の優先関係（Selector が選んだ pool が枯渇したとき、alt_pools へ倒すのか Gate の保持に委ねるのか）。
+- 同格候補の評価式の具体形（残量率とリセットまでの時間の組み合わせ方）。
