@@ -53,7 +53,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_jobs",
-		Description: "List jobs filtered by status (required) and optional agent, host, title query (q), parent_id, cursor, limit, and desc (GET /jobs). Long text fields are projected to a bounded preview (marked in fields_truncated; call get_job for full text). Pages are capped to fit the MCP frame byte budget; when has_more=true (or truncated=true), continue with next_cursor.",
+		Description: "List jobs filtered by status (required) and optional agent, host, title query (q), parent_id, cursor, limit, and desc (GET /jobs). Long text fields (>4 KiB, e.g. instructions, acceptance_criteria, result_text, last_error) are projected to a UTF-8 preview and listed in fields_truncated. Full job fields can be retrieved via get_job(id) when the full job's MCP JSON-RPC response fits within the default 16 MiB transport frame limit (approx. <=7.5 MiB plain text or <=1.2 MiB of HTML-escaped '<'/'>'/'&' across all fields due to dual structuredContent + text output); larger jobs must be fetched directly via HTTP API GET /jobs/{id}. Pages are capped to the 14 MiB MCP frame budget (and retried with a smaller page size if the upstream HTTP response exceeds 64 MiB); when has_more=true or truncated=true, continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListJobsInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.ListJobs(ctx, in)
 		if err != nil {
@@ -64,7 +64,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_job",
-		Description: "Get full details of a job by ID, including instructions, acceptance_criteria, result_text, and last_error (GET /jobs/{id}).",
+		Description: "Get full details of a job by ID, including instructions, acceptance_criteria, result_text, and last_error (GET /jobs/{id}). Subject to the 32 MiB HTTP response limit and the MCP transport's default 16 MiB JSON-RPC frame limit (approx. <=7.5 MiB plain text or <=1.2 MiB of HTML-escaped '<'/'>'/'&' across all fields due to dual structuredContent + text output); jobs exceeding the MCP frame limit must be retrieved directly via HTTP API GET /jobs/{id}.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in JobIDInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.GetJob(ctx, in.ID)
 		if err != nil {
@@ -108,7 +108,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_held",
-		Description: "List jobs held by Quota Gate with optional status, cursor, and limit (GET /gate/held). Long text fields are projected to a bounded preview (marked in fields_truncated). When has_more=true (or truncated=true), continue with next_cursor.",
+		Description: "List jobs held by Quota Gate with optional status, cursor, and limit (GET /gate/held). Long text fields (>4 KiB, e.g. payload.instructions, payload.acceptance_criteria, reason, snapshot_summary, last_error) are projected to a UTF-8 preview and listed in fields_truncated. No dedicated MCP detail tool exists for held jobs; retrieve full untruncated payload/reason/last_error via HTTP API GET /gate/held (or via get_job(id=released_job_id) once released, within the 16 MiB MCP frame limit). When has_more=true or truncated=true, continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListHeldInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.ListHeld(ctx, in)
 		if err != nil {
@@ -141,7 +141,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "gate_decisions",
-		Description: "List recent Quota Gate decisions, optionally filtered by job_id, held_id, cursor, or limit (GET /gate/decisions). Long text fields are projected to a bounded preview (marked in fields_truncated). When has_more=true (or truncated=true), continue with next_cursor.",
+		Description: "List recent Quota Gate decisions, optionally filtered by job_id, held_id, cursor, or limit (GET /gate/decisions). Long text fields (>4 KiB, e.g. reason) are projected to a UTF-8 preview and listed in fields_truncated. No dedicated MCP detail tool exists for gate decisions; retrieve full untruncated reason via HTTP API GET /gate/decisions. When has_more=true or truncated=true, continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in GateDecisionsInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.GateDecisions(ctx, in)
 		if err != nil {
@@ -152,7 +152,7 @@ func registerTools(srv *mcp.Server, client *Client) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_deliveries",
-		Description: "List job deliveries filtered by status (undelivered, delivered, or all), cursor, and optional limit (GET /deliveries). Long text fields are projected to a bounded preview (marked in fields_truncated; call get_job for full text). When has_more=true (or truncated=true), continue with next_cursor.",
+		Description: "List job deliveries filtered by status (undelivered, delivered, or all), cursor, and optional limit (GET /deliveries). Long text fields (>4 KiB, e.g. instructions, acceptance_criteria, result_text, last_error) are projected to a UTF-8 preview and listed in fields_truncated. Full job fields can be retrieved via get_job(id) when the full job's MCP JSON-RPC response fits within the default 16 MiB transport frame limit (approx. <=7.5 MiB plain text or <=1.2 MiB of HTML-escaped '<'/'>'/'&' across all fields); larger jobs must be fetched directly via HTTP API GET /jobs/{id}. When has_more=true or truncated=true, continue with next_cursor.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in ListDeliveriesInput) (*mcp.CallToolResult, any, error) {
 		out, err := client.ListDeliveries(ctx, in)
 		if err != nil {

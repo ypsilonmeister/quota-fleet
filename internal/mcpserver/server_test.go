@@ -1174,12 +1174,24 @@ func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
 	// Verify:
 	// 1) A single worst-case job with 3 x 1 MiB '<' fields (~18 MiB JSON, > 36 MiB raw MCP wire)
 	//    does NOT block list_jobs (even with limit=1): list_jobs projects long text fields to
-	//    <= defaultMaxListTextBytes, marks fields_truncated, advances next_cursor, and get_job
-	//    retrieves the full untruncated text.
+	//    <= defaultMaxListTextBytes, marks fields_truncated, and advances next_cursor.
 	// 2) Multi-page cursor continuation collects all jobs cleanly without stalling.
+	// 3) Because this ~18 MiB JSON job exceeds the default 16 MiB MCP transport frame limit
+	//    (~39 MiB wire with dual output), full untruncated retrieval uses the HTTP API (Client.GetJob)
+	//    on the exact same job data.
 	const totalJobs = 5
 	hugeHTMLText := strings.Repeat("<", 1<<20) // 1 MiB '<' -> 6 MiB HTML-escaped JSON per field (~18 MiB/job -> >36 MiB raw wire)
-	largePlainText := strings.Repeat("p", 1<<20)
+
+	makeGiantJob := func(id int) map[string]any {
+		return map[string]any{
+			"id":           id,
+			"title":        fmt.Sprintf("job-%d", id),
+			"status":       "done",
+			"instructions": hugeHTMLText,
+			"result_text":  hugeHTMLText,
+			"last_error":   hugeHTMLText,
+		}
+	}
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1192,14 +1204,7 @@ func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
 			}
 			jobs := make([]map[string]any, 0, totalJobs)
 			for id := cursor + 1; id <= totalJobs && len(jobs) < limit; id++ {
-				jobs = append(jobs, map[string]any{
-					"id":           id,
-					"title":        fmt.Sprintf("job-%d", id),
-					"status":       "done",
-					"instructions": hugeHTMLText,
-					"result_text":  hugeHTMLText,
-					"last_error":   hugeHTMLText,
-				})
+				jobs = append(jobs, makeGiantJob(id))
 			}
 			hasMore := len(jobs) > 0 && jobs[len(jobs)-1]["id"].(int) < totalJobs
 			var nextCursor int
@@ -1212,13 +1217,7 @@ func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
 				"has_more":    hasMore,
 			})
 		case "/jobs/1":
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id":           1,
-				"title":        "job-1",
-				"status":       "done",
-				"instructions": largePlainText,
-				"result_text":  largePlainText,
-			})
+			_ = json.NewEncoder(w).Encode(makeGiantJob(1))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1290,17 +1289,19 @@ func TestListJobsByteBudgetPaginationAndContinuation(t *testing.T) {
 		t.Fatalf("collected job IDs = %v, want %v", collectedIDs, wantIDs)
 	}
 
-	// Verify get_job returns the full untruncated text for job 1.
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "get_job",
-		Arguments: map[string]any{"id": 1},
-	})
-	if err != nil || res.IsError {
-		t.Fatalf("get_job(1) failed: err=%v res=%+v", err, res)
+	// Verify direct HTTP Client.GetJob retrieves the exact same 3 x 1 MiB '<' full text (< 32 MiB HTTP limit).
+	httpClient, err := NewClient(ts.URL, "budget-pagination-token", ts.Client())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
 	}
-	full := decodeToolResultJSON(t, res)
-	if gotLen := len(full["result_text"].(string)); gotLen != len(largePlainText) {
-		t.Fatalf("get_job(1) result_text len = %d, want full %d", gotLen, len(largePlainText))
+	full, err := httpClient.GetJob(ctx, 1)
+	if err != nil {
+		t.Fatalf("HTTP Client.GetJob(1) failed: %v", err)
+	}
+	for _, field := range []string{"instructions", "result_text", "last_error"} {
+		if gotStr, _ := full[field].(string); gotStr != hugeHTMLText {
+			t.Fatalf("HTTP Client.GetJob(1) %s len = %d, want exact %d", field, len(gotStr), len(hugeHTMLText))
+		}
 	}
 }
 
@@ -1914,6 +1915,390 @@ func TestMaxMCPListPageWireLimitAndPeakMemory(t *testing.T) {
 	t.Logf("max MCP list page verified: returned=%d/%d jobs (upstream validated=%d), wire_frame=%d bytes (%.2f MiB / 16.00 MiB SDK limit)",
 		len(jobs), totalItems, streamedItems.Load(),
 		wireBytes, float64(wireBytes)/(1<<20))
+}
+
+func connectIOTransportClient(t *testing.T, opts Options) (*mcp.ClientSession, *maxLineTrackingWriter, func()) {
+	t.Helper()
+	srv, err := NewServer(opts)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	tracker := &maxLineTrackingWriter{WriteCloser: s2cW}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- srv.Run(ctx, &mcp.IOTransport{
+			Reader:        c2sR,
+			Writer:        tracker,
+			MaxLineLength: 0, // default 16 MiB mcp.DefaultMaxLineLength
+		})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "io-test-client", Version: "0.0.1"}, nil)
+	session, err := client.Connect(ctx, &mcp.IOTransport{
+		Reader:        s2cR,
+		Writer:        c2sW,
+		MaxLineLength: 0, // default 16 MiB mcp.DefaultMaxLineLength
+	}, nil)
+	if err != nil {
+		cancel()
+		t.Fatalf("client.Connect over IOTransport: %v", err)
+	}
+
+	cleanup := func() {
+		_ = session.Close()
+		_ = c2sW.Close()
+		_ = s2cR.Close()
+		cancel()
+		<-serverDone
+	}
+	return session, tracker, cleanup
+}
+
+func TestListJobsExceedingHTTPResponseLimitContinuation(t *testing.T) {
+	// End-to-end test against a REAL SQLite store + REAL HTTP API + REAL MCP server
+	// over default 16 MiB IOTransport, crossing the REAL 64 MiB HTTP list response cap:
+	// 15 queued jobs x 800 KiB '<' (~4.8 MiB JSON each -> ~72 MiB total > 64 MiB).
+	// Verify that list_jobs(status="queued", limit=15) and omitted-limit filtered queries
+	// automatically retry with smaller page sizes (preserving cursor & all filters),
+	// validate every accepted HTTP page to EOF, report truncated=true + next_cursor,
+	// and collect all 15 jobs with zero duplicates.
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "fleet-http-cap.db")
+	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: "mcp-http-cap-test"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	const totalJobs = 15
+	largeHTMLInstructions := strings.Repeat("<", 800<<10) // 800 KiB '<' -> ~4.8 MiB JSON/job
+	wantAscIDs := make([]int64, 0, totalJobs)
+	for i := 1; i <= totalJobs; i++ {
+		job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+			RequestID:    fmt.Sprintf("http-cap-req-%d", i),
+			Title:        fmt.Sprintf("http-cap-job-%d", i),
+			Agent:        "claude",
+			Host:         "ubuntu",
+			Instructions: largeHTMLInstructions,
+		})
+		if err != nil {
+			t.Fatalf("CreateJob %d: %v", i, err)
+		}
+		wantAscIDs = append(wantAscIDs, job.ID)
+	}
+
+	const apiToken = "http-cap-test-token"
+	apiSrv := api.NewServer(st, api.Options{Token: apiToken})
+	ts := httptest.NewServer(apiSrv)
+	defer ts.Close()
+
+	session, _, cleanup := connectIOTransportClient(t, Options{
+		APIURL:     ts.URL,
+		Token:      apiToken,
+		HTTPClient: ts.Client(),
+	})
+	defer cleanup()
+
+	// Case 1: Explicit limit=15 (exact 72 MiB > 64 MiB HTTP limit scenario).
+	{
+		var gotIDs []int64
+		var cursor int64
+		truncatedPages := 0
+		for page := 1; page <= totalJobs; page++ {
+			args := map[string]any{"status": "queued", "limit": totalJobs}
+			if cursor > 0 {
+				args["cursor"] = cursor
+			}
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "list_jobs",
+				Arguments: args,
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("list_jobs(limit=15) page %d (cursor=%d) failed: err=%v res=%+v", page, cursor, err, res)
+			}
+			got := decodeToolResultJSON(t, res)
+			jobs, ok := got["jobs"].([]any)
+			if !ok || len(jobs) == 0 {
+				t.Fatalf("page %d expected non-empty jobs, got %+v", page, got)
+			}
+			if page == 1 {
+				if got["truncated"] != true || got["has_more"] != true {
+					t.Fatalf("page 1 expected truncated=true has_more=true after HTTP-limit shrink, got truncated=%v has_more=%v", got["truncated"], got["has_more"])
+				}
+				reason, _ := got["truncated_reason"].(string)
+				if !strings.Contains(reason, "HTTP") {
+					t.Errorf("page 1 truncated_reason = %q, want HTTP limit explanation", reason)
+				}
+			}
+			if got["truncated"] == true {
+				truncatedPages++
+			}
+			for _, raw := range jobs {
+				item := raw.(map[string]any)
+				gotIDs = append(gotIDs, int64(item["id"].(float64)))
+				instr, _ := item["instructions"].(string)
+				if len(instr) > defaultMaxListTextBytes {
+					t.Errorf("page %d instructions len=%d > %d", page, len(instr), defaultMaxListTextBytes)
+				}
+			}
+			hasMore, _ := got["has_more"].(bool)
+			if !hasMore {
+				break
+			}
+			nc, ok := got["next_cursor"].(float64)
+			if !ok || int64(nc) <= cursor {
+				t.Fatalf("page %d next_cursor did not advance: got %v (prev=%d)", page, got["next_cursor"], cursor)
+			}
+			cursor = int64(nc)
+		}
+		if truncatedPages == 0 {
+			t.Errorf("expected at least 1 HTTP-limit truncated page")
+		}
+		if !reflect.DeepEqual(gotIDs, wantAscIDs) {
+			t.Fatalf("list_jobs(limit=15) collected = %v, want %v", gotIDs, wantAscIDs)
+		}
+	}
+
+	// Case 2: Omitted limit + filters (agent, host, desc=true) preserved across HTTP-limit retries.
+	{
+		wantDescIDs := make([]int64, len(wantAscIDs))
+		for i := range wantAscIDs {
+			wantDescIDs[i] = wantAscIDs[len(wantAscIDs)-1-i]
+		}
+		var gotIDs []int64
+		var cursor int64
+		for page := 1; page <= totalJobs; page++ {
+			args := map[string]any{
+				"status": "queued",
+				"agent":  "claude",
+				"host":   "ubuntu",
+				"desc":   true,
+			}
+			if cursor > 0 {
+				args["cursor"] = cursor
+			}
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "list_jobs",
+				Arguments: args,
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("list_jobs(omitted limit, desc=true) page %d failed: err=%v res=%+v", page, err, res)
+			}
+			got := decodeToolResultJSON(t, res)
+			jobs, ok := got["jobs"].([]any)
+			if !ok || len(jobs) == 0 {
+				t.Fatalf("desc page %d expected non-empty jobs, got %+v", page, got)
+			}
+			for _, raw := range jobs {
+				item := raw.(map[string]any)
+				gotIDs = append(gotIDs, int64(item["id"].(float64)))
+			}
+			hasMore, _ := got["has_more"].(bool)
+			if !hasMore {
+				break
+			}
+			nc, ok := got["next_cursor"].(float64)
+			if !ok || (cursor > 0 && int64(nc) >= cursor) {
+				t.Fatalf("desc page %d next_cursor did not advance descending: got %v (prev=%d)", page, got["next_cursor"], cursor)
+			}
+			cursor = int64(nc)
+		}
+		if !reflect.DeepEqual(gotIDs, wantDescIDs) {
+			t.Fatalf("list_jobs(desc=true) collected = %v, want %v", gotIDs, wantDescIDs)
+		}
+	}
+}
+
+func TestFullTextRecoveryContractOverDefaultIOTransport(t *testing.T) {
+	// End-to-end round-trip verification of the full-text recovery contract using the EXACT SAME
+	// stored SQLite job records served by the real HTTP API over the official SDK's default
+	// 16 MiB IOTransport (MaxLineLength=0):
+	// 1) Plain UTF-8 job within guaranteed MCP get_job range (2 x 1 MiB plain -> ~4 MiB wire):
+	//    list_jobs & list_deliveries project to <= 4 KiB; MCP get_job recovers exact full text.
+	// 2) HTML-escaped '<' job within guaranteed MCP get_job range (2 x 400 KiB '<' -> ~10.4 MiB wire):
+	//    list_jobs & list_deliveries project to <= 4 KiB; MCP get_job recovers exact full text.
+	// 3) HTML-escaped '<' job exceeding default 16 MiB MCP transport frame limit (2 x 800 KiB '<'
+	//    -> ~20.3 MiB MCP wire > 16 MiB, while HTTP JSON is ~9.6 MiB < 32 MiB):
+	//    list_jobs still succeeds with 4 KiB projection; MCP get_job fails at the 16 MiB transport
+	//    limit; direct HTTP Client.GetJob (GET /jobs/{id}) recovers the exact full text.
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "fleet-recovery.db")
+	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: "mcp-recovery-test"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	seedDoneJob := func(reqID, title, instr, result string) int64 {
+		t.Helper()
+		job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+			RequestID:    reqID,
+			Title:        title,
+			Agent:        "claude",
+			Host:         "ubuntu",
+			Instructions: instr,
+		})
+		if err != nil {
+			t.Fatalf("CreateJob(%s): %v", reqID, err)
+		}
+		claimed, ok, err := st.ClaimByID(ctx, job.ID, 10)
+		if err != nil || !ok {
+			t.Fatalf("ClaimByID(%d): ok=%v err=%v", job.ID, ok, err)
+		}
+		if _, err := st.Complete(ctx, job.ID, claimed.ClaimedBy, result); err != nil {
+			t.Fatalf("Complete(%d): %v", job.ID, err)
+		}
+		return job.ID
+	}
+
+	plainInstr := strings.Repeat("A", 1<<20)         // 1 MiB plain
+	plainResult := strings.Repeat("B", 1<<20)        // 1 MiB plain
+	htmlWithinInstr := strings.Repeat("<", 400<<10)  // 400 KiB '<'
+	htmlWithinResult := strings.Repeat(">", 400<<10) // 400 KiB '>'
+	htmlOverInstr := strings.Repeat("<", 800<<10)    // 800 KiB '<'
+	htmlOverResult := strings.Repeat("<", 800<<10)   // 800 KiB '<'
+
+	plainID := seedDoneJob("rec-plain", "plain-within-mcp", plainInstr, plainResult)
+	htmlWithinID := seedDoneJob("rec-html-within", "html-within-mcp", htmlWithinInstr, htmlWithinResult)
+	htmlOverID := seedDoneJob("rec-html-over", "html-over-mcp", htmlOverInstr, htmlOverResult)
+
+	const apiToken = "recovery-contract-token"
+	apiSrv := api.NewServer(st, api.Options{Token: apiToken})
+	ts := httptest.NewServer(apiSrv)
+	defer ts.Close()
+
+	session, tracker, cleanup := connectIOTransportClient(t, Options{
+		APIURL:     ts.URL,
+		Token:      apiToken,
+		HTTPClient: ts.Client(),
+	})
+	defer cleanup()
+
+	// Verify tool descriptions explicitly document the recovery contract per tool/field.
+	toolsRes, err := session.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	descByName := make(map[string]string, len(toolsRes.Tools))
+	for _, tl := range toolsRes.Tools {
+		descByName[tl.Name] = tl.Description
+	}
+	for _, tc := range []struct {
+		tool   string
+		substr string
+	}{
+		{"list_jobs", "GET /jobs/{id}"},
+		{"list_jobs", "16 MiB"},
+		{"get_job", "16 MiB"},
+		{"get_job", "GET /jobs/{id}"},
+		{"list_deliveries", "GET /jobs/{id}"},
+		{"list_held", "GET /gate/held"},
+		{"gate_decisions", "GET /gate/decisions"},
+	} {
+		if !strings.Contains(descByName[tc.tool], tc.substr) {
+			t.Errorf("tool %q description missing %q: %s", tc.tool, tc.substr, descByName[tc.tool])
+		}
+	}
+
+	// Verify list_jobs and list_deliveries return all 3 jobs projected to <= 4 KiB with fields_truncated.
+	for _, toolName := range []string{"list_jobs", "list_deliveries"} {
+		args := map[string]any{"status": "done", "limit": 10}
+		if toolName == "list_deliveries" {
+			args = map[string]any{"status": "undelivered", "limit": 10}
+		}
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: toolName, Arguments: args})
+		if err != nil || res.IsError {
+			t.Fatalf("%s failed: err=%v res=%+v", toolName, err, res)
+		}
+		got := decodeToolResultJSON(t, res)
+		jobs := got["jobs"].([]any)
+		if len(jobs) != 3 {
+			t.Fatalf("%s returned %d jobs, want 3", toolName, len(jobs))
+		}
+		for _, raw := range jobs {
+			item := raw.(map[string]any)
+			if len(item["instructions"].(string)) > defaultMaxListTextBytes {
+				t.Errorf("%s id=%v instructions not projected", toolName, item["id"])
+			}
+			if len(item["result_text"].(string)) > defaultMaxListTextBytes {
+				t.Errorf("%s id=%v result_text not projected", toolName, item["id"])
+			}
+			ft := item["fields_truncated"].([]any)
+			if len(ft) < 2 {
+				t.Errorf("%s id=%v expected fields_truncated >= 2, got %v", toolName, item["id"], ft)
+			}
+		}
+	}
+
+	// 1 & 2: Guaranteed full-text recovery via MCP get_job over default 16 MiB IOTransport
+	// on the exact same stored jobs.
+	for _, tc := range []struct {
+		name       string
+		id         int64
+		wantInstr  string
+		wantResult string
+	}{
+		{"plain_2x1MiB", plainID, plainInstr, plainResult},
+		{"html_2x400KiB", htmlWithinID, htmlWithinInstr, htmlWithinResult},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "get_job",
+				Arguments: map[string]any{"id": tc.id},
+			})
+			if err != nil || res.IsError {
+				t.Fatalf("MCP get_job(%d) failed: err=%v res=%+v", tc.id, err, res)
+			}
+			full := decodeToolResultJSON(t, res)
+			if gotInstr, _ := full["instructions"].(string); gotInstr != tc.wantInstr {
+				t.Fatalf("get_job(%d) instructions len=%d, want exact %d", tc.id, len(gotInstr), len(tc.wantInstr))
+			}
+			if gotRes, _ := full["result_text"].(string); gotRes != tc.wantResult {
+				t.Fatalf("get_job(%d) result_text len=%d, want exact %d", tc.id, len(gotRes), len(tc.wantResult))
+			}
+		})
+	}
+	t.Logf("guaranteed MCP get_job round-trip max wire line: %d bytes (%.2f MiB / 16.00 MiB SDK limit)",
+		tracker.MaxLine(), float64(tracker.MaxLine())/(1<<20))
+
+	// 3: Job exceeding default 16 MiB MCP transport frame limit (2 x 800 KiB '<' -> ~20.3 MiB wire):
+	// Use a dedicated IOTransport session so the frame-limit disconnect does not affect earlier checks.
+	overSession, _, overCleanup := connectIOTransportClient(t, Options{
+		APIURL:     ts.URL,
+		Token:      apiToken,
+		HTTPClient: ts.Client(),
+	})
+	defer overCleanup()
+
+	_, err = overSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "get_job",
+		Arguments: map[string]any{"id": htmlOverID},
+	})
+	if err == nil {
+		t.Fatalf("expected MCP get_job(%d) with 2x800KiB '<' to exceed default 16 MiB IOTransport frame limit, but it succeeded", htmlOverID)
+	}
+	t.Logf("confirmed MCP get_job(%d) above 16 MiB frame limit fails as documented: %v", htmlOverID, err)
+
+	// Direct HTTP API (Client.GetJob -> GET /jobs/{id}) retrieves the exact same 2 x 800 KiB '<' job in full.
+	httpClient, err := NewClient(ts.URL, apiToken, ts.Client())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	fullOver, err := httpClient.GetJob(ctx, htmlOverID)
+	if err != nil {
+		t.Fatalf("HTTP Client.GetJob(%d) failed: %v", htmlOverID, err)
+	}
+	if gotInstr, _ := fullOver["instructions"].(string); gotInstr != htmlOverInstr {
+		t.Fatalf("HTTP Client.GetJob(%d) instructions len=%d, want exact %d", htmlOverID, len(gotInstr), len(htmlOverInstr))
+	}
+	if gotRes, _ := fullOver["result_text"].(string); gotRes != htmlOverResult {
+		t.Fatalf("HTTP Client.GetJob(%d) result_text len=%d, want exact %d", htmlOverID, len(gotRes), len(htmlOverResult))
+	}
 }
 
 func TestNewServerValidation(t *testing.T) {

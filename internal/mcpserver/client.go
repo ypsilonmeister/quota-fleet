@@ -37,11 +37,27 @@ const (
 	mcpJSONRPCWrapperReserve = int64(512)      // reserve for JSON-RPC envelope around tool result
 	defaultMaxListTextBytes  = 4096            // max UTF-8 bytes per long text field in list projections
 	maxListCursorStringBytes = 256             // safety cap on upstream string cursors
+	defaultUpstreamListLimit = 50              // matches store.DefaultListLimit
+	maxUpstreamListLimit     = 200             // matches store.MaxListLimit
 	maxErrorResponseBytes    = 64 << 10        // 64 KiB cap for non-2xx error bodies
 	maxErrorMessageRunes     = 256
 )
 
 var errResponseTooLarge = errors.New("response body exceeded size limit")
+
+type responseTooLargeError struct {
+	method string
+	path   string
+	limit  int64
+}
+
+func (e *responseTooLargeError) Error() string {
+	return fmt.Sprintf("response from %s %s exceeded %d bytes", e.method, e.path, e.limit)
+}
+
+func (e *responseTooLargeError) Unwrap() error {
+	return errResponseTooLarge
+}
 
 var (
 	authHeaderRe  = regexp.MustCompile(`(?i)\bauthorization\s*[:=]\s*[^\r\n,;"]+`)
@@ -208,7 +224,10 @@ const (
 	listCursorDeliveryDeliveredID
 )
 
-const listTruncatedReason = "response exceeded MCP frame byte budget"
+const (
+	listTruncatedReason     = "response exceeded MCP frame byte budget"
+	listHTTPTruncatedReason = "upstream HTTP response exceeded byte limit; returned smaller page"
+)
 
 // mcpWireItemBytes computes the exact upper-bound byte contribution of a single
 // compact HTML-escaped JSON item to an MCP CallToolResult JSON-RPC frame.
@@ -539,6 +558,17 @@ func decodeBudgetedList(
 	maxMCPFrameBytes int64,
 	maxTextBytes int,
 ) (any, error) {
+	return decodeBudgetedListWithShrink(r, itemsKey, cursorMode, maxMCPFrameBytes, maxTextBytes, false)
+}
+
+func decodeBudgetedListWithShrink(
+	r io.Reader,
+	itemsKey string,
+	cursorMode listCursorMode,
+	maxMCPFrameBytes int64,
+	maxTextBytes int,
+	httpPageShrunk bool,
+) (any, error) {
 	if maxTextBytes <= 0 {
 		maxTextBytes = defaultMaxListTextBytes
 	}
@@ -554,13 +584,17 @@ func decodeBudgetedList(
 
 	// Measure the empty-envelope overhead (including worst-case truncation metadata)
 	// so incremental item budgeting closely tracks the final serialized frame size.
+	probeReason := listTruncatedReason
+	if len(listHTTPTruncatedReason) > len(probeReason) {
+		probeReason = listHTTPTruncatedReason
+	}
 	probePage := &budgetedListPage{
 		items:           []json.RawMessage{},
 		nextCursorInt:   9223372036854775807,
 		nextCursorStr:   strings.Repeat("x", 64),
 		hasMore:         true,
 		truncated:       true,
-		truncatedReason: listTruncatedReason,
+		truncatedReason: probeReason,
 	}
 	probeJSON, err := json.Marshal(buildTypedListEnvelope(itemsKey, cursorMode, probePage))
 	if err != nil {
@@ -705,6 +739,12 @@ func decodeBudgetedList(
 		if len(page.items) > 0 {
 			page.nextCursorInt, page.nextCursorStr = computeCursorFromLastItem(cursorMode, page.items[len(page.items)-1])
 		}
+	} else if httpPageShrunk && page.hasMore {
+		page.truncated = true
+		page.truncatedReason = listHTTPTruncatedReason
+		if page.nextCursorInt == 0 && page.nextCursorStr == "" && len(page.items) > 0 {
+			page.nextCursorInt, page.nextCursorStr = computeCursorFromLastItem(cursorMode, page.items[len(page.items)-1])
+		}
 	}
 
 	// Exact whole-output wire verification: marshal the complete typed envelope
@@ -738,24 +778,69 @@ func decodeBudgetedList(
 	}
 }
 
-func (c *Client) doBudgetedList(ctx context.Context, path string, query url.Values, itemsKey string, cursorMode listCursorMode) (any, error) {
-	var out any
-	err := c.doJSON(ctx, http.MethodGet, path, query, nil, defaultMaxListResponseBytes, func(status int, r io.Reader) error {
-		if status != http.StatusOK {
-			errBody, _ := io.ReadAll(io.LimitReader(r, maxErrorResponseBytes))
-			return c.parseAPIError(status, errBody)
-		}
-		decoded, err := decodeBudgetedList(r, itemsKey, cursorMode, c.effectiveMCPFrameBudget(), c.effectiveListTextLimit())
-		if err != nil {
-			return err
-		}
-		out = decoded
-		return nil
-	}, nil)
-	if err != nil {
-		return nil, err
+func cloneURLValues(q url.Values) url.Values {
+	if len(q) == 0 {
+		return url.Values{}
 	}
-	return out, nil
+	cp := make(url.Values, len(q))
+	for k, vs := range q {
+		cp[k] = append([]string(nil), vs...)
+	}
+	return cp
+}
+
+func (c *Client) doBudgetedList(ctx context.Context, path string, query url.Values, itemsKey string, cursorMode listCursorMode) (any, error) {
+	curQuery := cloneURLValues(query)
+	curLimit := defaultUpstreamListLimit
+	explicitLimit := false
+	if rawLim := strings.TrimSpace(curQuery.Get("limit")); rawLim != "" {
+		if n, err := strconv.Atoi(rawLim); err == nil && n > 0 {
+			curLimit = n
+			explicitLimit = true
+		}
+	}
+	httpPageShrunk := false
+
+	for {
+		var out any
+		err := c.doJSON(ctx, http.MethodGet, path, curQuery, nil, defaultMaxListResponseBytes, func(status int, r io.Reader) error {
+			if status != http.StatusOK {
+				errBody, _ := io.ReadAll(io.LimitReader(r, maxErrorResponseBytes))
+				return c.parseAPIError(status, errBody)
+			}
+			decoded, err := decodeBudgetedListWithShrink(r, itemsKey, cursorMode, c.effectiveMCPFrameBudget(), c.effectiveListTextLimit(), httpPageShrunk)
+			if err != nil {
+				return err
+			}
+			out = decoded
+			return nil
+		}, nil)
+		if err == nil {
+			return out, nil
+		}
+		if !errors.Is(err, errResponseTooLarge) || ctx.Err() != nil {
+			return nil, err
+		}
+		// Preserve cursor and all filters while shrinking limit so an oversized HTTP list
+		// page can still be validated to EOF and continued via next_cursor.
+		if explicitLimit && curLimit <= 1 {
+			return nil, err
+		}
+		if curLimit > maxUpstreamListLimit {
+			curLimit = maxUpstreamListLimit
+		}
+		nextLimit := curLimit / 2
+		if nextLimit < 1 {
+			nextLimit = 1
+		}
+		if explicitLimit && nextLimit >= curLimit {
+			return nil, err
+		}
+		curLimit = nextLimit
+		explicitLimit = true
+		httpPageShrunk = true
+		curQuery.Set("limit", strconv.Itoa(curLimit))
+	}
 }
 
 func (c *Client) doJSON(
@@ -814,7 +899,7 @@ func (c *Client) doJSON(
 	mr := &maxBytesReader{r: resp.Body, remain: limit}
 	if err := decode2xx(resp.StatusCode, mr); err != nil {
 		if mr.exceeded || errors.Is(err, errResponseTooLarge) {
-			return fmt.Errorf("response from %s %s exceeded %d bytes", method, path, limit)
+			return &responseTooLargeError{method: method, path: path, limit: limit}
 		}
 		var apiErr *APIError
 		if errors.As(err, &apiErr) {
