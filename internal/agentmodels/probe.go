@@ -138,13 +138,17 @@ func (p *Prober) probeOne(
 
 	case "agy":
 		if p.provider == nil {
-			return p.fallbackOrRecordError(ctx, hostName, agentName, "host file access provider unavailable", now)
+			errMsg := "host file access provider unavailable"
+			p.logger.Printf("agentmodels: agy probe failed for %s/%s: %s", hostName, agentName, errMsg)
+			return p.fallbackOrRecordError(ctx, hostName, agentName, errMsg, now)
 		}
 		if faErr != nil {
+			p.logger.Printf("agentmodels: agy probe failed for %s/%s: %v", hostName, agentName, faErr)
 			return p.fallbackOrRecordError(ctx, hostName, agentName, faErr.Error(), now)
 		}
-		items, err := p.probeAgy(ctx, fa, hostCfg, agentName)
+		items, err := p.probeAgy(ctx, fa, hostName, hostCfg, agentName)
 		if err != nil {
+			p.logger.Printf("agentmodels: agy probe failed for %s/%s: %v", hostName, agentName, err)
 			return p.fallbackOrRecordError(ctx, hostName, agentName, err.Error(), now)
 		}
 		return p.store.UpsertAgentModels(ctx, store.AgentModelCatalog{
@@ -212,7 +216,7 @@ func (p *Prober) fallbackOrRecordError(ctx context.Context, hostName, agentName,
 	return p.store.RecordAgentModelsError(ctx, hostName, agentName, truncateString(errMsg, maxErrorDetailBytes), now)
 }
 
-func (p *Prober) probeAgy(ctx context.Context, fa adapter.FileAccess, hostCfg config.HostConfig, agentName string) ([]store.AgentModelItem, error) {
+func (p *Prober) probeAgy(ctx context.Context, fa adapter.FileAccess, hostName string, hostCfg config.HostConfig, agentName string) ([]store.AgentModelItem, error) {
 	driver, err := adapter.ResolveDriver(p.cfg, hostCfg, agentName)
 	if err != nil {
 		driver = adapter.AgentDriver{Name: agentName}
@@ -229,6 +233,48 @@ func (p *Prober) probeAgy(ctx context.Context, fa adapter.FileAccess, hostCfg co
 		}
 	}
 	isWin := strings.EqualFold(strings.TrimSpace(hostCfg.OS), "windows")
+
+	// Primary path: structured JSON output (`agy --output-format json models`),
+	// non-TTY with stdout and stderr strictly separated.
+	items, jsonErr := p.probeAgyJSON(ctx, fa, driver, isWin)
+	if jsonErr == nil {
+		return items, nil
+	}
+	if ctx.Err() != nil {
+		return nil, jsonErr
+	}
+
+	p.logger.Printf("agentmodels: agy json probe failed for %s/%s (%v); falling back to TSV", hostName, agentName, jsonErr)
+
+	// Fallback path: legacy `agy models`, non-TTY with stdout and stderr strictly separated,
+	// parsing stdout as 2-column TSV (<id>\t<label>).
+	items, tsvErr := p.probeAgyTSV(ctx, fa, driver, isWin)
+	if tsvErr == nil {
+		return items, nil
+	}
+	return nil, fmt.Errorf("agy json probe failed (%v); tsv fallback failed (%v)", jsonErr, tsvErr)
+}
+
+func (p *Prober) probeAgyJSON(ctx context.Context, fa adapter.FileAccess, driver adapter.AgentDriver, isWin bool) ([]store.AgentModelItem, error) {
+	cmd, _, err := driver.BuildVersionCommand([]string{"--output-format", "json", "models"}, isWin)
+	if err != nil {
+		return nil, fmt.Errorf("build agy json models command: %w", err)
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, p.probeTimeout)
+	defer cancel()
+
+	res, runErr := fa.RunCommand(probeCtx, cmd)
+	if runErr != nil {
+		return nil, fmt.Errorf("run agy --output-format json models: %w", runErr)
+	}
+	if res.ExitCode != 0 {
+		return nil, formatAgyExitError("agy --output-format json models", res)
+	}
+	return ParseAgyModelsJSON([]byte(res.Stdout))
+}
+
+func (p *Prober) probeAgyTSV(ctx context.Context, fa adapter.FileAccess, driver adapter.AgentDriver, isWin bool) ([]store.AgentModelItem, error) {
 	cmd, _, err := driver.BuildVersionCommand([]string{"models"}, isWin)
 	if err != nil {
 		return nil, fmt.Errorf("build agy models command: %w", err)
@@ -242,19 +288,20 @@ func (p *Prober) probeAgy(ctx context.Context, fa adapter.FileAccess, hostCfg co
 		return nil, fmt.Errorf("run agy models: %w", runErr)
 	}
 	if res.ExitCode != 0 {
-		detail := strings.TrimSpace(res.Output)
-		if detail != "" {
-			return nil, fmt.Errorf("agy models exited with code %d: %s", res.ExitCode, truncateString(detail, 200))
-		}
-		return nil, fmt.Errorf("agy models exited with code %d", res.ExitCode)
+		return nil, formatAgyExitError("agy models", res)
 	}
-	if res.Stdout != "" || res.Stderr != "" {
-		if err := ValidateAgyStderr(res.Stderr); err != nil {
-			return nil, err
-		}
-		return ParseAgyModelsOutput(res.Stdout)
+	return ParseAgyModelsTSV(res.Stdout)
+}
+
+func formatAgyExitError(label string, res adapter.ExecResult) error {
+	detail := strings.TrimSpace(res.Stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(res.Stdout)
 	}
-	return ParseAgyModelsOutput(res.Output)
+	if detail != "" {
+		return fmt.Errorf("%s exited with code %d: %s", label, res.ExitCode, truncateString(detail, 200))
+	}
+	return fmt.Errorf("%s exited with code %d", label, res.ExitCode)
 }
 
 func (p *Prober) probeCodex(ctx context.Context, fa adapter.FileAccess, hostCfg config.HostConfig) ([]store.AgentModelItem, error) {

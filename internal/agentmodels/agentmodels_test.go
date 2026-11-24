@@ -1,6 +1,7 @@
 package agentmodels
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -48,25 +49,39 @@ func (p *fakeHostProvider) FileAccessForHost(hostName string) (adapter.FileAcces
 	return fa, nil
 }
 
-func TestParseAgyModelsOutput(t *testing.T) {
-	raw := "\r\x1b[2K⠋ Fetching available models...\r⠴ Fetching available models...\rgemini-4-neon-medium           Gemini 4 Neon (Medium)\n" +
-		"claude-opus-5-5-high           Claude Opus 5.5 (High)\n" +
-		"gpt-oss-120b-medium            GPT-OSS 120B (Medium)\n" +
-		"custom-local-model             Custom Local\n" +
-		"gemini-4-neon-medium           Gemini 4 Neon (Medium) Duplicate\n"
+func TestParseAgyModelsJSON(t *testing.T) {
+	raw := `{
+		"conversation_id": "",
+		"status": "SUCCESS",
+		"response": "gemini-4-neon-medium\tGemini 4 Neon (Medium)\n",
+		"command": {
+			"name": "models",
+			"data": {
+				"models": [
+					{"id": "gemini-4-neon-medium", "label": "Gemini 4 Neon (Medium)"},
+					{"id": "claude-opus-5-5-high", "label": "Claude Opus 5.5 (High)"},
+					{"id": "gpt-oss-120b-medium", "label": "GPT-OSS 120B (Medium)"},
+					{"id": "custom-local-model", "label": "Custom Local"},
+					{"id": "no-label-model", "label": ""},
+					{"id": "gemini-4-neon-medium", "label": "Duplicate Ignored"}
+				]
+			}
+		}
+	}`
 
-	items, err := ParseAgyModelsOutput(raw)
+	items, err := ParseAgyModelsJSON([]byte(raw))
 	if err != nil {
-		t.Fatalf("ParseAgyModelsOutput failed: %v", err)
-	}
-	if len(items) != 4 {
-		t.Fatalf("got %d items, want 4: %+v", len(items), items)
+		t.Fatalf("ParseAgyModelsJSON failed: %v", err)
 	}
 	want := []store.AgentModelItem{
 		{ID: "gemini-4-neon-medium", DisplayName: "Gemini 4 Neon (Medium)", Family: quota.ModelFamilyGemini},
 		{ID: "claude-opus-5-5-high", DisplayName: "Claude Opus 5.5 (High)", Family: quota.ModelFamilyClaude},
 		{ID: "gpt-oss-120b-medium", DisplayName: "GPT-OSS 120B (Medium)", Family: quota.ModelFamilyGPT},
 		{ID: "custom-local-model", DisplayName: "Custom Local", Family: quota.ModelFamilyUnknown},
+		{ID: "no-label-model", DisplayName: "no-label-model", Family: quota.ModelFamilyUnknown},
+	}
+	if len(items) != len(want) {
+		t.Fatalf("got %d items, want %d: %+v", len(items), len(want), items)
 	}
 	for i, w := range want {
 		if items[i] != w {
@@ -74,193 +89,110 @@ func TestParseAgyModelsOutput(t *testing.T) {
 		}
 	}
 
-	// Non-TTY `agy models` combined output (stderr status line + tab-separated stdout rows).
-	nonTTYRaw := "Fetching available models...\n" +
-		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\n" +
-		"gemini-pro-orchestrator\tOrchestrator (Carbon)\n" +
-		"gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n" +
-		"claude-opus-5-5-high\tClaude Opus 5.5 (High)\n" +
-		"gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n"
-	nonTTYItems, err := ParseAgyModelsOutput(nonTTYRaw)
+	// Single-model JSON catalog.
+	single, err := ParseAgyModelsJSON([]byte(`{"status":"SUCCESS","command":{"name":"models","data":{"models":[{"id":"new-provider-v1","label":"New Provider V1"}]}}}`))
 	if err != nil {
-		t.Fatalf("ParseAgyModelsOutput(non-TTY) failed: %v", err)
+		t.Fatalf("ParseAgyModelsJSON(single) failed: %v", err)
 	}
-	wantNonTTY := []store.AgentModelItem{
-		{ID: "gemini-4-neon-medium", DisplayName: "Gemini 4 Neon (Medium)", Family: quota.ModelFamilyGemini},
-		{ID: "gemini-pro-orchestrator", DisplayName: "Orchestrator (Carbon)", Family: quota.ModelFamilyGemini},
-		{ID: "gemini-3.8-flash-high", DisplayName: "Gemini 3.8 Flash (High)", Family: quota.ModelFamilyGemini},
-		{ID: "claude-opus-5-5-high", DisplayName: "Claude Opus 5.5 (High)", Family: quota.ModelFamilyClaude},
-		{ID: "gpt-oss-120b-medium", DisplayName: "GPT-OSS 120B (Medium)", Family: quota.ModelFamilyGPT},
-	}
-	if len(nonTTYItems) != len(wantNonTTY) {
-		t.Fatalf("non-TTY got %d items, want %d: %+v", len(nonTTYItems), len(wantNonTTY), nonTTYItems)
-	}
-	for i, w := range wantNonTTY {
-		if nonTTYItems[i] != w {
-			t.Errorf("nonTTYItems[%d] = %+v, want %+v", i, nonTTYItems[i], w)
-		}
+	if len(single) != 1 || single[0].ID != "new-provider-v1" || single[0].DisplayName != "New Provider V1" || single[0].Family != quota.ModelFamilyUnknown {
+		t.Fatalf("unexpected single item: %+v", single)
 	}
 
-	// PTY `agy models` output (spinner with \r\x1b[K clear + space-padded CRLF rows).
-	ptyRaw := "\r⠋ Fetching available models...\r⠙ Fetching available models...\r\x1b[Kgemini-4-neon-high             Gemini 4 Neon (High)\r\n" +
-		"gemini-pro-orchestrator-argon  Orchestrator (Argon)\r\n" +
-		"claude-sonnet-5-5-high         Claude Sonnet 5.5 (High)\r\n"
-	ptyItems, err := ParseAgyModelsOutput(ptyRaw)
-	if err != nil {
-		t.Fatalf("ParseAgyModelsOutput(PTY) failed: %v", err)
+	errCases := []struct {
+		name string
+		raw  string
+	}{
+		{name: "empty", raw: ""},
+		{name: "whitespace only", raw: "  \n\t "},
+		{name: "malformed json", raw: `{"status":"SUCCESS"`},
+		{name: "combined stderr prefix breaks json", raw: "Fetching available models...\n{\"status\":\"SUCCESS\",\"command\":{\"name\":\"models\",\"data\":{\"models\":[{\"id\":\"a\",\"label\":\"A\"}]}}}"},
+		{name: "status error", raw: `{"status":"ERROR","command":{"name":"models","data":{"models":[{"id":"gemini-4-neon-medium","label":"Gemini 4 Neon (Medium)"}]}}}`},
+		{name: "status lowercase", raw: `{"status":"success","command":{"name":"models","data":{"models":[{"id":"gemini-4-neon-medium","label":"Gemini 4 Neon (Medium)"}]}}}`},
+		{name: "missing command", raw: `{"status":"SUCCESS"}`},
+		{name: "wrong command name", raw: `{"status":"SUCCESS","command":{"name":"version","data":{"models":[{"id":"gemini-4-neon-medium","label":"Gemini 4 Neon (Medium)"}]}}}`},
+		{name: "missing command data", raw: `{"status":"SUCCESS","command":{"name":"models"}}`},
+		{name: "empty models array", raw: `{"status":"SUCCESS","command":{"name":"models","data":{"models":[]}}}`},
+		{name: "only blank ids", raw: `{"status":"SUCCESS","command":{"name":"models","data":{"models":[{"id":"  ","label":"Blank"}]}}}`},
 	}
-	if len(ptyItems) != 3 || ptyItems[0].ID != "gemini-4-neon-high" || ptyItems[1].ID != "gemini-pro-orchestrator-argon" || ptyItems[2].ID != "claude-sonnet-5-5-high" {
-		t.Fatalf("unexpected PTY items: %+v", ptyItems)
-	}
-
-	for _, diag := range []string{
-		"\r⠋ Fetching available models...\n",
-		"No models available\n",
-		"no models available\n",
-		"No models found.\n",
-		"Failed to fetch models\n",
-		"Authentication required. Run agy login\n",
-		"ID   Display Name\n---\n",
-		"error-code  authentication required\n",
-		"error-code\tauthentication required\n",
-		"error-code  Authentication required\n",
-		"error-code\tAuthentication required\n",
-		"Fetching available models...\nerror-code  authentication required\n",
-		"gemini-4-neon-medium\tAuthentication required\n",
-		"gemini-4-neon-medium  Authentication required\n",
-		"gemini-4-neon-high\tCatalog retrieval interrupted\n",
-		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nerror-code\tAuthentication required\n",
-		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tAuthentication required\n",
-		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tCatalog retrieval interrupted\n",
-		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\nWarning: incomplete catalog\n",
-		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high  Claude Opus 5.5 (High)\n",
-		"err-401\n",
-		"gemini-4-neon-medium\n",
-		"Usage: agy models [flags]\n\nList available models\n\nFlags:\n  -h      Show help\n  --help  Show help\n",
-	} {
-		if got, err := ParseAgyModelsOutput(diag); err == nil {
-			t.Errorf("ParseAgyModelsOutput(%q) succeeded with %+v, want error", diag, got)
-		}
-	}
-
-	// Unknown-prefix model catalog must be accepted with family=unknown (docs/11 §3).
-	unknownOnlyRaw := "new-provider-v1\tNew Provider V1\nnew-provider-v2\tnew-provider-v2\n"
-	unknownItems, err := ParseAgyModelsOutput(unknownOnlyRaw)
-	if err != nil {
-		t.Fatalf("ParseAgyModelsOutput(unknown-only) failed: %v", err)
-	}
-	wantUnknown := []store.AgentModelItem{
-		{ID: "new-provider-v1", DisplayName: "New Provider V1", Family: quota.ModelFamilyUnknown},
-		{ID: "new-provider-v2", DisplayName: "new-provider-v2", Family: quota.ModelFamilyUnknown},
-	}
-	if len(unknownItems) != len(wantUnknown) {
-		t.Fatalf("unknown-only got %d items, want %d: %+v", len(unknownItems), len(wantUnknown), unknownItems)
-	}
-	for i, w := range wantUnknown {
-		if unknownItems[i] != w {
-			t.Errorf("unknownItems[%d] = %+v, want %+v", i, unknownItems[i], w)
-		}
-	}
-
-	// Single-model valid lists (known and unknown prefix) must be accepted (docs/11 §3).
-	singleKnown, err := ParseAgyModelsOutput("gemini-4-neon-medium\tGemini 4 Neon (Medium)\n")
-	if err != nil {
-		t.Fatalf("ParseAgyModelsOutput(single known) failed: %v", err)
-	}
-	if len(singleKnown) != 1 || singleKnown[0].ID != "gemini-4-neon-medium" || singleKnown[0].DisplayName != "Gemini 4 Neon (Medium)" {
-		t.Fatalf("unexpected singleKnown: %+v", singleKnown)
-	}
-
-	singleUnknown, err := ParseAgyModelsOutput("new-provider-v1\tNew Provider V1\n")
-	if err != nil {
-		t.Fatalf("ParseAgyModelsOutput(single unknown) failed: %v", err)
-	}
-	if len(singleUnknown) != 1 || singleUnknown[0].ID != "new-provider-v1" || singleUnknown[0].Family != quota.ModelFamilyUnknown {
-		t.Fatalf("unexpected singleUnknown: %+v", singleUnknown)
-	}
-
-	// Tab-separated display names must preserve internal consecutive spaces.
-	doubleSpaceRaw := "gemini-4-neon-medium\tGemini 4  Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n"
-	doubleSpaceItems, err := ParseAgyModelsOutput(doubleSpaceRaw)
-	if err != nil {
-		t.Fatalf("ParseAgyModelsOutput(tab with double space) failed: %v", err)
-	}
-	if len(doubleSpaceItems) != 2 || doubleSpaceItems[0].DisplayName != "Gemini 4  Neon (Medium)" {
-		t.Fatalf("unexpected doubleSpaceItems: %+v", doubleSpaceItems)
+	for _, tc := range errCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := ParseAgyModelsJSON([]byte(tc.raw)); err == nil {
+				t.Errorf("ParseAgyModelsJSON(%s) succeeded with %+v, want error", tc.name, got)
+			}
+		})
 	}
 }
 
-// Captured real `agy models` samples (non-TTY combined stderr+stdout and PTY output).
-const (
-	realAgyModelsNonTTY = "Fetching available models...\n" +
-		"gemini-4-neon-high\tGemini 4 Neon (High)\n" +
-		"gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)\n" +
-		"gemini-4-neon-medium\tGemini 4 Neon (Medium)\n" +
-		"gemini-4-neon-low\tGemini 4 Neon (Low)\n" +
-		"gemini-4-carbon-medium\tGemini 4 Carbon (Medium)\n" +
-		"gemini-4-carbon-high\tGemini 4 Carbon (High)\n" +
-		"gemini-4-carbon-low\tGemini 4 Carbon (Low)\n" +
-		"gemini-4-argon-medium\tGemini 4 Argon (Medium)\n" +
-		"gemini-4-argon-high\tGemini 4 Argon (High)\n" +
-		"gemini-4-argon-low\tGemini 4 Argon (Low)\n" +
-		"gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\n" +
-		"gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\n" +
-		"gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)\n" +
-		"gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)\n" +
-		"gemini-pro-orchestrator-neon\tOrchestrator (Neon)\n" +
-		"gemini-pro-orchestrator\tOrchestrator (Carbon)\n" +
-		"gemini-pro-orchestrator-argon\tOrchestrator (Argon)\n" +
-		"gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n" +
-		"gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n" +
-		"gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n" +
-		"claude-opus-5-5-low\tClaude Opus 5.5 (Low)\n" +
-		"claude-opus-5-5-medium\tClaude Opus 5.5 (Medium)\n" +
+func TestParseAgyModelsTSV(t *testing.T) {
+	raw := "gemini-4-neon-medium\tGemini 4 Neon (Medium)\n" +
+		"gemini-pro-orchestrator\tOrchestrator (Carbon)\r\n" +
+		"\n" +
 		"claude-opus-5-5-high\tClaude Opus 5.5 (High)\n" +
-		"claude-sonnet-5-5-low\tClaude Sonnet 5.5 (Low)\n" +
-		"claude-sonnet-5-5-medium\tClaude Sonnet 5.5 (Medium)\n" +
-		"claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)\n" +
-		"gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n"
+		"gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n" +
+		"new-provider-v1\tNew Provider  V1\n" +
+		"gemini-4-neon-medium\tDuplicate Ignored\n"
 
-	realAgyModelsPTY = "\r⠋ Fetching available models...\r⠙ Fetching available models...\r⠹ Fetching available models...\r\x1b[K" +
-		"gemini-4-neon-high             Gemini 4 Neon (High)\r\n" +
-		"gemini-4-neon-xhigh            Gemini 4 Neon (XHigh)\r\n" +
-		"gemini-4-neon-medium           Gemini 4 Neon (Medium)\r\n" +
-		"gemini-4-neon-low              Gemini 4 Neon (Low)\r\n" +
-		"gemini-4-carbon-medium         Gemini 4 Carbon (Medium)\r\n" +
-		"gemini-4-carbon-high           Gemini 4 Carbon (High)\r\n" +
-		"gemini-4-carbon-low            Gemini 4 Carbon (Low)\r\n" +
-		"gemini-4-argon-medium          Gemini 4 Argon (Medium)\r\n" +
-		"gemini-4-argon-high            Gemini 4 Argon (High)\r\n" +
-		"gemini-4-argon-low             Gemini 4 Argon (Low)\r\n" +
-		"gemini-4-hydrogen-high         Gemini 4 Hydrogen (High)\r\n" +
-		"gemini-4-hydrogen-xhigh        Gemini 4 Hydrogen (XHigh)\r\n" +
-		"gemini-4-hydrogen-medium       Gemini 4 Hydrogen (Medium)\r\n" +
-		"gemini-4-hydrogen-low          Gemini 4 Hydrogen (Low)\r\n" +
-		"gemini-pro-orchestrator-neon   Orchestrator (Neon)\r\n" +
-		"gemini-pro-orchestrator        Orchestrator (Carbon)\r\n" +
-		"gemini-pro-orchestrator-argon  Orchestrator (Argon)\r\n" +
-		"gemini-3.8-flash-high          Gemini 3.8 Flash (High)\r\n" +
-		"gemini-3.8-flash-medium        Gemini 3.8 Flash (Medium)\r\n" +
-		"gemini-3.8-flash-low           Gemini 3.8 Flash (Low)\r\n" +
-		"claude-opus-5-5-low            Claude Opus 5.5 (Low)\r\n" +
-		"claude-opus-5-5-medium         Claude Opus 5.5 (Medium)\r\n" +
-		"claude-opus-5-5-high           Claude Opus 5.5 (High)\r\n" +
-		"claude-sonnet-5-5-low          Claude Sonnet 5.5 (Low)\r\n" +
-		"claude-sonnet-5-5-medium       Claude Sonnet 5.5 (Medium)\r\n" +
-		"claude-sonnet-5-5-high         Claude Sonnet 5.5 (High)\r\n" +
-		"gpt-oss-120b-medium            GPT-OSS 120B (Medium)\r\n"
-)
+	items, err := ParseAgyModelsTSV(raw)
+	if err != nil {
+		t.Fatalf("ParseAgyModelsTSV failed: %v", err)
+	}
+	want := []store.AgentModelItem{
+		{ID: "gemini-4-neon-medium", DisplayName: "Gemini 4 Neon (Medium)", Family: quota.ModelFamilyGemini},
+		{ID: "gemini-pro-orchestrator", DisplayName: "Orchestrator (Carbon)", Family: quota.ModelFamilyGemini},
+		{ID: "claude-opus-5-5-high", DisplayName: "Claude Opus 5.5 (High)", Family: quota.ModelFamilyClaude},
+		{ID: "gpt-oss-120b-medium", DisplayName: "GPT-OSS 120B (Medium)", Family: quota.ModelFamilyGPT},
+		{ID: "new-provider-v1", DisplayName: "New Provider  V1", Family: quota.ModelFamilyUnknown},
+	}
+	if len(items) != len(want) {
+		t.Fatalf("got %d items, want %d: %+v", len(items), len(want), items)
+	}
+	for i, w := range want {
+		if items[i] != w {
+			t.Errorf("items[%d] = %+v, want %+v", i, items[i], w)
+		}
+	}
 
-func TestProberImportsRealAgySamplesAndUnknownFamilyCatalog(t *testing.T) {
+	// Single-model TSV catalog.
+	single, err := ParseAgyModelsTSV("gemini-4-neon-medium\tGemini 4 Neon (Medium)\n")
+	if err != nil {
+		t.Fatalf("ParseAgyModelsTSV(single) failed: %v", err)
+	}
+	if len(single) != 1 || single[0].ID != "gemini-4-neon-medium" {
+		t.Fatalf("unexpected single TSV item: %+v", single)
+	}
+
+	errCases := []struct {
+		name string
+		raw  string
+	}{
+		{name: "empty", raw: ""},
+		{name: "whitespace only", raw: "\n  \r\n"},
+		{name: "prose without tab", raw: "No models available\n"},
+		{name: "space padded without tab", raw: "gemini-4-neon-medium   Gemini 4 Neon (Medium)\n"},
+		{name: "three tab columns", raw: "gemini-4-neon-medium\tGemini 4 Neon\textra\n"},
+		{name: "empty id", raw: "\tGemini 4 Neon (Medium)\n"},
+		{name: "empty label", raw: "gemini-4-neon-medium\t   \n"},
+		{name: "valid line mixed with non-tsv line", raw: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nWarning: incomplete\n"},
+	}
+	for _, tc := range errCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := ParseAgyModelsTSV(tc.raw); err == nil {
+				t.Errorf("ParseAgyModelsTSV(%s) succeeded with %+v, want error", tc.name, got)
+			}
+		})
+	}
+}
+
+func TestProberAgyJSONPrimaryAndSeparatedStreams(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-real-samples"})
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-json-primary"})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
 	defer st.Close()
 
 	cfg := &config.Config{
-		InstanceID: "agy-real-samples",
+		InstanceID: "agy-json-primary",
 		Hosts: map[string]config.HostConfig{
 			"ubuntu": {
 				OS: "linux",
@@ -271,17 +203,223 @@ func TestProberImportsRealAgySamplesAndUnknownFamilyCatalog(t *testing.T) {
 		},
 	}
 
-	output := realAgyModelsNonTTY
+	var cmds []string
+	jsonStdout := `{"status":"SUCCESS","command":{"name":"models","data":{"models":[{"id":"gemini-4-neon-medium","label":"Gemini 4 Neon (Medium)"},{"id":"claude-opus-5-5-high","label":"Claude Opus 5.5 (High)"}]}}}`
 	provider := &fakeHostProvider{
 		hosts: map[string]adapter.FileAccess{
 			"ubuntu": &fakeFileAccess{
 				runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
-					return adapter.ExecResult{ExitCode: 0, Output: output}, nil
+					cmds = append(cmds, cmd)
+					return adapter.ExecResult{
+						ExitCode: 0,
+						Stdout:   jsonStdout,
+						Stderr:   "Fetching available models...\n",
+						// Combined Output intentionally corrupted with stderr prefix to prove
+						// the prober reads Stdout strictly rather than Output.
+						Output: "Fetching available models...\n" + jsonStdout,
+					}, nil
 				},
 			},
 		},
 	}
 
+	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	prober, err := NewProber(ProberOptions{
+		Store:    st,
+		Config:   cfg,
+		Provider: provider,
+		Now:      func() time.Time { return t1 },
+		Logger:   log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewProber: %v", err)
+	}
+
+	if err := prober.Probe(ctx); err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+
+	if len(cmds) != 1 {
+		t.Fatalf("expected 1 command invocation (no fallback), got %d: %v", len(cmds), cmds)
+	}
+	if !strings.Contains(cmds[0], "--output-format json models") {
+		t.Errorf("command = %q, want global flag before subcommand (--output-format json models)", cmds[0])
+	}
+
+	got, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	if err != nil {
+		t.Fatalf("GetAgentModels: %v", err)
+	}
+	if got.Status != store.AgentModelStatusOK || got.Source != SourceAgyCLI || len(got.Models) != 2 {
+		t.Fatalf("unexpected catalog: %+v", got)
+	}
+	if got.Models[0].ID != "gemini-4-neon-medium" || got.Models[0].DisplayName != "Gemini 4 Neon (Medium)" || got.Models[0].Family != quota.ModelFamilyGemini {
+		t.Errorf("model[0] = %+v", got.Models[0])
+	}
+	if got.Models[1].ID != "claude-opus-5-5-high" || got.Models[1].DisplayName != "Claude Opus 5.5 (High)" || got.Models[1].Family != quota.ModelFamilyClaude {
+		t.Errorf("model[1] = %+v", got.Models[1])
+	}
+}
+
+func TestProberAgyFallsBackToTSVWhenJSONFails(t *testing.T) {
+	cases := []struct {
+		name    string
+		jsonRes adapter.ExecResult
+		jsonErr error
+	}{
+		{
+			name:    "json exits non-zero (unsupported flag)",
+			jsonRes: adapter.ExecResult{ExitCode: 2, Stderr: "unknown flag: --output-format\n"},
+		},
+		{
+			name:    "json returns invalid json",
+			jsonRes: adapter.ExecResult{ExitCode: 0, Stdout: "not-json\n", Stderr: "Fetching available models...\n"},
+		},
+		{
+			name:    "json status is not SUCCESS",
+			jsonRes: adapter.ExecResult{ExitCode: 0, Stdout: `{"status":"ERROR","command":{"name":"models","data":{"models":[]}}}`},
+		},
+		{
+			name:    "json command.name is not models",
+			jsonRes: adapter.ExecResult{ExitCode: 0, Stdout: `{"status":"SUCCESS","command":{"name":"other","data":{"models":[{"id":"a","label":"A"}]}}}`},
+		},
+		{
+			name:    "json stdout empty even if combined Output has json",
+			jsonRes: adapter.ExecResult{ExitCode: 0, Stdout: "", Output: `{"status":"SUCCESS","command":{"name":"models","data":{"models":[{"id":"a","label":"A"}]}}}`},
+		},
+		{
+			name:    "json command execution error",
+			jsonErr: errors.New("temporary exec failure"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-fallback-test"})
+			if err != nil {
+				t.Fatalf("store.Open: %v", err)
+			}
+			defer st.Close()
+
+			cfg := &config.Config{
+				InstanceID: "agy-fallback-test",
+				Hosts: map[string]config.HostConfig{
+					"ubuntu": {
+						OS: "linux",
+						Agents: map[string]config.HostAgentOverride{
+							"agy": {},
+						},
+					},
+				},
+			}
+
+			var cmds []string
+			provider := &fakeHostProvider{
+				hosts: map[string]adapter.FileAccess{
+					"ubuntu": &fakeFileAccess{
+						runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+							cmds = append(cmds, cmd)
+							if strings.Contains(cmd, "--output-format json models") {
+								return tc.jsonRes, tc.jsonErr
+							}
+							return adapter.ExecResult{
+								ExitCode: 0,
+								Stdout:   "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n",
+								Stderr:   "Fetching available models...\n",
+								Output:   "Fetching available models...\ngemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n",
+							}, nil
+						},
+					},
+				},
+			}
+
+			var logBuf bytes.Buffer
+			t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+			prober, err := NewProber(ProberOptions{
+				Store:    st,
+				Config:   cfg,
+				Provider: provider,
+				Now:      func() time.Time { return t1 },
+				Logger:   log.New(&logBuf, "", 0),
+			})
+			if err != nil {
+				t.Fatalf("NewProber: %v", err)
+			}
+
+			if err := prober.Probe(ctx); err != nil {
+				t.Fatalf("Probe: %v", err)
+			}
+
+			if len(cmds) != 2 {
+				t.Fatalf("expected 2 commands (JSON then TSV fallback), got %d: %v", len(cmds), cmds)
+			}
+			if !strings.Contains(cmds[0], "--output-format json models") {
+				t.Errorf("first cmd = %q, want --output-format json models", cmds[0])
+			}
+			if strings.Contains(cmds[1], "--output-format") || !strings.Contains(cmds[1], "models") {
+				t.Errorf("second cmd = %q, want legacy agy models without --output-format", cmds[1])
+			}
+
+			got, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+			if err != nil {
+				t.Fatalf("GetAgentModels: %v", err)
+			}
+			if got.Status != store.AgentModelStatusOK || got.Source != SourceAgyCLI || len(got.Models) != 2 {
+				t.Fatalf("unexpected fallback catalog: %+v", got)
+			}
+			if got.Models[0].ID != "gemini-4-neon-medium" || got.Models[1].ID != "claude-opus-5-5-high" {
+				t.Errorf("unexpected models: %+v", got.Models)
+			}
+			if !strings.Contains(logBuf.String(), "falling back to TSV") {
+				t.Errorf("expected fallback log entry, got %q", logBuf.String())
+			}
+		})
+	}
+}
+
+func TestProberAgyPreservesCatalogAndLogsWhenBothJSONAndTSVFail(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-both-fail"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	cfg := &config.Config{
+		InstanceID: "agy-both-fail",
+		Hosts: map[string]config.HostConfig{
+			"ubuntu": {
+				OS: "linux",
+				Agents: map[string]config.HostAgentOverride{
+					"agy": {},
+				},
+			},
+		},
+	}
+
+	failBoth := false
+	provider := &fakeHostProvider{
+		hosts: map[string]adapter.FileAccess{
+			"ubuntu": &fakeFileAccess{
+				runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
+					if !failBoth && strings.Contains(cmd, "--output-format json models") {
+						return adapter.ExecResult{
+							ExitCode: 0,
+							Stdout:   `{"status":"SUCCESS","command":{"name":"models","data":{"models":[{"id":"gemini-4-neon-medium","label":"Gemini 4 Neon (Medium)"},{"id":"claude-opus-5-5-high","label":"Claude Opus 5.5 (High)"}]}}}`,
+							Stderr:   "Fetching available models...\n",
+						}, nil
+					}
+					if strings.Contains(cmd, "--output-format json models") {
+						return adapter.ExecResult{ExitCode: 1, Stderr: "Error: Please sign in\n"}, nil
+					}
+					return adapter.ExecResult{ExitCode: 0, Stdout: "No models available\n", Stderr: "Fetching available models...\n"}, nil
+				},
+			},
+		},
+	}
+
+	var logBuf bytes.Buffer
 	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
 	now := t1
 	prober, err := NewProber(ProberOptions{
@@ -289,89 +427,44 @@ func TestProberImportsRealAgySamplesAndUnknownFamilyCatalog(t *testing.T) {
 		Config:   cfg,
 		Provider: provider,
 		Now:      func() time.Time { return now },
-		Logger:   log.New(io.Discard, "", 0),
+		Logger:   log.New(&logBuf, "", 0),
 	})
 	if err != nil {
 		t.Fatalf("NewProber: %v", err)
 	}
 
-	// 1. Real non-TTY sample: all 27 models imported.
+	// First probe seeds the catalog via JSON.
 	if err := prober.Probe(ctx); err != nil {
-		t.Fatalf("non-TTY Probe: %v", err)
-	}
-	nonTTYCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
-	if err != nil {
-		t.Fatalf("GetAgentModels(non-TTY): %v", err)
-	}
-	if nonTTYCat.Status != store.AgentModelStatusOK || len(nonTTYCat.Models) != 27 {
-		t.Fatalf("non-TTY catalog = status=%q len=%d, want ok and 27", nonTTYCat.Status, len(nonTTYCat.Models))
+		t.Fatalf("first Probe: %v", err)
 	}
 
-	// 2. Real PTY sample: all 27 models imported identically in exact order.
-	output = realAgyModelsPTY
-	now = t1.Add(time.Hour)
+	// Second probe fails in both JSON and TSV fallback.
+	failBoth = true
+	now = t1.Add(24 * time.Hour)
 	if err := prober.Probe(ctx); err != nil {
-		t.Fatalf("PTY Probe: %v", err)
-	}
-	ptyCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
-	if err != nil {
-		t.Fatalf("GetAgentModels(PTY): %v", err)
-	}
-	if ptyCat.Status != store.AgentModelStatusOK || len(ptyCat.Models) != len(nonTTYCat.Models) {
-		t.Fatalf("PTY catalog = status=%q len=%d, want ok and %d", ptyCat.Status, len(ptyCat.Models), len(nonTTYCat.Models))
-	}
-	for i := range nonTTYCat.Models {
-		if ptyCat.Models[i] != nonTTYCat.Models[i] {
-			t.Errorf("PTY model[%d] = %+v, want %+v", i, ptyCat.Models[i], nonTTYCat.Models[i])
-		}
+		t.Fatalf("second Probe: %v", err)
 	}
 
-	// 3. Unknown-prefix catalog (docs/11 §3) + lowercase display name: saved as ok with family=unknown.
-	output = "new-provider-v1\tNew Provider V1\nnew-provider-v2\tnew-provider-v2\n"
-	now = t1.Add(2 * time.Hour)
-	if err := prober.Probe(ctx); err != nil {
-		t.Fatalf("unknown-family Probe: %v", err)
-	}
-	unkCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
+	got, err := st.GetAgentModels(ctx, "ubuntu", "agy")
 	if err != nil {
-		t.Fatalf("GetAgentModels(unknown): %v", err)
+		t.Fatalf("GetAgentModels: %v", err)
 	}
-	if unkCat.Status != store.AgentModelStatusOK || len(unkCat.Models) != 2 {
-		t.Fatalf("unknown catalog = %+v, want status=ok and 2 models", unkCat)
+	if got.Status != store.AgentModelStatusError {
+		t.Errorf("status = %q, want error", got.Status)
 	}
-	if unkCat.Models[0].ID != "new-provider-v1" || unkCat.Models[0].Family != quota.ModelFamilyUnknown ||
-		unkCat.Models[1].ID != "new-provider-v2" || unkCat.Models[1].DisplayName != "new-provider-v2" || unkCat.Models[1].Family != quota.ModelFamilyUnknown {
-		t.Errorf("unexpected unknown-family models: %+v", unkCat.Models)
+	if !strings.Contains(got.ErrorDetail, "agy json probe failed") || !strings.Contains(got.ErrorDetail, "tsv fallback failed") {
+		t.Errorf("error_detail = %q, want both json and tsv failure details", got.ErrorDetail)
+	}
+	if len(got.Models) != 2 || got.Models[0].ID != "gemini-4-neon-medium" || got.Models[1].ID != "claude-opus-5-5-high" {
+		t.Errorf("previous catalog was NOT preserved: %+v", got.Models)
+	}
+	if got.UpdatedAt == nil || !got.UpdatedAt.Equal(t1) {
+		t.Errorf("updated_at = %v, want preserved %v", got.UpdatedAt, t1)
 	}
 
-	// 4. Single-model valid catalog (known ID) and tab-separated display name with consecutive spaces.
-	output = "gemini-4-neon-medium\tGemini 4  Neon (Medium)\n"
-	now = t1.Add(3 * time.Hour)
-	if err := prober.Probe(ctx); err != nil {
-		t.Fatalf("single-model Probe: %v", err)
-	}
-	singleCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
-	if err != nil {
-		t.Fatalf("GetAgentModels(single): %v", err)
-	}
-	if singleCat.Status != store.AgentModelStatusOK || len(singleCat.Models) != 1 ||
-		singleCat.Models[0].ID != "gemini-4-neon-medium" || singleCat.Models[0].DisplayName != "Gemini 4  Neon (Medium)" {
-		t.Errorf("unexpected single-model catalog: %+v", singleCat)
-	}
-
-	// 5. Single-model unknown-prefix catalog: saved as ok with family=unknown.
-	output = "new-provider-v1\tNew Provider V1\n"
-	now = t1.Add(4 * time.Hour)
-	if err := prober.Probe(ctx); err != nil {
-		t.Fatalf("single unknown-family Probe: %v", err)
-	}
-	singleUnkCat, err := st.GetAgentModels(ctx, "ubuntu", "agy")
-	if err != nil {
-		t.Fatalf("GetAgentModels(single unknown): %v", err)
-	}
-	if singleUnkCat.Status != store.AgentModelStatusOK || len(singleUnkCat.Models) != 1 ||
-		singleUnkCat.Models[0].ID != "new-provider-v1" || singleUnkCat.Models[0].Family != quota.ModelFamilyUnknown {
-		t.Errorf("unexpected single unknown-family catalog: %+v", singleUnkCat)
+	logged := logBuf.String()
+	if !strings.Contains(logged, "agy probe failed for ubuntu/agy") {
+		t.Errorf("expected explicit failure log for ubuntu/agy, got %q", logged)
 	}
 }
 
@@ -446,21 +539,23 @@ func TestProberPersistsCatalogAndPreservesOnFailure(t *testing.T) {
 			"ubuntu": &fakeFileAccess{
 				runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
 					if failProbes {
-						return adapter.ExecResult{ExitCode: 1, Output: "network error"}, nil
+						return adapter.ExecResult{ExitCode: 1, Stderr: "network error", Output: "network error"}, nil
 					}
 					if strings.Contains(cmd, "models_cache.json") {
 						return adapter.ExecResult{
 							ExitCode: 0,
+							Stdout:   `{"models":[{"slug":"gpt-6.2-sol","display_name":"GPT-6.2-Sol","visibility":"list","priority":1}]}`,
 							Output:   `{"models":[{"slug":"gpt-6.2-sol","display_name":"GPT-6.2-Sol","visibility":"list","priority":1}]}`,
 						}, nil
 					}
-					if strings.Contains(cmd, "agy") && strings.Contains(cmd, "models") {
+					if strings.Contains(cmd, "agy") && strings.Contains(cmd, "--output-format json models") {
 						return adapter.ExecResult{
 							ExitCode: 0,
-							Output:   "gemini-4-carbon-medium   Gemini 4 Carbon (Medium)\nclaude-opus-5-5-high   Claude Opus 5.5 (High)\n",
+							Stdout:   `{"status":"SUCCESS","command":{"name":"models","data":{"models":[{"id":"gemini-4-carbon-medium","label":"Gemini 4 Carbon (Medium)"},{"id":"claude-opus-5-5-high","label":"Claude Opus 5.5 (High)"}]}}}`,
+							Stderr:   "Fetching available models...\n",
 						}, nil
 					}
-					return adapter.ExecResult{ExitCode: 1, Output: "unexpected cmd: " + cmd}, nil
+					return adapter.ExecResult{ExitCode: 1, Stderr: "unexpected cmd: " + cmd}, nil
 				},
 			},
 			"home-win": &fakeFileAccess{
@@ -553,248 +648,6 @@ func TestProberPersistsCatalogAndPreservesOnFailure(t *testing.T) {
 	}
 	if len(codexAfterFail.Models) != 1 || codexAfterFail.Models[0].ID != "gpt-6.2-sol" {
 		t.Errorf("previous codex catalog was NOT preserved on failure: %+v", codexAfterFail)
-	}
-}
-
-func TestProberPreservesAgyCatalogOnDiagnosticMessageWithExitZero(t *testing.T) {
-	cases := []struct {
-		name   string
-		output string
-	}{
-		{
-			name:   "plain prose empty message",
-			output: "No models available\n",
-		},
-		{
-			name:   "two-space separated diagnostic",
-			output: "error-code  authentication required\n",
-		},
-		{
-			name:   "tab separated diagnostic",
-			output: "error-code\tauthentication required\n",
-		},
-		{
-			name:   "two-space separated capitalized diagnostic",
-			output: "error-code  Authentication required\n",
-		},
-		{
-			name:   "tab separated capitalized diagnostic",
-			output: "error-code\tAuthentication required\n",
-		},
-		{
-			name:   "known model ID with tab diagnostic",
-			output: "gemini-4-neon-medium\tAuthentication required\n",
-		},
-		{
-			name:   "known model ID with two-space diagnostic",
-			output: "gemini-4-neon-medium  Authentication required\n",
-		},
-		{
-			name:   "valid row mixed with tabular error diagnostic",
-			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nerror-code\tAuthentication required\n",
-		},
-		{
-			name:   "valid row mixed with known-ID diagnostic",
-			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tAuthentication required\n",
-		},
-		{
-			name:   "valid row mixed with unlisted diagnostic text",
-			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\ngemini-4-neon-high\tCatalog retrieval interrupted\n",
-		},
-		{
-			name:   "single-line known-ID with unlisted diagnostic text",
-			output: "gemini-4-neon-high\tCatalog retrieval interrupted\n",
-		},
-		{
-			name:   "valid rows mixed with plain-text diagnostic line",
-			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\nWarning: incomplete catalog\n",
-		},
-		{
-			name:   "mixed tab and space separators",
-			output: "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high  Claude Opus 5.5 (High)\n",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-diag-test"})
-			if err != nil {
-				t.Fatalf("store.Open: %v", err)
-			}
-			defer st.Close()
-
-			cfg := &config.Config{
-				InstanceID: "agy-diag-test",
-				Hosts: map[string]config.HostConfig{
-					"ubuntu": {
-						OS: "linux",
-						Agents: map[string]config.HostAgentOverride{
-							"agy": {},
-						},
-					},
-				},
-			}
-
-			output := "Fetching available models...\ngemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n"
-			provider := &fakeHostProvider{
-				hosts: map[string]adapter.FileAccess{
-					"ubuntu": &fakeFileAccess{
-						runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
-							return adapter.ExecResult{ExitCode: 0, Output: output}, nil
-						},
-					},
-				},
-			}
-
-			t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
-			now := t1
-			prober, err := NewProber(ProberOptions{
-				Store:    st,
-				Config:   cfg,
-				Provider: provider,
-				Now:      func() time.Time { return now },
-				Logger:   log.New(io.Discard, "", 0),
-			})
-			if err != nil {
-				t.Fatalf("NewProber: %v", err)
-			}
-
-			if err := prober.Probe(ctx); err != nil {
-				t.Fatalf("first Probe: %v", err)
-			}
-
-			// Second probe exits 0 but only returns a diagnostic message.
-			output = tc.output
-			now = t1.Add(24 * time.Hour)
-			if err := prober.Probe(ctx); err != nil {
-				t.Fatalf("second Probe: %v", err)
-			}
-
-			got, err := st.GetAgentModels(ctx, "ubuntu", "agy")
-			if err != nil {
-				t.Fatalf("GetAgentModels: %v", err)
-			}
-			if got.Status != store.AgentModelStatusError {
-				t.Errorf("status = %q, want error", got.Status)
-			}
-			if got.ErrorDetail == "" {
-				t.Errorf("error_detail is empty, want non-empty")
-			}
-			if len(got.Models) != 2 || got.Models[0].ID != "gemini-4-neon-medium" || got.Models[1].ID != "claude-opus-5-5-high" {
-				t.Errorf("previous agy catalog must be preserved when exit-0 output is diagnostic only, got %+v", got.Models)
-			}
-			if got.UpdatedAt == nil || !got.UpdatedAt.Equal(t1) {
-				t.Errorf("updated_at = %v, want preserved %v", got.UpdatedAt, t1)
-			}
-		})
-	}
-}
-
-func TestProberUsesSeparatedAgyStdoutAndStderr(t *testing.T) {
-	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "agy-streams-test"})
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	defer st.Close()
-
-	cfg := &config.Config{
-		InstanceID: "agy-streams-test",
-		Hosts: map[string]config.HostConfig{
-			"ubuntu": {
-				OS: "linux",
-				Agents: map[string]config.HostAgentOverride{
-					"agy": {},
-				},
-			},
-		},
-	}
-
-	var nextRes adapter.ExecResult
-	provider := &fakeHostProvider{
-		hosts: map[string]adapter.FileAccess{
-			"ubuntu": &fakeFileAccess{
-				runFn: func(ctx context.Context, cmd string) (adapter.ExecResult, error) {
-					return nextRes, nil
-				},
-			},
-		},
-	}
-
-	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
-	now := t1
-	prober, err := NewProber(ProberOptions{
-		Store:    st,
-		Config:   cfg,
-		Provider: provider,
-		Now:      func() time.Time { return now },
-		Logger:   log.New(io.Discard, "", 0),
-	})
-	if err != nil {
-		t.Fatalf("NewProber: %v", err)
-	}
-
-	// 1. Clean non-TTY execution: progress only on stderr, tab-separated models on stdout.
-	nextRes = adapter.ExecResult{
-		ExitCode: 0,
-		Stdout:   "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n",
-		Stderr:   "Fetching available models...\n",
-		Output:   "Fetching available models...\ngemini-4-neon-medium\tGemini 4 Neon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n",
-	}
-	if err := prober.Probe(ctx); err != nil {
-		t.Fatalf("first Probe: %v", err)
-	}
-	got, err := st.GetAgentModels(ctx, "ubuntu", "agy")
-	if err != nil {
-		t.Fatalf("GetAgentModels: %v", err)
-	}
-	if got.Status != store.AgentModelStatusOK || len(got.Models) != 2 {
-		t.Fatalf("first catalog = %+v, want ok with 2 models", got)
-	}
-
-	// 2. Exit 0 with valid stdout row, but unexpected diagnostic text on stderr -> preserve previous catalog.
-	nextRes = adapter.ExecResult{
-		ExitCode: 0,
-		Stdout:   "gemini-4-neon-medium\tGemini 4 Neon (Medium)\n",
-		Stderr:   "Fetching available models...\nCatalog retrieval interrupted\n",
-		Output:   "gemini-4-neon-medium\tGemini 4 Neon (Medium)\nFetching available models...\nCatalog retrieval interrupted\n",
-	}
-	now = t1.Add(24 * time.Hour)
-	if err := prober.Probe(ctx); err != nil {
-		t.Fatalf("second Probe: %v", err)
-	}
-	got, err = st.GetAgentModels(ctx, "ubuntu", "agy")
-	if err != nil {
-		t.Fatalf("GetAgentModels after stderr diag: %v", err)
-	}
-	if got.Status != store.AgentModelStatusError || got.ErrorDetail == "" {
-		t.Errorf("expected error status on unexpected stderr, got %+v", got)
-	}
-	if len(got.Models) != 2 || got.Models[1].ID != "claude-opus-5-5-high" {
-		t.Errorf("previous catalog must be preserved on unexpected stderr, got %+v", got.Models)
-	}
-	if got.UpdatedAt == nil || !got.UpdatedAt.Equal(t1) {
-		t.Errorf("updated_at = %v, want preserved %v", got.UpdatedAt, t1)
-	}
-
-	// 3. Exit 0 with empty stdout and progress-only stderr -> preserve previous catalog.
-	nextRes = adapter.ExecResult{
-		ExitCode: 0,
-		Stdout:   "",
-		Stderr:   "Fetching available models...\n",
-		Output:   "Fetching available models...\n",
-	}
-	now = t1.Add(48 * time.Hour)
-	if err := prober.Probe(ctx); err != nil {
-		t.Fatalf("third Probe: %v", err)
-	}
-	got, err = st.GetAgentModels(ctx, "ubuntu", "agy")
-	if err != nil {
-		t.Fatalf("GetAgentModels after empty stdout: %v", err)
-	}
-	if got.Status != store.AgentModelStatusError || len(got.Models) != 2 || got.UpdatedAt == nil || !got.UpdatedAt.Equal(t1) {
-		t.Errorf("previous catalog must be preserved on empty stdout, got %+v", got)
 	}
 }
 
