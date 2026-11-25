@@ -1,0 +1,284 @@
+package ui
+
+import (
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+func TestUIWebPushAssetsPresent(t *testing.T) {
+	js := string(appJS)
+	for _, token := range []string{
+		`createPushController`,
+		`getRegistration: notificationPresenter.register`,
+		`isEnabled: function () { return notifyController.isEnabled(); }`,
+		`void pushController.sync();`,
+		`pushController.settled()`,
+		`unsupportedHint: iosHint`,
+		`notifyHelper.IOS_PUSH_NOTE`,
+		`navigator.maxTouchPoints`,
+		`"通知: Push"`,
+		`"通知: タブのみ"`,
+	} {
+		if !strings.Contains(js, token) {
+			t.Errorf("app.js missing web push wiring %q", token)
+		}
+	}
+	// docs/16: the iOS limit is explained in the UI.
+	if !strings.Contains(string(indexHTML), "ホーム画面に追加した PWA のみ、iOS 16.4 以降") {
+		t.Errorf("index.html does not explain the iOS limit")
+	}
+}
+
+func TestUIPushControllerWithNode(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available in PATH; skipping JS web push test")
+	}
+
+	script := `
+const assert = require("assert");
+const n = require("./assets/notify.js");
+
+const tick = () => new Promise(r => setImmediate(r));
+const flush = async () => { for (let i = 0; i < 20; i++) await tick(); };
+
+const KEY = Buffer.from([4].concat(Array.from({ length: 64 }, (_, i) => (i * 7 + 250) % 256)));
+const KEY_TEXT = KEY.toString("base64url");
+const OTHER = Buffer.from(KEY); OTHER[10] ^= 1;
+const buffer = b => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+
+function fixture(opts) {
+  const o = Object.assign({ enabled: true, supported: true, token: "sekret", existing: null }, opts);
+  const log = { requests: [], subscribes: [], unsubscribed: [], views: [], timers: new Map() };
+  const make = (endpoint, key) => ({
+    endpoint,
+    options: key === null ? undefined : { applicationServerKey: buffer(key) },
+    toJSON: () => ({ endpoint, keys: { p256dh: "p", auth: "a" } }),
+    unsubscribe: async () => {
+      log.unsubscribed.push(endpoint);
+      env.current = null;
+      return true;
+    }
+  });
+  const env = { enabled: o.enabled, supported: o.supported, token: o.token, current: null, counter: 0,
+    status: { GET: 200, POST: 201, DELETE: 200 }, offline: false, subscribeError: null, hang: false,
+    registration: null };
+  if (o.existing) env.current = make("https://push.example/old", o.existing === "no-key" ? null : o.existing);
+  const manager = {
+    getSubscription: async () => env.current,
+    subscribe: async options => {
+      if (env.hang) return new Promise(() => {});
+      if (env.subscribeError) throw env.subscribeError;
+      log.subscribes.push({ userVisibleOnly: options.userVisibleOnly, key: Buffer.from(options.applicationServerKey) });
+      env.current = make("https://push.example/new" + (++env.counter), Buffer.from(options.applicationServerKey));
+      return env.current;
+    }
+  };
+  env.registration = { pushManager: manager };
+  let timer = 0;
+  const controller = n.createPushController({
+    isSupported: () => env.supported,
+    getRegistration: async () => env.registration,
+    getToken: () => env.token,
+    isEnabled: () => env.enabled,
+    setTimeout: (fn, ms) => { log.timers.set(++timer, { fn, ms }); return timer; },
+    clearTimeout: id => log.timers.delete(id),
+    onChange: v => log.views.push(v.state),
+    fetch: async (url, init) => {
+      log.requests.push({ method: init.method, url, headers: init.headers,
+        body: init.body === undefined ? undefined : JSON.parse(init.body) });
+      if (env.offline) throw new TypeError("offline");
+      const status = env.status[init.method];
+      return { status, ok: status >= 200 && status < 300, json: async () => ({ public_key: KEY_TEXT }) };
+    }
+  });
+  const calls = () => log.requests.map(r => r.method + " " + r.url);
+  const reset = () => { log.requests.length = 0; log.subscribes.length = 0; log.unsubscribed.length = 0; log.views.length = 0; };
+  return { controller, env, log, calls, reset, make };
+}
+
+const GET = "GET /push/vapid-public-key";
+const POST = "POST /push/subscriptions";
+const DELETE = "DELETE /push/subscriptions";
+
+async function main() {
+  {
+    // Enabling subscribes with the server key and registers the subscription.
+    const f = fixture({});
+    assert.strictEqual(f.controller.view().state, "off");
+    const view = await f.controller.sync();
+    assert.strictEqual(view.state, "active");
+    assert.deepStrictEqual(f.log.views, ["pending", "active"]);
+    assert.deepStrictEqual(f.calls(), [GET, POST]);
+    assert.strictEqual(f.log.subscribes.length, 1);
+    assert.strictEqual(f.log.subscribes[0].userVisibleOnly, true);
+    assert.deepStrictEqual(f.log.subscribes[0].key, KEY);
+    assert.deepStrictEqual(f.log.requests[1].body, { endpoint: "https://push.example/new1", keys: { p256dh: "p", auth: "a" } });
+    for (const r of f.log.requests) {
+      assert.strictEqual(r.headers.Authorization, "Bearer sekret");
+      assert.ok(!r.url.includes("sekret"));
+    }
+    assert.strictEqual(f.log.timers.size, 0, "no timer is left behind");
+
+    // Later syncs reuse the subscription, register it again and do not flicker.
+    f.reset();
+    await f.controller.sync();
+    assert.deepStrictEqual(f.log.views, ["active"]);
+    assert.deepStrictEqual(f.calls(), [GET, POST]);
+    assert.strictEqual(f.log.subscribes.length, 0);
+
+    // Turning notifications off removes it on the server and in the browser.
+    f.reset();
+    f.env.enabled = false;
+    assert.strictEqual((await f.controller.sync()).state, "off");
+    assert.deepStrictEqual(f.calls(), [DELETE]);
+    assert.deepStrictEqual(f.log.requests[0].body, { endpoint: "https://push.example/new1" });
+    assert.deepStrictEqual(f.log.unsubscribed, ["https://push.example/new1"]);
+    f.reset();
+    await f.controller.sync();
+    assert.deepStrictEqual(f.calls(), [], "nothing to remove");
+  }
+  {
+    // The browser is unsubscribed even when the server cannot be told.
+    for (const change of [e => { e.offline = true; }, e => { e.status.DELETE = 403; }, e => { e.token = ""; }]) {
+      const f = fixture({ enabled: false, existing: KEY });
+      change(f.env);
+      assert.strictEqual((await f.controller.sync()).state, "off");
+      assert.deepStrictEqual(f.log.unsubscribed, ["https://push.example/old"]);
+    }
+  }
+  {
+    // A new server key pair replaces the subscription.
+    const f = fixture({ existing: OTHER });
+    assert.strictEqual((await f.controller.sync()).state, "active");
+    assert.deepStrictEqual(f.calls(), [GET, DELETE, POST]);
+    assert.deepStrictEqual(f.log.requests[1].body, { endpoint: "https://push.example/old" });
+    assert.deepStrictEqual(f.log.unsubscribed, ["https://push.example/old"]);
+    assert.strictEqual(f.log.subscribes.length, 1);
+    // A matching one, or one that does not say its key, is kept.
+    for (const existing of [KEY, "no-key"]) {
+      const g = fixture({ existing });
+      await g.controller.sync();
+      assert.deepStrictEqual(g.calls(), [GET, POST]);
+      assert.strictEqual(g.log.subscribes.length, 0);
+    }
+  }
+  {
+    // Fallbacks: nothing is thrown and the state says why only open tabs are notified.
+    const unsupported = fixture({ supported: false });
+    assert.strictEqual((await unsupported.controller.sync()).state, "unsupported");
+    assert.deepStrictEqual(unsupported.calls(), []);
+    unsupported.env.enabled = false;
+    assert.strictEqual((await unsupported.controller.sync()).state, "off");
+
+    for (const registration of [null, {}]) {
+      const f = fixture({});
+      f.env.registration = registration;
+      assert.strictEqual((await f.controller.sync()).state, "unsupported");
+      assert.deepStrictEqual(f.calls(), [GET]);
+    }
+
+    const anonymous = fixture({ token: "", existing: KEY });
+    assert.strictEqual((await anonymous.controller.sync()).state, "no-token");
+    assert.deepStrictEqual(anonymous.calls(), []);
+    assert.deepStrictEqual(anonymous.log.unsubscribed, [], "kept until a token is entered");
+
+    for (const [method, status, state] of [
+      ["GET", 404, "server-off"], ["GET", 401, "unauthorized"], ["GET", 403, "forbidden"], ["GET", 500, "error"],
+      ["POST", 403, "forbidden"], ["POST", 401, "unauthorized"], ["POST", 400, "error"]]) {
+      const f = fixture({ existing: KEY });
+      f.env.status[method] = status;
+      const view = await f.controller.sync();
+      assert.strictEqual(view.state, state, method + " " + status);
+      assert.ok(view.message.startsWith("Web Push: "), view.message);
+      assert.deepStrictEqual(f.log.unsubscribed, [], "an earlier registration is left alone");
+    }
+
+    const offline = fixture({});
+    offline.env.offline = true;
+    assert.strictEqual((await offline.controller.sync()).state, "error");
+    offline.env.offline = false;
+    assert.strictEqual((await offline.controller.sync()).state, "active", "the next sync recovers");
+
+    const refused = fixture({});
+    refused.env.subscribeError = new Error("push service not available");
+    assert.strictEqual((await refused.controller.sync()).state, "error");
+    assert.deepStrictEqual(refused.calls(), [GET]);
+  }
+  {
+    // A subscribe() that never settles times out and does not stall later calls.
+    const f = fixture({});
+    f.env.hang = true;
+    const first = f.controller.sync();
+    await flush();
+    assert.deepStrictEqual(Array.from(f.log.timers.values(), t => t.ms), [20000]);
+    for (const [id, t] of f.log.timers) { f.log.timers.delete(id); t.fn(); }
+    assert.strictEqual((await first).state, "error");
+    f.env.hang = false;
+    assert.strictEqual((await f.controller.sync()).state, "active");
+  }
+  {
+    // Turning off while subscribing: nothing is registered and the queued sync cleans up.
+    const f = fixture({});
+    const manager = f.env.registration.pushManager;
+    const get = manager.getSubscription;
+    manager.getSubscription = async () => { f.env.enabled = false; return get(); };
+    const running = f.controller.sync();
+    await tick();
+    const view = await f.controller.sync();
+    assert.strictEqual((await running).state, "off");
+    assert.strictEqual(view.state, "off");
+    assert.deepStrictEqual(f.calls(), [GET]);
+    assert.strictEqual(f.log.subscribes.length, 0);
+  }
+  {
+    // Calls made before a run starts share it; one made during a run gets another, so
+    // runs never overlap. settled() waits without adding one.
+    const f = fixture({});
+    const early = [f.controller.sync(), f.controller.sync()];
+    assert.strictEqual(early[0], early[1]);
+    await tick();
+    const late = [f.controller.sync(), f.controller.sync()];
+    assert.notStrictEqual(late[0], early[0]);
+    assert.strictEqual(late[0], late[1]);
+    assert.strictEqual((await f.controller.settled()).state, "active");
+    assert.deepStrictEqual(f.calls(), [GET, POST, GET, POST]);
+    assert.strictEqual(f.log.subscribes.length, 1);
+    await f.controller.settled();
+    assert.strictEqual(f.log.requests.length, 4);
+  }
+  {
+    // iOS and iPadOS, which poses as a Mac with a touch screen.
+    assert.strictEqual(n.isIOS("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)", 5), true);
+    assert.strictEqual(n.isIOS("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 5), true);
+    assert.strictEqual(n.isIOS("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 0), false);
+    assert.strictEqual(n.isIOS("Mozilla/5.0 (Linux; Android 14)", 5), false);
+    assert.ok(n.IOS_PUSH_NOTE.includes("ホーム画面") && n.IOS_PUSH_NOTE.includes("16.4"));
+
+    // An iOS Safari tab has no Notification: the toggle explains what to do.
+    const messages = [];
+    const controller = n.createNotifyController({
+      storage: { getItem: () => null, setItem: () => {} },
+      getNotification: () => null,
+      isSecureContext: () => true,
+      unsupportedHint: () => n.IOS_PUSH_NOTE,
+      onMessage: m => messages.push(m)
+    });
+    await controller.toggle();
+    assert.deepStrictEqual(messages, ["このブラウザは通知に対応していません。" + n.IOS_PUSH_NOTE]);
+  }
+  console.log("ALL_UI_PUSH_TESTS_PASSED");
+}
+
+main().catch(err => { console.error(err); process.exit(1); });
+`
+	out, err := exec.Command(nodeBin, "-e", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node web push unit tests failed: %v\n%s", err, string(out))
+	}
+	// A hung promise would let node exit 0 early, so require the final marker.
+	if !strings.Contains(string(out), "ALL_UI_PUSH_TESTS_PASSED") {
+		t.Fatalf("unexpected node test output: %s", string(out))
+	}
+}

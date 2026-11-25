@@ -1,0 +1,88 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+)
+
+func TestPushSubscriptionsUpsertListDelete(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fleet.db")
+	st, err := Open(ctx, path, Options{InstanceID: "push"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	first := PushSubscription{Endpoint: "https://push.example/a", P256dh: "k1", Auth: "a1", UserAgent: "ua1"}
+	if created, err := st.UpsertPushSubscription(ctx, first); err != nil || !created {
+		t.Fatalf("first upsert = %v, %v", created, err)
+	}
+	before, err := st.ListPushSubscriptions(ctx)
+	if err != nil || len(before) != 1 || before[0].CreatedAt.IsZero() {
+		t.Fatalf("list = %+v, %v", before, err)
+	}
+	renewed := PushSubscription{Endpoint: first.Endpoint, P256dh: "k2", Auth: "a2", UserAgent: "ua2"}
+	if created, err := st.UpsertPushSubscription(ctx, renewed); err != nil || created {
+		t.Fatalf("second upsert = %v, %v", created, err)
+	}
+
+	// The table survives reopening the database.
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if st, err = Open(ctx, path, Options{InstanceID: "push"}); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got, err := st.ListPushSubscriptions(ctx)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("list = %+v, %v", got, err)
+	}
+	renewed.CreatedAt = before[0].CreatedAt
+	if got[0] != renewed {
+		t.Errorf("subscription = %+v, want %+v", got[0], renewed)
+	}
+
+	// An expiry reported for the replaced keys keeps the renewed subscription.
+	if deleted, err := st.DeleteExpiredPushSubscription(ctx, first); err != nil || deleted {
+		t.Errorf("expiry of replaced keys = %v, %v", deleted, err)
+	}
+	if deleted, err := st.DeleteExpiredPushSubscription(ctx, renewed); err != nil || !deleted {
+		t.Errorf("expiry = %v, %v", deleted, err)
+	}
+	if _, err := st.UpsertPushSubscription(ctx, first); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if deleted, err := st.DeletePushSubscription(ctx, "https://push.example/other"); err != nil || deleted {
+		t.Errorf("delete unknown = %v, %v", deleted, err)
+	}
+	if deleted, err := st.DeletePushSubscription(ctx, first.Endpoint); err != nil || !deleted {
+		t.Errorf("delete = %v, %v", deleted, err)
+	}
+	if got, err := st.ListPushSubscriptions(ctx); err != nil || len(got) != 0 {
+		t.Errorf("list after delete = %+v, %v", got, err)
+	}
+
+	for _, bad := range []PushSubscription{{P256dh: "k", Auth: "a"}, {Endpoint: "https://e", Auth: "a"}, {Endpoint: "https://e", P256dh: "k"}} {
+		if _, err := st.UpsertPushSubscription(ctx, bad); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("upsert %+v = %v, want ErrInvalidInput", bad, err)
+		}
+	}
+}
+
+func TestJobEventsClosed(t *testing.T) {
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "fleet.db"), Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if st.JobEventsClosed() {
+		t.Fatal("closed after Open")
+	}
+	st.CloseJobEvents()
+	if !st.JobEventsClosed() {
+		t.Fatal("not closed after CloseJobEvents")
+	}
+}

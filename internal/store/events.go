@@ -126,6 +126,14 @@ func (s *Store) CloseJobEvents() {
 	s.events.close()
 }
 
+// JobEventsClosed reports whether CloseJobEvents has been called. A subscriber whose
+// channel closed uses it to tell a shutdown from having fallen behind.
+func (s *Store) JobEventsClosed() bool {
+	s.events.mu.Lock()
+	defer s.events.mu.Unlock()
+	return s.events.closed
+}
+
 // withJobTx is withImmediateTx for transactions that change job status. The changes that
 // fn appends are published to subscribers only after a successful commit.
 func (s *Store) withJobTx(ctx context.Context, fn func(conn *sql.Conn, changes *[]statusChange) error) error {

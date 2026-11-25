@@ -7,7 +7,7 @@
 
 `/ui/` をホーム画面へインストールし、独立したアプリ（standalone）として起動できるようにする。通知用の Service Worker（docs/14）は置き換えず拡張する。
 
-非目的: Web Push（Issue #7）、API レスポンスのオフラインキャッシュ、ページ内の独自インストールボタン（ブラウザ標準の導線を使う）。
+非目的: Web Push（後に [docs/16](16-web-push.md) で実装）、API レスポンスのオフラインキャッシュ、ページ内の独自インストールボタン（ブラウザ標準の導線を使う）。
 
 インストールと Service Worker はセキュアコンテキスト（HTTPS または localhost）が前提。`serve` は HTTP で待ち受けるので、HTTPS は前段で用意する。
 
@@ -105,5 +105,5 @@ manifest の link、`theme-color`、`mobile-web-app-capable`、`apple-mobile-web
 ## 6. 制限
 
 - トークンは従来どおり sessionStorage に保持する（docs/07）。インストールしたアプリを終了して起動し直すと、再入力が必要になる見込み。
-- 通知は開いているページの SSE 受信が起点で、アプリが停止している間は届かない（Web Push は Issue #7）。
+- SSE の通知は開いているページが起点で、アプリが停止している間は届かない。停止中も届けるには Web Push（[docs/16](16-web-push.md)）を使う。
 - 通知クリックの挙動（docs/14 の実装）は変えていない。

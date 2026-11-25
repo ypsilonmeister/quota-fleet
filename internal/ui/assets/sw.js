@@ -1,7 +1,7 @@
-// Service worker for job completion notifications (docs/14) and the PWA app shell
-// (docs/15). The page shows notifications through this registration because some browsers
-// (e.g. Android Chrome) reject new Notification(). Only the app shell is cached, as an
-// offline fallback; API responses, /events and /mcp are never intercepted.
+// Service worker for job completion notifications (docs/14), the PWA app shell (docs/15)
+// and Web Push (docs/16). The page shows notifications through this registration because
+// some browsers (e.g. Android Chrome) reject new Notification(). Only the app shell is
+// cached, as an offline fallback; API responses, /events and /mcp are never intercepted.
 "use strict";
 
 // A tab waking from the background may take a moment to answer.
@@ -183,6 +183,34 @@ async function openJob(jobID) {
   }
   await self.clients.openWindow(url);
 }
+
+function readPush(data) {
+  try {
+    return (data && data.json()) || {};
+  } catch (_err) {
+    return {};
+  }
+}
+
+// A push arrives from the server whether or not a tab is open (docs/16). Every push must
+// show a notification (the subscription is userVisibleOnly), so a message that cannot be
+// read gets a generic one.
+self.addEventListener("push", function (event) {
+  const message = readPush(event.data);
+  const title = typeof message.title === "string" && message.title ?
+    message.title : "quota-fleet: ジョブの通知";
+  const options = { body: typeof message.body === "string" ? message.body : "" };
+  const jobID = message.job_id;
+  if (Number.isInteger(jobID) && jobID > 0) {
+    // The same data as a page notification, so that a click is handled alike.
+    options.data = { jobId: jobID };
+    if (typeof message.status === "string" && message.status) {
+      // The tag a tab uses (notify.js): one replaces the other instead of stacking.
+      options.tag = "qf-job-" + jobID + ":" + message.status;
+    }
+  }
+  event.waitUntil(self.registration.showNotification(title, options));
+});
 
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();

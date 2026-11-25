@@ -1,4 +1,5 @@
-// Job completion browser notifications over server-sent events (docs/14).
+// Job completion browser notifications over server-sent events (docs/14) and the Web Push
+// subscription (docs/16).
 // Everything here takes its browser dependencies as arguments so it can be unit tested.
 (function (root) {
   "use strict";
@@ -24,6 +25,23 @@
   const SW_SCOPE = "/ui/";
   // A worker that fails to activate leaves serviceWorker.ready pending forever.
   const SW_READY_TIMEOUT_MS = 10000;
+  // A push service that cannot be reached may leave subscribe() pending.
+  const PUSH_STEP_TIMEOUT_MS = 20000;
+  const IOS_PUSH_NOTE =
+    "iOS / iPadOS では、ホーム画面に追加した PWA（iOS 16.4 以降）でのみ Web Push が届きます。";
+  const PUSH_FALLBACK = "通知はこの画面を開いている間だけ届きます。";
+  const PUSH_MESSAGES = {
+    off: "Web Push: オフ",
+    pending: "Web Push: 登録を確認しています。",
+    active: "Web Push: 登録済みです。画面を閉じていても完了・失敗の通知が届きます。",
+    unsupported: "Web Push: この環境では使えません。" + PUSH_FALLBACK,
+    "no-token": "Web Push: 登録の確認には API トークンが必要です。",
+    "server-off": "Web Push: サーバー側で無効です（fleet.yaml の api.web_push）。" + PUSH_FALLBACK,
+    unauthorized: "Web Push: 認証に失敗したため登録を確認できません（401）。",
+    forbidden: "Web Push: 登録には read と operate スコープのトークンが必要です（403）。" +
+      "このトークンでは新しく登録できません。",
+    error: "Web Push: 登録を確認できませんでした。画面を閉じている間は届かない可能性があります。"
+  };
 
   function defaultSetTimeout(fn, ms) {
     return setTimeout(fn, ms);
@@ -393,7 +411,8 @@
         return "ブラウザ通知は HTTPS または localhost で開いた場合のみ利用できます。";
       }
       if (!options.getNotification()) {
-        return "このブラウザは通知に対応していません。";
+        const hint = options.unsupportedHint ? options.unsupportedHint() : "";
+        return "このブラウザは通知に対応していません。" + hint;
       }
       return "";
     }
@@ -508,6 +527,183 @@
     };
   }
 
+  // isIOS also recognizes iPadOS, which calls itself a Macintosh but has a touch screen.
+  function isIOS(userAgent, maxTouchPoints) {
+    return /iPad|iPhone|iPod/.test(userAgent) ||
+      (/Macintosh/.test(userAgent) && maxTouchPoints > 1);
+  }
+
+  function base64URLToBytes(text) {
+    const base64 = text.replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(base64 + "=".repeat((4 - (base64.length % 4)) % 4));
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) {
+      bytes[i] = raw.charCodeAt(i);
+    }
+    return bytes;
+  }
+
+  // sameKey tells whether a subscription was made for the server's current key. A browser
+  // that does not expose the key is given the benefit of the doubt.
+  function sameKey(subscription, key) {
+    const used = subscription.options && subscription.options.applicationServerKey;
+    if (!used) {
+      return true;
+    }
+    const bytes = new Uint8Array(used);
+    return bytes.length === key.length && bytes.every(function (b, i) { return b === key[i]; });
+  }
+
+  // createPushController keeps this browser's Web Push subscription, here and on the
+  // server, in step with the notification toggle (docs/16). It never turns notifications
+  // off: whatever fails here, the event stream keeps working as before.
+  function createPushController(options) {
+    const setTimer = options.setTimeout || defaultSetTimeout;
+    const clearTimer = options.clearTimeout || defaultClearTimeout;
+    let chain = Promise.resolve();
+    // The run that has been asked for but has not started yet.
+    let waiting = null;
+    let view = { state: "off", message: PUSH_MESSAGES.off };
+
+    function report(state) {
+      view = { state: state, message: PUSH_MESSAGES[state] };
+      options.onChange(view);
+      return view;
+    }
+
+    function within(promise) {
+      return new Promise(function (resolve, reject) {
+        const timer = setTimer(function () {
+          reject(new Error("web push step timed out"));
+        }, PUSH_STEP_TIMEOUT_MS);
+        Promise.resolve(promise).then(function (value) {
+          clearTimer(timer);
+          resolve(value);
+        }, function (err) {
+          clearTimer(timer);
+          reject(err);
+        });
+      });
+    }
+
+    function call(method, path, body) {
+      const headers = { Accept: "application/json", Authorization: "Bearer " + options.getToken() };
+      const init = { method: method, headers: headers, cache: "no-store" };
+      if (body !== undefined) {
+        headers["Content-Type"] = "application/json";
+        init.body = JSON.stringify(body);
+      }
+      return within(options.fetch(path, init));
+    }
+
+    // forget removes the endpoint from the server. If that fails, the push service will
+    // report the endpoint gone and the server deletes it then.
+    async function forget(endpoint) {
+      if (!options.getToken()) {
+        return;
+      }
+      try {
+        await call("DELETE", "/push/subscriptions", { endpoint: endpoint });
+      } catch (_err) {
+        // Unsubscribing in the browser is what stops the notifications.
+      }
+    }
+
+    async function pushManager() {
+      if (!options.isSupported()) {
+        return null;
+      }
+      const registration = await options.getRegistration();
+      return (registration && registration.pushManager) || null;
+    }
+
+    async function remove() {
+      const manager = await pushManager();
+      const subscription = manager && await within(manager.getSubscription());
+      if (subscription) {
+        await forget(subscription.endpoint);
+        await within(subscription.unsubscribe());
+      }
+      return "off";
+    }
+
+    function failure(status) {
+      if (status === 401) {
+        return "unauthorized";
+      }
+      if (status === 403) {
+        return "forbidden";
+      }
+      return status === 404 ? "server-off" : "error";
+    }
+
+    async function ensure() {
+      if (!options.isSupported()) {
+        return "unsupported";
+      }
+      if (!options.getToken()) {
+        return "no-token";
+      }
+      if (view.state !== "active") {
+        report("pending");
+      }
+      const resp = await call("GET", "/push/vapid-public-key");
+      if (!resp.ok) {
+        return failure(resp.status);
+      }
+      const key = base64URLToBytes((await within(resp.json())).public_key);
+      const manager = await pushManager();
+      if (!manager) {
+        return "unsupported";
+      }
+      let subscription = await within(manager.getSubscription());
+      if (subscription && !sameKey(subscription, key)) {
+        // The server has a new key pair; the old subscription can no longer be used.
+        await forget(subscription.endpoint);
+        await within(subscription.unsubscribe());
+        subscription = null;
+      }
+      if (!options.isEnabled()) {
+        return "off";
+      }
+      if (!subscription) {
+        subscription = await within(manager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: key
+        }));
+      }
+      // Sent every time: the server may have dropped it, and registering is idempotent.
+      const saved = await call("POST", "/push/subscriptions", subscription.toJSON());
+      return saved.ok ? "active" : failure(saved.status);
+    }
+
+    // sync brings the subscription in line with the toggle and resolves to the resulting
+    // view. Runs never overlap, and each reads the toggle and the token when its turn
+    // comes, so calls made before then share it.
+    function sync() {
+      if (!waiting) {
+        waiting = chain.then(async function () {
+          waiting = null;
+          const enabled = options.isEnabled();
+          try {
+            return report(await (enabled ? ensure() : remove()));
+          } catch (_err) {
+            return report(enabled ? "error" : "off");
+          }
+        });
+        chain = waiting;
+      }
+      return waiting;
+    }
+
+    return {
+      sync: sync,
+      // settled resolves to the view once the calls made so far are done.
+      settled: function () { return chain.then(function () { return view; }); },
+      view: function () { return view; }
+    };
+  }
+
   // createRefresher coalesces bursts of change signals into one refresh per delay.
   // refresh resolves to false when it could not run yet and should be retried.
   function createRefresher(options) {
@@ -559,6 +755,9 @@
     createNotificationPresenter: createNotificationPresenter,
     createJobNotifier: createJobNotifier,
     createNotifyController: createNotifyController,
+    createPushController: createPushController,
+    isIOS: isIOS,
+    IOS_PUSH_NOTE: IOS_PUSH_NOTE,
     createRefresher: createRefresher
   };
 

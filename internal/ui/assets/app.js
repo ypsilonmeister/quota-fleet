@@ -3276,6 +3276,56 @@
     openJob: function (jobID) { navigate("/ui/jobs/" + jobID); }
   });
 
+  // The latest view of the notification toggle (docs/14); the Web Push view is added to
+  // it when the button is drawn (docs/16).
+  let notifyView = { enabled: false, problem: "" };
+
+  function renderNotifyButton() {
+    const push = pushController.view();
+    let label = "通知";
+    if (notifyView.enabled) {
+      if (push.state === "active") {
+        label = "通知: Push";
+      } else if (push.state === "pending") {
+        label = "通知: 確認中";
+      } else if (push.state === "unsupported" || push.state === "server-off") {
+        label = "通知: タブのみ";
+      } else if (push.state !== "off") {
+        // An earlier registration may still deliver.
+        label = "通知: Push 未確認";
+      }
+    }
+    dom.btnNotify.textContent = label;
+    dom.btnNotify.setAttribute("aria-pressed", notifyView.enabled ? "true" : "false");
+    // An active subscription still delivers when only the event stream has a problem.
+    dom.btnNotify.classList.toggle("notify-problem",
+      Boolean(notifyView.problem) && push.state !== "active");
+    dom.btnNotify.title = [
+      notifyView.problem || ("ジョブ完了のブラウザ通知: " + (notifyView.enabled ? "オン" : "オフ")),
+      notifyView.enabled ? push.message : "",
+      notifyHelper.IOS_PUSH_NOTE
+    ].filter(Boolean).join("\n");
+  }
+
+  // iOS browsers offer notifications only to a web app added to the home screen.
+  function iosHint() {
+    return notifyHelper.isIOS(navigator.userAgent, navigator.maxTouchPoints) ?
+      notifyHelper.IOS_PUSH_NOTE : "";
+  }
+
+  const pushController = notifyHelper.createPushController({
+    isSupported: function () {
+      return window.isSecureContext !== false && Boolean(navigator.serviceWorker) &&
+        typeof window.PushManager === "function";
+    },
+    getRegistration: notificationPresenter.register,
+    // Not apiFetch: a token without the operate scope must not open the auth gate.
+    fetch: function (url, opts) { return window.fetch(url, opts); },
+    getToken: getStoredToken,
+    isEnabled: function () { return notifyController.isEnabled(); },
+    onChange: function () { renderNotifyButton(); }
+  });
+
   const notifyController = notifyHelper.createNotifyController({
     storage: {
       getItem: function (key) { return localStorage.getItem(key); },
@@ -3301,11 +3351,11 @@
       }
     }),
     onListChanged: function () { listRefresher.request(); },
+    unsupportedHint: iosHint,
     onChange: function (view) {
-      dom.btnNotify.setAttribute("aria-pressed", view.enabled ? "true" : "false");
-      dom.btnNotify.classList.toggle("notify-problem", Boolean(view.problem));
-      dom.btnNotify.title = view.problem ||
-        ("ジョブ完了のブラウザ通知: " + (view.enabled ? "オン" : "オフ"));
+      notifyView = view;
+      renderNotifyButton();
+      void pushController.sync();
     },
     onMessage: function (message) { showBanner("error", message); },
     onUnauthorized: function (message) {
@@ -3366,9 +3416,24 @@
     void tryConnect("", true);
   });
 
+  // After turning notifications on, say whether they also arrive with the page closed.
+  async function toggleNotifications() {
+    const wasEnabled = notifyController.isEnabled();
+    await notifyController.toggle();
+    if (wasEnabled || !notifyController.isEnabled()) {
+      return;
+    }
+    const view = await pushController.settled();
+    // A problem of the event stream has its own banner, which stays.
+    if (view.state !== "off" && !notifyView.problem && notifyController.isEnabled()) {
+      showBanner(view.state === "active" ? "success" : "info",
+        view.message + " " + notifyHelper.IOS_PUSH_NOTE);
+    }
+  }
+
   dom.btnNotify.addEventListener("click", function () {
     clearBanner();
-    void notifyController.toggle();
+    void toggleNotifications();
   });
 
   ["input", "change"].forEach(function (type) {

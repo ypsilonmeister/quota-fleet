@@ -1273,3 +1273,48 @@ func TestAPIMCPAllowedOriginHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestAPIWebPushDefaultsFalseAndParses(t *testing.T) {
+	for yamlText, want := range map[string]bool{
+		"instance_id: x\n":                          false,
+		"instance_id: x\napi:\n  web_push: false\n": false,
+		"instance_id: x\napi:\n  web_push: true\n":  true,
+	} {
+		cfg, err := Parse([]byte(yamlText))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", yamlText, err)
+		}
+		if cfg.API.WebPush != want {
+			t.Errorf("Parse(%q) api.web_push = %v, want %v", yamlText, cfg.API.WebPush, want)
+		}
+	}
+}
+
+func TestAPIWebPushSubject(t *testing.T) {
+	if got := (APIConfig{}).EffectiveWebPushSubject(); got != DefaultWebPushSubject {
+		t.Errorf("default subject = %q", got)
+	}
+	for subject, valid := range map[string]bool{
+		"":                              true,
+		DefaultWebPushSubject:           true,
+		"mailto:ops@fleet.example":      true,
+		"https://fleet.example/contact": true,
+		"ops@fleet.example":             false,
+		"mailto:ops":                    false,
+		"mailto:@fleet.example":         false,
+		"mailto: ops@fleet.example":     false,
+		"mailto:<ops@fleet.example>":    false,
+		"http://fleet.example":          false,
+		"https://":                      false,
+	} {
+		cfg, err := Parse([]byte("instance_id: x\n"))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		cfg.API.WebPushSubject = subject
+		err = cfg.Validate()
+		if (err == nil) != valid {
+			t.Errorf("Validate(web_push_subject=%q) = %v, want valid=%v", subject, err, valid)
+		}
+	}
+}
