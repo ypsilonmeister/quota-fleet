@@ -332,9 +332,26 @@ func (s *Store) createJobTx(ctx context.Context, conn *sql.Conn, changes *[]stat
 	// Supersede before looking at the parent, so a parent cancelled by this registration
 	// rejects it (and rolls the cancellations back).
 	supersedeKey := strings.TrimSpace(p.SupersedeKey)
+	if supersedeKey == "" {
+		// A request_id registered by a keyed hold stays registered when it is sent again
+		// without the key, so superseded work cannot come back that way.
+		reg, err := querySupersedeRegistration(ctx, conn, p.RequestID)
+		switch {
+		case err == nil:
+			supersedeKey = reg.key
+		case !errors.Is(err, ErrNotFound):
+			return nil, false, err
+		}
+	}
+	if err := checkKeyedDraft(supersedeKey, p); err != nil {
+		return nil, false, err
+	}
 	var superseded map[int64]bool
 	if supersedeKey != "" {
-		superseded, err = registerSupersedeTx(ctx, conn, changes, supersedeKey, p.RequestID, nowStr)
+		superseded, err = registerSupersedeTx(ctx, conn, changes, supersedeRegistration{
+			key: supersedeKey, requestID: p.RequestID,
+			owner: strings.TrimSpace(p.CreatedBy), ownOnly: p.SupersedeOwnOnly,
+		}, nowStr)
 		if err != nil {
 			return nil, false, err
 		}
@@ -357,10 +374,15 @@ func (s *Store) createJobTx(ctx context.Context, conn *sql.Conn, changes *[]stat
 		if err != nil {
 			return nil, false, err
 		}
+		if supersedeKey != "" {
+			if err := checkKeyedParentTx(ctx, conn, *p.ParentID, supersedeKey, superseded); err != nil {
+				return nil, false, err
+			}
+		}
 		parentStatus := Status(parentStatusStr)
 		switch parentStatus {
 		case StatusFailed, StatusCancelled:
-			return nil, false, parentTerminalError(*p.ParentID, parentStatus, supersedeKey, superseded)
+			return nil, false, fmt.Errorf("%w: parent_id=%d has status %s", ErrParentTerminal, *p.ParentID, parentStatus)
 		case StatusDone:
 			status = StatusQueued
 		default:

@@ -1031,7 +1031,7 @@ type CreateJobInput struct {
 	Pool               string        `json:"pool,omitempty" jsonschema:"Primary quota pool name"`
 	AltPools           []string      `json:"alt_pools,omitempty" jsonschema:"Alternative quota pool names"`
 	SessionID          string        `json:"session_id,omitempty" jsonschema:"Session identifier"`
-	SupersedeKey       string        `json:"supersede_key,omitempty" jsonschema:"Registering cancels older unstarted (held, queued, waiting) jobs with the same key"`
+	SupersedeKey       string        `json:"supersede_key,omitempty" jsonschema:"Registering cancels older unstarted (held, queued, waiting) jobs with the same key; without the operate scope, only jobs registered by the same token"`
 }
 
 // CreateJobOutput is the structured result returned by create_job.

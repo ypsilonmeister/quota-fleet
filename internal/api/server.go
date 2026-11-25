@@ -394,8 +394,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	resolvedPool := s.resolveRequestPool(req)
 
 	createdBy := ""
+	// Cancelling others' jobs takes the operate scope, through supersede_key too.
+	supersedeOwnOnly := true
 	if p, ok := authPrincipalFromContext(r.Context()); ok {
 		createdBy = p.name
+		supersedeOwnOnly = !p.hasScope(config.ScopeOperate)
 	}
 	params := store.CreateJobParams{
 		RequestID:          req.RequestID,
@@ -415,6 +418,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		SessionID:          req.SessionID,
 		CreatedBy:          createdBy,
 		SupersedeKey:       req.SupersedeKey,
+		SupersedeOwnOnly:   supersedeOwnOnly,
 	}
 
 	if s.gateMode == config.GateModeEnforce {

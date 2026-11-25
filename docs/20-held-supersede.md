@@ -20,7 +20,16 @@ Issue #23。同じ役割の古い登録を、新しい登録が自動で取り�
 
 Web UI の新規登録フォームには入力欄がない。
 
-キーの範囲は DB 全体で、agent・host・API トークンをまたぐ。`register` スコープのトークンは、キーを指定して登録することで、同じキーの未開始ジョブ（他のトークンが登録したものを含む）を取り消せる。`operate` スコープは要らない。
+キーは DB 全体で照合し、agent・host・親ジョブをまたぐ。別の対象のジョブと取り消し合わないように、キーには対象を含める（7 章）。
+
+取り消せる範囲は登録した主体の権限で決まる。
+
+| 登録した主体 | 取り消せる登録 |
+| --- | --- |
+| `operate` スコープを持つトークン、認証なしの API、CLI | 同じキーのすべて |
+| `operate` スコープを持たないトークン | 同じキーのうち、そのトークンが登録したもの |
+
+権限外の古い登録は、状態を変えずに残る（エラーにはしない）。解放時の再確認も同じ範囲で判定する。権限は登録時のものを記録し、後からトークン設定を変えても過去の登録の範囲は変わらない。トークンは名前で識別する。
 
 ## 3. 登録時の代替
 
@@ -32,7 +41,7 @@ Web UI の新規登録フォームには入力欄がない。
 | queued / waiting | `cancelled`。`last_error` に理由を記録する |
 | claimed | 触らない |
 | done / failed / cancelled | 触らない |
-| draft | 触らない（ただし、draft として登録した新しいジョブも、古い登録を取り消す） |
+| draft | 対象外（draft になる登録にはキーを指定できない） |
 
 理由は次の形式。
 
@@ -40,14 +49,15 @@ Web UI の新規登録フォームには入力欄がない。
 superseded: newer registration request_id=<新しい request_id> has supersede_key=<key>
 ```
 
-- 取り消した queued / waiting ジョブを待っている waiting の子孫は、手動のキャンセルと同じく連鎖して `cancelled` になる（キーが違っても同じ）。claimed のジョブを待つ子は変わらない。
-- 同じ `request_id` の再送は新しい登録ではないので、何も取り消さない。取り消された保持の `request_id` を再送すると 409 になる。
-- 自分が取り消すことになるジョブ（またはその子孫）を `parent_id` にした登録は 400 になり、何も取り消さない。
-- `supersede_key` を指定した登録が Gate に保持される場合、親が存在しないか `failed` / `cancelled` なら 400 になる。解放できない保持のために古い登録を取り消さないためで、キー未指定の保持はこの確認をしない。
+- 取り消すのは同じキーの登録だけである。取り消したジョブを待っている waiting の子のうち、同じキーを持たないもの（キー未指定・別キー）は変更しない。手動のキャンセルと違い、連鎖しない。
+- 残った子は `waiting` のままで、実行されない。Reconciler は親が終了した waiting ジョブ（`orphan_waiting`）として一度通知する。不要なら `quota-fleet job cancel` で取り消す。親を `requeue` して完了させれば、子は通常どおり `queued` になる。子のキーで新しい登録があれば、その時点で取り消される。
+- draft になる登録（`--draft` かつ親なし）に `supersede_key` を指定すると 400 になり、何も取り消さない。実行できるジョブがなくなるのを防ぐためである。
+- 同じ `request_id` の再送は新しい登録ではないので、何も取り消さない。取り消された保持の `request_id` を再送すると、キーを省いても 409 になる。取り消されていない保持の `request_id` からキーを省いてジョブを作った場合は、そのジョブは保持のキーを引き継ぐ。
+- `supersede_key` を指定した登録は、親が完了できない場合に 400 になり、何も取り消さない。親、または親が（間接的にも）待っているジョブが `failed` / `cancelled`、あるいはこの登録で取り消される場合である。実行できないジョブのために古い登録を取り消さないためである。保持になる場合は、親が存在しないときも 400 になる。キー未指定の登録にこの追加の確認はない。
 
 ## 4. 解放時の再確認
 
-`supersede_key` を持つ保持は、解放するとき（定期チェック、`POST /gate/held/{id}/release`、`quota-fleet gate release`）に、同じキーの新しい登録がないかを確認する。新しい登録があれば、その状態（held・claimed・done・cancelled など）に関係なくジョブを作らず、保持を `cancelled`（superseded）にする。手動の解放は 409 と `{"released": false, "reason": "superseded: ..."}` を返す。
+`supersede_key` を持つ保持は、解放するとき（定期チェック、`POST /gate/held/{id}/release`、`quota-fleet gate release`）に、その保持を取り消せる同じキーの新しい登録（2 章の権限の範囲）がないかを確認する。新しい登録があれば、その状態（held・claimed・done・cancelled など）に関係なくジョブを作らず、保持を `cancelled`（superseded）にする。手動の解放は 409 と `{"released": false, "reason": "superseded: ..."}` を返す。
 
 確認、ジョブ作成、保持の状態変更は 1 トランザクションなので、その間に別の登録は割り込まない。
 
@@ -64,7 +74,6 @@ superseded: newer registration request_id=<新しい request_id> has supersede_k
 | `supersede_key` | 登録時のキー |
 | `superseded_job_ids` | この登録が取り消したジョブ |
 | `superseded_held_ids` | この登録が取り消した保持（ジョブになっていないもの） |
-| `supersede_cancelled_child_ids` | 上のジョブに連鎖して取り消した子孫 |
 | `superseded_by` | この登録を取り消した登録。`{"job_id": 12}` または `{"held_id": "held-..."}` |
 
 `GET /jobs`（一覧）は `supersede_key` だけを返す。
@@ -99,7 +108,8 @@ Web UI の保持一覧（`/ui/gate/held` とダッシュボード）は、作成
 - 対象（PR や Issue）を入れないと、別の PR の publish どうしが取り消し合う。
 - 役割（`review` / `fix` / `publish`）を入れないと、同じチェーン内の別の役割が取り消し合う。
 - 1 ラウンドの中で並行して走らせるジョブ（複数のレビュアーなど）には、それぞれ別のキーを付ける。
-- キーを付けたジョブを取り消すと、それを待つ子も取り消される。次のラウンドは、親から順に新しいジョブを登録し直す。
+- 次のラウンドは、親から順に新しいジョブを登録し直す。古いラウンドの子は、同じ役割の新しい登録が来るまで `waiting` のまま残る。キーを付けていない子は残り続けるので、チェーンのジョブにはすべてキーを付ける。
+- `operate` を持たないトークンで登録する場合、全ラウンドを同じトークンで登録する。
 
 ```sh
 quota-fleet job create --title "publish r2" --parent 31 \
@@ -109,6 +119,7 @@ quota-fleet job create --title "publish r2" --parent 31 \
 ## 8. 制限
 
 - claimed のジョブには触らないので、実行中の古いジョブは最後まで動く。
+- 親が代替された waiting の子は自動では取り消されない（3 章）。
 - claimed のジョブが `reset`（手動、または Reconciler の自動 reset）で queued に戻った場合や、取り消したジョブを `requeue` した場合は、新しい登録があってもそのまま queued になる。次に同じキーで登録されると取り消される。
 - 保持を経ていない queued のジョブには、claim 時の再確認はない。
 - `supersede_key` 導入前に登録されたジョブと保持はキーを持たないので、対象にならない。
@@ -116,4 +127,4 @@ quota-fleet job create --title "publish r2" --parent 31 \
 ## 9. データ
 
 - `jobs.supersede_key`、`held_jobs.cancel_reason`（起動時に列を追加する）
-- `supersede_registrations`: キー付きの登録 1 件につき 1 行。`seq` が登録順で、保持と解放後のジョブは同じ行を共有する
+- `supersede_registrations`: キー付きの登録 1 件につき 1 行。`seq` が登録順で、保持と解放後のジョブは同じ行を共有する。`owner`（トークン名）と `own_only` が取り消せる範囲を記録する

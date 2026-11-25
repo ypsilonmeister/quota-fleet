@@ -190,9 +190,6 @@ func runJobCreate(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stdout, "  superseded: held %s\n", ref.HeldID)
 			}
 		}
-		for _, id := range info.CascadeCancelledJobIDs {
-			fmt.Fprintf(stdout, "  cancelled child: job #%d\n", id)
-		}
 	}
 	return 0
 }

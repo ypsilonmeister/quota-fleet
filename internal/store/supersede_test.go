@@ -159,9 +159,7 @@ func TestSupersedeLeavesStartedAndDraftJobsAlone(t *testing.T) {
 	if _, err := st.Fail(ctx, failed.ID, failed.ClaimedBy, "boom"); err != nil {
 		t.Fatal(err)
 	}
-	draftParams := keyedParams("draft", "k", nil)
-	draftParams.Draft = true
-	draft := mustCreate(t, st, draftParams)
+	draft := mustCreate(t, st, CreateJobParams{RequestID: "draft", Title: "draft", Draft: true})
 
 	claimed := mustCreate(t, st, keyedParams("claimed", "k", nil))
 	claimed = mustClaim(t, st, claimed.ID)
@@ -268,66 +266,261 @@ func TestSupersedeReplayDoesNotCancelNewerWork(t *testing.T) {
 	}
 }
 
-func TestSupersedeCascadesAndRejectsOwnAncestor(t *testing.T) {
+// Only registrations with the key change: unkeyed and other-key children of a superseded
+// job keep waiting on it.
+func TestSupersedeDoesNotCascadeAndRejectsOwnAncestor(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 
-	old := mustCreate(t, st, keyedParams("old", "k", nil))
-	child := mustCreate(t, st, CreateJobParams{RequestID: "child", Title: "child", ParentID: &old.ID})
-	grandchild := mustCreate(t, st, CreateJobParams{RequestID: "grandchild", Title: "grandchild", ParentID: &child.ID})
+	old := mustCreate(t, st, keyedParams("old", "group-a", nil))
+	plain := mustCreate(t, st, CreateJobParams{RequestID: "plain", Title: "child", ParentID: &old.ID})
+	other := mustCreate(t, st, keyedParams("other", "group-b", &old.ID))
+	grandchild := mustCreate(t, st, CreateJobParams{RequestID: "grandchild", Title: "grandchild", ParentID: &plain.ID})
 
 	// A registration that depends on the work it would cancel is rejected as a whole.
-	for _, parent := range []int64{old.ID, grandchild.ID} {
-		_, _, err := st.CreateJob(ctx, keyedParams("self", "k", &parent))
-		if !errors.Is(err, ErrParentTerminal) || !strings.Contains(err.Error(), "supersede_key=k") {
+	for _, parent := range []int64{old.ID, plain.ID, other.ID, grandchild.ID} {
+		_, _, err := st.CreateJob(ctx, keyedParams("self", "group-a", &parent))
+		if !errors.Is(err, ErrParentTerminal) || !strings.Contains(err.Error(), "supersede_key=group-a") {
 			t.Fatalf("create under parent %d err = %v", parent, err)
 		}
-		_, _, err = st.HoldJob(ctx, HoldJobParams{RequestID: "self-held", Payload: keyedParams("self-held", "k", &parent)})
-		if !errors.Is(err, ErrParentTerminal) {
+		_, _, err = st.HoldJob(ctx, HoldJobParams{RequestID: "self-held", Payload: keyedParams("self-held", "group-a", &parent)})
+		if !errors.Is(err, ErrParentTerminal) || !strings.Contains(err.Error(), "supersede_key=group-a") {
 			t.Fatalf("hold under parent %d err = %v", parent, err)
 		}
 	}
 	missing := int64(999999)
-	if _, _, err := st.HoldJob(ctx, HoldJobParams{RequestID: "orphan", Payload: keyedParams("orphan", "k", &missing)}); !errors.Is(err, ErrParentNotFound) {
+	if _, _, err := st.HoldJob(ctx, HoldJobParams{RequestID: "orphan", Payload: keyedParams("orphan", "group-a", &missing)}); !errors.Is(err, ErrParentNotFound) {
 		t.Fatalf("keyed hold with missing parent err = %v", err)
 	}
 	if _, err := st.GetHeldJobByRequestID(ctx, "self-held"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rejected hold was stored: %v", err)
 	}
-	for _, id := range []int64{old.ID, child.ID, grandchild.ID} {
-		if got := mustJob(t, st, id); got.Status == StatusCancelled {
-			t.Fatalf("job %s was cancelled by a rejected registration", got.RequestID)
-		}
+	if got := mustJob(t, st, old.ID); got.Status != StatusQueued {
+		t.Fatalf("old was changed by a rejected registration: %s", got.Status)
 	}
 
 	events, cancel := st.SubscribeJobEvents()
 	defer cancel()
-	newer := mustCreate(t, st, keyedParams("new", "k", nil))
+	newer := mustCreate(t, st, keyedParams("new", "group-a", nil))
 
-	info := mustJobInfo(t, st, newer.ID)
-	if !slices.Equal(info.Superseded, []SupersedeRef{{JobID: old.ID}}) ||
-		!slices.Equal(info.CascadeCancelledJobIDs, []int64{child.ID, grandchild.ID}) {
-		t.Fatalf("info = %+v", info)
+	if got := mustJobInfo(t, st, newer.ID).Superseded; !slices.Equal(got, []SupersedeRef{{JobID: old.ID}}) {
+		t.Fatalf("superseded = %+v", got)
 	}
-	for _, id := range []int64{child.ID, grandchild.ID} {
+	for _, id := range []int64{plain.ID, other.ID, grandchild.ID} {
 		got := mustJob(t, st, id)
-		if got.Status != StatusCancelled || !strings.Contains(got.LastError, "superseded:") {
-			t.Errorf("descendant %s = %s %q", got.RequestID, got.Status, got.LastError)
+		if got.Status != StatusWaiting || got.LastError != "" {
+			t.Errorf("descendant %s = %s %q, want untouched waiting", got.RequestID, got.Status, got.LastError)
 		}
 	}
 	var seen []string
-	for range 4 {
+	for range 2 {
 		ev := <-events
 		seen = append(seen, fmt.Sprintf("%d:%s>%s", ev.JobID, ev.PrevStatus, ev.Status))
 	}
 	want := []string{
 		fmt.Sprintf("%d:queued>cancelled", old.ID),
-		fmt.Sprintf("%d:waiting>cancelled", child.ID),
-		fmt.Sprintf("%d:waiting>cancelled", grandchild.ID),
 		fmt.Sprintf("%d:>queued", newer.ID),
 	}
-	if !slices.Equal(seen, want) {
-		t.Errorf("events = %v, want %v", seen, want)
+	if !slices.Equal(seen, want) || len(events) != 0 {
+		t.Errorf("events = %v (+%d), want %v", seen, len(events), want)
+	}
+
+	// A keyed registration under a child that is left waiting is rejected too: it could
+	// never run, so it must not replace anything.
+	current := mustCreate(t, st, keyedParams("current", "group-c", nil))
+	for _, parent := range []int64{plain.ID, grandchild.ID} {
+		if _, _, err := st.CreateJob(ctx, keyedParams("stranded", "group-c", &parent)); !errors.Is(err, ErrParentTerminal) {
+			t.Fatalf("create under stranded parent %d err = %v", parent, err)
+		}
+		_, _, err := st.HoldJob(ctx, HoldJobParams{RequestID: "stranded-held", Payload: keyedParams("stranded-held", "group-c", &parent)})
+		if !errors.Is(err, ErrParentTerminal) {
+			t.Fatalf("hold under stranded parent %d err = %v", parent, err)
+		}
+	}
+	if got := mustJob(t, st, current.ID); got.Status != StatusQueued {
+		t.Fatalf("current = %s after rejected registrations", got.Status)
+	}
+
+	// A child is superseded by a registration with its own key.
+	otherNewer := mustCreate(t, st, keyedParams("other-new", "group-b", nil))
+	if got := mustJobInfo(t, st, otherNewer.ID).Superseded; !slices.Equal(got, []SupersedeRef{{JobID: other.ID}}) {
+		t.Errorf("group-b superseded = %+v", got)
+	}
+
+	// The dependency survives: requeueing and completing the parent releases the child.
+	if _, err := st.Requeue(ctx, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimed := mustClaim(t, st, old.ID)
+	res, err := st.Complete(ctx, old.ID, claimed.ClaimedBy, "ok")
+	if err != nil || !slices.Equal(res.PromotedChildIDs, []int64{plain.ID}) {
+		t.Fatalf("complete = %+v, %v; want %d promoted", res, err, plain.ID)
+	}
+}
+
+// Independent chains whose keys name their target do not touch each other, either when
+// registering or when releasing.
+func TestSupersedeTargetQualifiedKeysKeepChainsApart(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	parentA := mustCreate(t, st, CreateJobParams{RequestID: "pa", Title: "review A"})
+	parentB := mustCreate(t, st, CreateJobParams{RequestID: "pb", Title: "review B"})
+	heldA := mustHold(t, st, keyedParams("a1", "pr1:publish", &parentA.ID))
+	heldB := mustHold(t, st, keyedParams("b1", "pr2:publish", &parentB.ID))
+
+	res, err := st.ReleaseKeyedHeld(ctx, heldA.ID, "claude")
+	if err != nil || res.Job == nil {
+		t.Fatalf("release A = %+v, %v", res, err)
+	}
+	if got := mustHeld(t, st, heldB.ID); got.Status != HeldStatusHeld {
+		t.Fatalf("B held = %s", got.Status)
+	}
+	mustCreate(t, st, keyedParams("b2", "pr2:publish", &parentB.ID))
+	if got := mustJob(t, st, res.Job.ID); got.Status != StatusWaiting {
+		t.Fatalf("A job = %s after a registration for B", got.Status)
+	}
+}
+
+// A replay that drops the key must not bring superseded work back.
+func TestSupersedeReplayWithoutKey(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	unkeyed := func(requestID string) CreateJobParams {
+		return CreateJobParams{RequestID: requestID, Title: "publish"}
+	}
+
+	old := mustHold(t, st, keyedParams("old", "k", nil))
+	live := mustHold(t, st, keyedParams("live", "k", nil))
+
+	if job, _, err := st.CreateJob(ctx, unkeyed("old")); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unkeyed replay of superseded hold = %+v, %v; want ErrConflict", job, err)
+	}
+	if _, err := st.GetJobByRequestID(ctx, "old"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a job was created for the superseded entry: %v", err)
+	}
+	if got := mustHeld(t, st, old.ID); got.Status != HeldStatusCancelled {
+		t.Fatalf("old held = %s", got.Status)
+	}
+
+	// A hold that is not superseded keeps its key and place when it becomes a job this way.
+	job := mustCreate(t, st, unkeyed("live"))
+	if job.SupersedeKey != "k" || job.Status != StatusQueued {
+		t.Fatalf("job from live hold = %+v", job)
+	}
+	res, err := st.ReleaseKeyedHeld(ctx, live.ID, "claude")
+	if err != nil || res.Created || res.Job.ID != job.ID {
+		t.Fatalf("release = %+v, %v", res, err)
+	}
+	newer := mustCreate(t, st, keyedParams("newer", "k", nil))
+	if got := mustJobInfo(t, st, newer.ID).Superseded; len(got) != 1 || got[0].JobID != job.ID {
+		t.Fatalf("superseded = %+v", got)
+	}
+	// A request_id that was never registered with a key stays unkeyed.
+	if plain := mustCreate(t, st, unkeyed("fresh")); plain.SupersedeKey != "" || plain.Status != StatusQueued {
+		t.Fatalf("fresh unkeyed job = %+v", plain)
+	}
+}
+
+// A registration limited to its owner leaves everyone else's work alone, when registering,
+// releasing and replaying.
+func TestSupersedeOwnOnly(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	owned := func(requestID, owner string, ownOnly bool) CreateJobParams {
+		p := keyedParams(requestID, "k", nil)
+		p.CreatedBy, p.SupersedeOwnOnly = owner, ownOnly
+		return p
+	}
+
+	cliJob := mustCreate(t, st, owned("cli", "", false))
+	// A newer full registration would cancel it, so the limited ones come after.
+	otherHeld := mustHold(t, st, owned("other-held", "other", true))
+	if got := mustJob(t, st, cliJob.ID); got.Status != StatusQueued {
+		t.Fatalf("cli job = %s after a limited registration", got.Status)
+	}
+	mine := mustCreate(t, st, owned("mine-1", "me", true))
+	mineHeld := mustHold(t, st, owned("mine-2", "me", true))
+	// An unnamed limited registration owns nothing, not even other unnamed work.
+	mustCreate(t, st, owned("nameless", "", true))
+
+	if got := mustJob(t, st, cliJob.ID); got.Status != StatusQueued {
+		t.Errorf("cli job = %s", got.Status)
+	}
+	if got := mustJob(t, st, mine.ID); got.Status != StatusCancelled {
+		t.Errorf("own older job = %s, want cancelled", got.Status)
+	}
+	if got := mustHeld(t, st, otherHeld.ID); got.Status != HeldStatusHeld {
+		t.Errorf("other's held = %s", got.Status)
+	}
+	// Newer registrations by others do not block its release or replay.
+	res, err := st.ReleaseKeyedHeld(ctx, otherHeld.ID, "claude")
+	if err != nil || res.Job == nil || res.SupersededReason != "" {
+		t.Fatalf("release other's held = %+v, %v", res, err)
+	}
+	if _, created, err := st.CreateJob(ctx, owned("other-held", "other", true)); err != nil || created {
+		t.Errorf("replay = %v, %v", created, err)
+	}
+
+	// Its own newer registration still does.
+	reviveHeld(t, st, mineHeld.ID)
+	mine3 := mustHold(t, st, owned("mine-3", "me", true))
+	reviveHeld(t, st, mineHeld.ID)
+	res, err = st.ReleaseKeyedHeld(ctx, mineHeld.ID, "claude")
+	if err != nil || res.Job != nil || !strings.Contains(res.SupersededReason, "request_id=mine-3") {
+		t.Fatalf("release own superseded = %+v, %v", res, err)
+	}
+
+	full := mustCreate(t, st, owned("full", "boss", false))
+	if got := mustHeld(t, st, mine3.ID); got.Status != HeldStatusCancelled {
+		t.Errorf("held after full registration = %s", got.Status)
+	}
+	if got := mustJob(t, st, cliJob.ID); got.Status != StatusCancelled {
+		t.Errorf("cli job after full registration = %s", got.Status)
+	}
+	if got := mustJob(t, st, full.ID); got.Status != StatusQueued {
+		t.Errorf("full = %s", got.Status)
+	}
+}
+
+func TestSupersedeRejectsKeyedDraft(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	old := mustCreate(t, st, keyedParams("old", "k", nil))
+	oldHeld := mustHold(t, st, keyedParams("old-held", "j", nil))
+
+	for _, key := range []string{"k", "j"} {
+		p := keyedParams("draft-"+key, key, nil)
+		p.Draft = true
+		if _, _, err := st.CreateJob(ctx, p); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("keyed draft err = %v", err)
+		}
+		if _, _, err := st.HoldJob(ctx, HoldJobParams{RequestID: p.RequestID, Payload: p}); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("keyed draft hold err = %v", err)
+		}
+		if _, err := st.GetHeldJobByRequestID(ctx, p.RequestID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("rejected draft was held: %v", err)
+		}
+	}
+	// Dropping the key from a keyed hold does not make a draft of it acceptable.
+	if _, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "old-held", Title: "publish", Draft: true}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("unkeyed draft replay err = %v", err)
+	}
+	if got := mustJob(t, st, old.ID); got.Status != StatusQueued {
+		t.Fatalf("old job = %s", got.Status)
+	}
+	if got := mustHeld(t, st, oldHeld.ID); got.Status != HeldStatusHeld {
+		t.Fatalf("old held = %s", got.Status)
+	}
+	// With a parent the draft flag has no effect: the job is runnable, so it may supersede.
+	parent := mustCreate(t, st, CreateJobParams{RequestID: "parent", Title: "parent"})
+	p := keyedParams("child", "k", &parent.ID)
+	p.Draft = true
+	if job := mustCreate(t, st, p); job.Status != StatusWaiting {
+		t.Fatalf("status = %s", job.Status)
+	}
+	if got := mustJob(t, st, old.ID); got.Status != StatusCancelled {
+		t.Fatalf("old job = %s", got.Status)
 	}
 }
 

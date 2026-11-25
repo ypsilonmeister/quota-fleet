@@ -94,7 +94,13 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 		nowStr := formatTime(time.Now().UTC())
 
 		if key := payload.SupersedeKey; key != "" {
-			superseded, err := registerSupersedeTx(ctx, conn, changes, key, reqID, nowStr)
+			if err := checkKeyedDraft(key, payload); err != nil {
+				return err
+			}
+			superseded, err := registerSupersedeTx(ctx, conn, changes, supersedeRegistration{
+				key: key, requestID: reqID,
+				owner: strings.TrimSpace(payload.CreatedBy), ownOnly: payload.SupersedeOwnOnly,
+			}, nowStr)
 			if err != nil {
 				return err
 			}

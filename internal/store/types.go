@@ -114,6 +114,10 @@ type CreateJobParams struct {
 	// SupersedeKey, when non-empty, cancels older unstarted registrations with the same
 	// key (docs/20).
 	SupersedeKey string `json:"supersede_key,omitempty"`
+	// SupersedeOwnOnly limits that to registrations with the same CreatedBy, for a caller
+	// that may register jobs but not cancel them. It is recorded with the registration,
+	// not in a held payload.
+	SupersedeOwnOnly bool `json:"-"`
 }
 
 // CompleteResult holds the outcome of Complete.

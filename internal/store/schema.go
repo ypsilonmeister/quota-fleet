@@ -102,7 +102,8 @@ CREATE TABLE IF NOT EXISTS supersede_registrations (
     held_id TEXT NOT NULL DEFAULT '',
     job_id INTEGER NULL REFERENCES jobs(id),
     superseded_by_seq INTEGER NULL,
-    cascaded_job_ids TEXT NOT NULL DEFAULT '[]',
+    owner TEXT NOT NULL DEFAULT '',
+    own_only INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 

@@ -42,10 +42,8 @@ type JobDTO struct {
 // SupersedeDTO describes which registrations a job or held entry replaced, and which one
 // replaced it (docs/20).
 type SupersedeDTO struct {
-	SupersededJobIDs  []int64  `json:"superseded_job_ids,omitempty"`
-	SupersededHeldIDs []string `json:"superseded_held_ids,omitempty"`
-	// CancelledChildIDs are waiting descendants of the superseded jobs.
-	CancelledChildIDs []int64          `json:"supersede_cancelled_child_ids,omitempty"`
+	SupersededJobIDs  []int64          `json:"superseded_job_ids,omitempty"`
+	SupersededHeldIDs []string         `json:"superseded_held_ids,omitempty"`
 	SupersededBy      *SupersedeRefDTO `json:"superseded_by,omitempty"`
 }
 
@@ -56,7 +54,7 @@ type SupersedeRefDTO struct {
 }
 
 func toSupersedeDTO(info *store.SupersedeInfo) SupersedeDTO {
-	dto := SupersedeDTO{CancelledChildIDs: info.CascadeCancelledJobIDs}
+	var dto SupersedeDTO
 	for _, ref := range info.Superseded {
 		if ref.JobID > 0 {
 			dto.SupersededJobIDs = append(dto.SupersededJobIDs, ref.JobID)

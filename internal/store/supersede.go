@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,8 +24,6 @@ type SupersedeRef struct {
 type SupersedeInfo struct {
 	// Superseded lists the registrations this one cancelled.
 	Superseded []SupersedeRef
-	// CascadeCancelledJobIDs lists waiting descendants of those jobs, cancelled with them.
-	CascadeCancelledJobIDs []int64
 	// SupersededBy is set when a newer registration cancelled this one.
 	SupersededBy *SupersedeRef
 }
@@ -44,31 +41,40 @@ type supersedeRegistration struct {
 	seq       int64
 	key       string
 	requestID string
+	// owner is the API token that registered it, empty for CLI and anonymous use.
+	owner string
+	// ownOnly limits what it may supersede to registrations with the same owner.
+	ownOnly bool
 }
+
+const supersedeRegistrationColumns = `seq, supersede_key, request_id, owner, own_only`
 
 func supersedeReason(key, newerRequestID string) string {
 	return fmt.Sprintf("superseded: newer registration request_id=%s has supersede_key=%s", newerRequestID, key)
 }
 
-// registerSupersedeTx records the registration of requestID under key. A new registration
-// cancels every older one that has not started: held entries, and queued or waiting jobs
-// (with their waiting descendants). Claimed jobs are never touched.
+// registerSupersedeTx records the registration reg (seq is assigned here). A new
+// registration cancels every older one with its key that has not started: held entries,
+// and queued or waiting jobs. Only those jobs change: claimed jobs and jobs registered
+// without the key, including children of a cancelled job, are never touched. With
+// reg.ownOnly, only registrations of the same owner are cancelled.
 //
 // A request_id that is already registered (a held entry becoming a job) keeps its place in
-// the order and cancels nothing; it is rejected when a newer registration exists.
+// the order and its owner, and cancels nothing; it is rejected when a newer registration
+// that may supersede it exists.
 //
 // The returned set holds the IDs of the jobs cancelled by this call.
 func registerSupersedeTx(
-	ctx context.Context, conn *sql.Conn, changes *[]statusChange, key, requestID, nowStr string,
+	ctx context.Context, conn *sql.Conn, changes *[]statusChange, reg supersedeRegistration, nowStr string,
 ) (map[int64]bool, error) {
-	existing, err := querySupersedeRegistration(ctx, conn, requestID)
+	existing, err := querySupersedeRegistration(ctx, conn, reg.requestID)
 	if err == nil {
-		if existing.key != key {
-			return nil, fmt.Errorf("%w: request_id=%s is registered with supersede_key=%s", ErrConflict, requestID, existing.key)
+		if existing.key != reg.key {
+			return nil, fmt.Errorf("%w: request_id=%s is registered with supersede_key=%s", ErrConflict, reg.requestID, existing.key)
 		}
 		newer, err := queryNewerRegistration(ctx, conn, existing)
 		if err == nil {
-			return nil, fmt.Errorf("%w: request_id=%s is %s", ErrConflict, requestID, supersedeReason(key, newer.requestID))
+			return nil, fmt.Errorf("%w: request_id=%s is %s", ErrConflict, reg.requestID, supersedeReason(reg.key, newer.requestID))
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -80,17 +86,16 @@ func registerSupersedeTx(
 	}
 
 	res, err := conn.ExecContext(ctx, `
-		INSERT INTO supersede_registrations (supersede_key, request_id, created_at)
-		VALUES (?, ?, ?)
-	`, key, requestID, nowStr)
+		INSERT INTO supersede_registrations (supersede_key, request_id, owner, own_only, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, reg.key, reg.requestID, reg.owner, reg.ownOnly, nowStr)
 	if err != nil {
 		return nil, err
 	}
-	seq, err := res.LastInsertId()
-	if err != nil {
+	if reg.seq, err = res.LastInsertId(); err != nil {
 		return nil, err
 	}
-	return supersedeOlderTx(ctx, conn, changes, supersedeRegistration{seq: seq, key: key, requestID: requestID}, nowStr)
+	return supersedeOlderTx(ctx, conn, changes, reg, nowStr)
 }
 
 func supersedeOlderTx(
@@ -109,8 +114,9 @@ func supersedeOlderTx(
 		LEFT JOIN held_jobs h ON r.job_id IS NULL AND h.id = r.held_id
 		WHERE r.supersede_key = ? AND r.seq < ?
 			AND (j.status IN ('queued', 'waiting') OR h.status = 'held')
+			AND (? = 0 OR (r.owner = ? AND r.owner <> ''))
 		ORDER BY r.seq ASC
-	`, newer.key, newer.seq)
+	`, newer.key, newer.seq, newer.ownOnly, newer.owner)
 	if err != nil {
 		return nil, err
 	}
@@ -134,10 +140,9 @@ func supersedeOlderTx(
 
 	reason := supersedeReason(newer.key, newer.requestID)
 	cancelled := map[int64]bool{}
-	var directIDs []int64
 
-	// Cancel every same-key target before cascading, so that a same-key descendant is
-	// recorded as superseded rather than as a child of a cancelled parent.
+	// Unlike a manual cancel, this does not cascade: a child that is not itself a target
+	// stays waiting, and runs only if its parent is requeued and completes.
 	for _, tg := range targets {
 		if tg.jobID.Valid {
 			if _, err := conn.ExecContext(ctx, `
@@ -148,7 +153,6 @@ func supersedeOlderTx(
 				return nil, err
 			}
 			cancelled[tg.jobID.Int64] = true
-			directIDs = append(directIDs, tg.jobID.Int64)
 			*changes = append(*changes, statusChange{jobID: tg.jobID.Int64, prev: Status(tg.status), next: StatusCancelled})
 		} else if err := cancelHeldSupersededTx(ctx, conn, tg.heldID, reason, nowStr); err != nil {
 			return nil, err
@@ -159,28 +163,6 @@ func supersedeOlderTx(
 		}
 	}
 
-	var cascaded []int64
-	for _, id := range directIDs {
-		ids, err := cascadeCancelWaitingDescendants(ctx, conn, id, formatCascadeReason(id, "cancelled", reason), nowStr)
-		if err != nil {
-			return nil, err
-		}
-		cascaded = append(cascaded, ids...)
-	}
-	if len(cascaded) > 0 {
-		for _, id := range cascaded {
-			cancelled[id] = true
-		}
-		*changes = appendCascadeChanges(*changes, cascaded)
-		encoded, err := json.Marshal(cascaded)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := conn.ExecContext(ctx,
-			`UPDATE supersede_registrations SET cascaded_job_ids = ? WHERE seq = ?`, string(encoded), newer.seq); err != nil {
-			return nil, err
-		}
-	}
 	return cancelled, nil
 }
 
@@ -193,6 +175,15 @@ func cancelHeldSupersededTx(ctx context.Context, conn *sql.Conn, heldID, reason,
 	return err
 }
 
+// checkKeyedDraft rejects a supersede_key on a job that would stay a draft: it would
+// cancel runnable work and nothing would run in its place.
+func checkKeyedDraft(key string, p CreateJobParams) error {
+	if key != "" && p.Draft && p.ParentID == nil {
+		return fmt.Errorf("%w: supersede_key cannot be used with a draft job", ErrInvalidInput)
+	}
+	return nil
+}
+
 // checkHoldParentTx rejects a keyed hold whose parent can never complete: accepting it
 // would cancel older work in favor of an entry that can never be released.
 func checkHoldParentTx(ctx context.Context, conn *sql.Conn, parentID int64, key string, cancelled map[int64]bool) error {
@@ -200,25 +191,47 @@ func checkHoldParentTx(ctx context.Context, conn *sql.Conn, parentID int64, key 
 	if err != nil {
 		return err
 	}
-	switch status {
-	case "":
+	if status == "" {
 		return fmt.Errorf("%w: parent_id=%d", ErrParentNotFound, parentID)
-	case StatusFailed, StatusCancelled:
-		return parentTerminalError(parentID, status, key, cancelled)
+	}
+	return checkKeyedParentTx(ctx, conn, parentID, key, cancelled)
+}
+
+// checkKeyedParentTx rejects, for a registration with a supersede_key, a parent that
+// cannot complete: it, or a job it is waiting on directly or indirectly, has failed or is
+// cancelled, possibly by this registration (cancelled).
+func checkKeyedParentTx(
+	ctx context.Context, conn *sql.Conn, parentID int64, key string, cancelled map[int64]bool,
+) error {
+	visited := map[int64]bool{}
+	for id := parentID; !visited[id]; {
+		visited[id] = true
+		var status string
+		var next sql.NullInt64
+		err := conn.QueryRowContext(ctx, `SELECT status, parent_id FROM jobs WHERE id = ?`, id).Scan(&status, &next)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		switch {
+		case cancelled[id]:
+			return fmt.Errorf("%w: parent_id=%d depends on job %d, which this registration's supersede_key=%s would cancel",
+				ErrParentTerminal, parentID, id, key)
+		case Status(status) == StatusFailed || Status(status) == StatusCancelled:
+			return fmt.Errorf("%w: parent_id=%d depends on job %d, which has status %s",
+				ErrParentTerminal, parentID, id, status)
+		case Status(status) != StatusWaiting || !next.Valid:
+			return nil
+		}
+		id = next.Int64
 	}
 	return nil
 }
 
-func parentTerminalError(parentID int64, status Status, key string, cancelled map[int64]bool) error {
-	if cancelled[parentID] {
-		return fmt.Errorf("%w: parent_id=%d would be cancelled by this registration's supersede_key=%s",
-			ErrParentTerminal, parentID, key)
-	}
-	return fmt.Errorf("%w: parent_id=%d has status %s", ErrParentTerminal, parentID, status)
-}
-
 // ReleaseKeyedHeld releases a held entry that has a supersede_key. In one transaction it
-// either cancels the entry as superseded, when a newer registration with the same key
+// either cancels the entry as superseded, when a newer registration that may supersede it
 // exists, or creates its job in selectedPool and marks it released.
 func (s *Store) ReleaseKeyedHeld(ctx context.Context, heldID, selectedPool string) (*KeyedReleaseResult, error) {
 	var out *KeyedReleaseResult
@@ -292,13 +305,12 @@ func (s *Store) SupersedeInfoForHeld(ctx context.Context, heldID string) (*Super
 
 func (s *Store) supersedeInfo(ctx context.Context, where string, arg any) (*SupersedeInfo, error) {
 	var (
-		seq      int64
-		bySeq    sql.NullInt64
-		cascaded string
+		seq   int64
+		bySeq sql.NullInt64
 	)
 	err := s.readDB.QueryRowContext(ctx,
-		`SELECT seq, superseded_by_seq, cascaded_job_ids FROM supersede_registrations WHERE `+where, arg,
-	).Scan(&seq, &bySeq, &cascaded)
+		`SELECT seq, superseded_by_seq FROM supersede_registrations WHERE `+where, arg,
+	).Scan(&seq, &bySeq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &SupersedeInfo{}, nil
 	}
@@ -307,9 +319,6 @@ func (s *Store) supersedeInfo(ctx context.Context, where string, arg any) (*Supe
 	}
 
 	info := &SupersedeInfo{}
-	if err := json.Unmarshal([]byte(cascaded), &info.CascadeCancelledJobIDs); err != nil {
-		return nil, fmt.Errorf("decode cascaded_job_ids: %w", err)
-	}
 	if bySeq.Valid {
 		var ref SupersedeRef
 		var jobID sql.NullInt64
@@ -342,24 +351,26 @@ func (s *Store) supersedeInfo(ctx context.Context, where string, arg any) (*Supe
 
 func querySupersedeRegistration(ctx context.Context, q queryRower, requestID string) (supersedeRegistration, error) {
 	return scanSupersedeRegistration(q.QueryRowContext(ctx, `
-		SELECT seq, supersede_key, request_id FROM supersede_registrations WHERE request_id = ?
+		SELECT `+supersedeRegistrationColumns+` FROM supersede_registrations WHERE request_id = ?
 	`, requestID))
 }
 
-// queryNewerRegistration returns the latest registration with reg's key that came after
-// reg, whatever state it is in now, or ErrNotFound.
+// queryNewerRegistration returns the latest registration that came after reg and may
+// supersede it (same key, and not limited to another owner), whatever state it is in now,
+// or ErrNotFound.
 func queryNewerRegistration(ctx context.Context, q queryRower, reg supersedeRegistration) (supersedeRegistration, error) {
 	return scanSupersedeRegistration(q.QueryRowContext(ctx, `
-		SELECT seq, supersede_key, request_id FROM supersede_registrations
+		SELECT `+supersedeRegistrationColumns+` FROM supersede_registrations
 		WHERE supersede_key = ? AND seq > ?
+			AND (own_only = 0 OR (owner = ? AND owner <> ''))
 		ORDER BY seq DESC
 		LIMIT 1
-	`, reg.key, reg.seq))
+	`, reg.key, reg.seq, reg.owner))
 }
 
 func scanSupersedeRegistration(row rowScanner) (supersedeRegistration, error) {
 	var reg supersedeRegistration
-	err := row.Scan(&reg.seq, &reg.key, &reg.requestID)
+	err := row.Scan(&reg.seq, &reg.key, &reg.requestID, &reg.owner, &reg.ownOnly)
 	if errors.Is(err, sql.ErrNoRows) {
 		return reg, ErrNotFound
 	}
