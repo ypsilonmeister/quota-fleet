@@ -34,6 +34,12 @@ type JobDTO struct {
 	AltPools           []string   `json:"alt_pools,omitempty"`
 	SessionID          string     `json:"session_id,omitempty"`
 	CreatedBy          string     `json:"created_by,omitempty"`
+
+	SelectedAgent   string `json:"selected_agent,omitempty"`
+	SelectedModel   string `json:"selected_model,omitempty"`
+	SelectedPool    string `json:"selected_pool,omitempty"`
+	SelectionReason string `json:"selection_reason,omitempty"`
+	SelectionMode   string `json:"selection_mode,omitempty"`
 	SupersedeKey       string     `json:"supersede_key,omitempty"`
 	// SupersedeDTO is filled by POST /jobs and GET /jobs/{id}, not by job lists.
 	SupersedeDTO
@@ -106,6 +112,11 @@ func toJobDTO(j *store.Job) *JobDTO {
 	if len(j.AltPools) > 0 {
 		dto.AltPools = append([]string(nil), j.AltPools...)
 	}
+	dto.SelectedAgent = j.SelectedAgent
+	dto.SelectedModel = j.SelectedModel
+	dto.SelectedPool = j.SelectedPool
+	dto.SelectionReason = j.SelectionReason
+	dto.SelectionMode = j.SelectionMode
 	return dto
 }
 
@@ -143,6 +154,9 @@ type CreateJobRequest struct {
 	AltPools           []string `json:"alt_pools"`
 	SessionID          string   `json:"session_id"`
 	SupersedeKey       string   `json:"supersede_key"`
+	// Selector hints (docs/19). Optional.
+	Role   string `json:"role"`
+	Weight string `json:"weight"`
 }
 
 // CreateJobResponse is returned by POST /jobs.
@@ -449,6 +463,7 @@ type MetaResponse struct {
 	Pools         []string                         `json:"pools"`
 	PoolRules     map[string][]PoolAppliesToDTO    `json:"pool_rules,omitempty"`
 	GateMode      string                           `json:"gate_mode"`
+	SelectorMode  string                           `json:"selector_mode"`
 	EvaluatorMode string                           `json:"evaluator_mode"`
 	ReviewGate    ReviewGateDTO                    `json:"review_gate"`
 	PoolSummaries []PoolSummaryDTO                 `json:"pool_summaries"`

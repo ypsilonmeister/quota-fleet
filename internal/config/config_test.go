@@ -1318,3 +1318,32 @@ func TestReviewGateDefaultsFalseAndParses(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectorModeConfig(t *testing.T) {
+	cases := []struct {
+		yaml    string
+		want    string
+		wantErr bool
+	}{
+		{"", SelectorModeOff, false},
+		{"selector:\n  mode: record\n", SelectorModeRecord, false},
+		{"selector:\n  mode: apply\n", SelectorModeApply, false},
+		{"selector:\n  mode: bogus\n", "", true},
+	}
+	for _, c := range cases {
+		cfg, err := Parse([]byte("instance_id: x\nstate_dir: /tmp/x\n" + c.yaml))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		verr := cfg.Validate()
+		if c.wantErr {
+			if verr == nil || !strings.Contains(verr.Error(), "selector.mode") {
+				t.Errorf("%q: want selector.mode error, got %v", c.yaml, verr)
+			}
+			continue
+		}
+		if got := cfg.Selector.EffectiveMode(); got != c.want {
+			t.Errorf("%q: mode = %q, want %q", c.yaml, got, c.want)
+		}
+	}
+}

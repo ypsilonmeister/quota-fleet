@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -1568,5 +1569,52 @@ func TestCreatedByPersistenceAndMigration(t *testing.T) {
 	}
 	if got.CreatedBy != "mcp-register" {
 		t.Errorf("GetJob.CreatedBy = %q, want %q", got.CreatedBy, "mcp-register")
+	}
+}
+
+func TestCreateJobPersistsSelectionAndMigratesOldDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fleet.db")
+
+	// Legacy DB: jobs table without the selection columns.
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Skipf("cannot open sqlite driver directly: %v", err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE jobs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
+		status TEXT NOT NULL, agent TEXT NOT NULL DEFAULT '', host TEXT NOT NULL DEFAULT '',
+		workdir TEXT NOT NULL DEFAULT '', target_ref TEXT NOT NULL DEFAULT '',
+		instructions TEXT NOT NULL DEFAULT '', acceptance_criteria TEXT NOT NULL DEFAULT '',
+		parent_id INTEGER NULL, claimed_by TEXT NOT NULL DEFAULT '', claimed_at TEXT NULL,
+		attempts INTEGER NOT NULL DEFAULT 0, result_text TEXT NOT NULL DEFAULT '',
+		last_error TEXT NOT NULL DEFAULT '', delivered_at TEXT NULL, created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', pool TEXT NOT NULL DEFAULT '',
+		alt_pools TEXT NOT NULL DEFAULT '[]', session_id TEXT NOT NULL DEFAULT '')`)
+	_ = legacy.Close()
+	if err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+
+	st, err := Open(ctx, path, Options{InstanceID: "mig"})
+	if err != nil {
+		t.Fatalf("Open legacy db: %v", err)
+	}
+	defer st.Close()
+
+	job, _, err := st.CreateJob(ctx, CreateJobParams{
+		RequestID: "sel-1", Title: "t",
+		SelectedAgent: "claude", SelectedModel: "claude-opus-5-5", SelectedPool: "claude",
+		SelectionReason: "why", SelectionMode: "recorded",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	got, err := st.GetJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.SelectedAgent != "claude" || got.SelectedModel != "claude-opus-5-5" || got.SelectedPool != "claude" || got.SelectionReason != "why" || got.SelectionMode != "recorded" {
+		t.Errorf("selection not persisted: %+v", got)
 	}
 }

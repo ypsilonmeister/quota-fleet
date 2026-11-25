@@ -91,6 +91,13 @@ type Job struct {
 	SessionID          string
 	CreatedBy          string
 	SupersedeKey       string
+
+	// Selector record (docs/19). Empty when the Selector did not run (mode off).
+	SelectedAgent   string
+	SelectedModel   string
+	SelectedPool    string
+	SelectionReason string
+	SelectionMode   string // explicit | recorded | applied
 }
 
 // CreateJobParams holds input fields for CreateJob.
@@ -118,6 +125,12 @@ type CreateJobParams struct {
 	// that may register jobs but not cancel them. It is recorded with the registration,
 	// not in a held payload.
 	SupersedeOwnOnly bool `json:"-"`
+
+	SelectedAgent   string `json:"selected_agent,omitempty"`
+	SelectedModel   string `json:"selected_model,omitempty"`
+	SelectedPool    string `json:"selected_pool,omitempty"`
+	SelectionReason string `json:"selection_reason,omitempty"`
+	SelectionMode   string `json:"selection_mode,omitempty"`
 }
 
 // CompleteResult holds the outcome of Complete.

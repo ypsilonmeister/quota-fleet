@@ -26,7 +26,7 @@ func registerJob(t *testing.T, url string, req CreateJobRequest, wantStatus int)
 	return decodeResp[CreateJobResponse](t, resp)
 }
 
-func getJob(t *testing.T, url string, id int64) JobDTO {
+func getSupersedeJob(t *testing.T, url string, id int64) JobDTO {
 	t.Helper()
 	resp := doJSON(t, http.MethodGet, fmt.Sprintf("%s/jobs/%d", url, id), "", nil)
 	if resp.StatusCode != http.StatusOK {
@@ -52,19 +52,19 @@ func TestSupersedeKeyOverHTTP(t *testing.T) {
 				}
 			}
 			check(next.Job)
-			got := getJob(t, ts.URL, next.Job.ID)
+			got := getSupersedeJob(t, ts.URL, next.Job.ID)
 			check(&got)
 			// An idempotent replay reports the same relations.
 			check(registerJob(t, ts.URL, CreateJobRequest{RequestID: "r2", Title: "publish", SupersedeKey: "pub"}, 200).Job)
 
-			gotOld := getJob(t, ts.URL, old.Job.ID)
+			gotOld := getSupersedeJob(t, ts.URL, old.Job.ID)
 			if gotOld.Status != "cancelled" || !strings.HasPrefix(gotOld.LastError, "superseded:") ||
 				gotOld.SupersededBy == nil || gotOld.SupersededBy.JobID != next.Job.ID {
 				t.Fatalf("old job = %+v by = %+v", gotOld, gotOld.SupersededBy)
 			}
 
 			// The unkeyed child is not cancelled with its parent.
-			if gotChild := getJob(t, ts.URL, child.Job.ID); gotChild.Status != "waiting" || gotChild.LastError != "" {
+			if gotChild := getSupersedeJob(t, ts.URL, child.Job.ID); gotChild.Status != "waiting" || gotChild.LastError != "" {
 				t.Fatalf("child = %s %q, want untouched waiting", gotChild.Status, gotChild.LastError)
 			}
 
@@ -75,7 +75,7 @@ func TestSupersedeKeyOverHTTP(t *testing.T) {
 				t.Fatalf("self-superseding chain status = %d, want 400", resp.StatusCode)
 			}
 			_ = resp.Body.Close()
-			if got := getJob(t, ts.URL, next.Job.ID); got.Status != "queued" {
+			if got := getSupersedeJob(t, ts.URL, next.Job.ID); got.Status != "queued" {
 				t.Fatalf("status after rejected registration = %s", got.Status)
 			}
 		})
@@ -219,7 +219,7 @@ func TestNoSupersedeKeyKeepsResponses(t *testing.T) {
 			t.Errorf("GET %s mentions supersede: %s", path, body)
 		}
 	}
-	if getJob(t, ts.URL, first.Job.ID).Status != "queued" {
+	if getSupersedeJob(t, ts.URL, first.Job.ID).Status != "queued" {
 		t.Error("unkeyed registration changed an older job")
 	}
 }

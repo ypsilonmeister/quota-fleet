@@ -113,6 +113,7 @@ type Config struct {
 	Evaluator           EvaluatorConfig        `yaml:"evaluator"`
 	ReviewGate          ReviewGateConfig       `yaml:"review_gate"`
 	Notifier            NotifierConfig         `yaml:"notifier"`
+	Selector            SelectorConfig         `yaml:"selector"`
 }
 
 // EffectiveAgentsCheckInterval returns the configured periodic agent version probe interval.
@@ -290,6 +291,30 @@ func (e EvaluatorConfig) EffectiveMaxEvalRetries() int {
 		return DefaultEvaluatorMaxEvalRetries
 	}
 	return *e.MaxEvalRetries
+}
+
+// Selector modes (docs/10, docs/19).
+const (
+	// SelectorModeOff keeps the legacy behavior: no automatic selection.
+	SelectorModeOff = "off"
+	// SelectorModeRecord computes and records a selection but executes with the documented defaults (S1).
+	SelectorModeRecord = "record"
+	// SelectorModeApply executes jobs with the selection for unspecified fields (S2).
+	SelectorModeApply = "apply"
+)
+
+// SelectorConfig holds the Selector settings (docs/19).
+type SelectorConfig struct {
+	Mode string `yaml:"mode"`
+}
+
+// EffectiveMode returns the configured selector mode, defaulting to "off".
+func (s SelectorConfig) EffectiveMode() string {
+	v := strings.TrimSpace(s.Mode)
+	if v == "" {
+		return SelectorModeOff
+	}
+	return v
 }
 
 // QuotaConfig holds Quota Gate and usage snapshot settings.
@@ -724,6 +749,10 @@ func (c *Config) Validate() error {
 	}
 	if mode := strings.TrimSpace(c.Quota.GateMode); mode != "" && mode != GateModeOff && mode != GateModeDryRun && mode != GateModeEnforce {
 		errs = append(errs, fmt.Errorf("quota.gate_mode %q is not supported (allowed: %q, %q, %q)", mode, GateModeOff, GateModeDryRun, GateModeEnforce))
+	}
+
+	if mode := strings.TrimSpace(c.Selector.Mode); mode != "" && mode != SelectorModeOff && mode != SelectorModeRecord && mode != SelectorModeApply {
+		errs = append(errs, fmt.Errorf("selector.mode %q is not supported (allowed: %q, %q, %q)", mode, SelectorModeOff, SelectorModeRecord, SelectorModeApply))
 	}
 
 	if mode := strings.TrimSpace(c.Evaluator.Mode); mode != "" && mode != EvaluatorModeTypedDecision && mode != EvaluatorModeAlwaysPass {
