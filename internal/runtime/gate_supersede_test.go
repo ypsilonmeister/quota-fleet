@@ -17,12 +17,15 @@ import (
 // docs/20: both release paths check again for a newer registration with the same key.
 func TestGateCheckerCancelsSupersededHeldInsteadOfReleasing(t *testing.T) {
 	ctx := context.Background()
-	for _, manual := range []bool{false, true} {
-		name := "periodic"
-		if manual {
-			name = "manual"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, c := range []struct {
+		name, scope string
+		manual      bool
+	}{
+		{"periodic", "", false}, {"manual", "", true},
+		{"periodic_scoped", "pr1", false}, {"manual_scoped", "pr1", true},
+	} {
+		manual := c.manual
+		t.Run(c.name, func(t *testing.T) {
 			st, dir := openTestStore(t, "gate-supersede")
 			now := time.Date(2026, 11, 25, 1, 0, 0, 0, time.UTC)
 			reset := now.Add(24 * time.Hour)
@@ -45,7 +48,7 @@ func TestGateCheckerCancelsSupersededHeldInsteadOfReleasing(t *testing.T) {
 					RequestID: requestID,
 					Pool:      "claude",
 					Payload: store.CreateJobParams{
-						RequestID: requestID, Title: "publish", Pool: "claude", SupersedeScope: "pr1", SupersedeKey: "publish",
+						RequestID: requestID, Title: "publish", Pool: "claude", SupersedeScope: c.scope, SupersedeKey: "publish",
 					},
 				})
 				if err != nil {

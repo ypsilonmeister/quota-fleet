@@ -119,8 +119,9 @@ type CreateJobParams struct {
 	AltPools           []string      `json:"alt_pools,omitempty"`
 	SessionID          string        `json:"session_id,omitempty"`
 	CreatedBy          string        `json:"created_by,omitempty"`
-	// SupersedeScope names the target and SupersedeKey the role. They are set together;
-	// registering cancels older unstarted registrations with both (docs/20).
+	// Registering with a SupersedeKey (the role) cancels older unstarted registrations with
+	// the same scope and key (docs/20). SupersedeScope optionally names the target and
+	// needs a key; registrations without it share one default scope.
 	SupersedeScope string `json:"supersede_scope,omitempty"`
 	SupersedeKey   string `json:"supersede_key,omitempty"`
 	// SupersedeOwnOnly limits that to registrations with the same CreatedBy, for a caller

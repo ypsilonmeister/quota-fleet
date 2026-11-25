@@ -9,11 +9,12 @@ import (
 	"time"
 )
 
-// Supersede (docs/20): every job registration that carries a supersede_scope (the target,
-// such as one pull request) and a supersede_key (the role) gets one row in
-// supersede_registrations. Registrations replace each other only when both match. A held entry and the job it is later released into share that
-// row (same request_id), so seq is the order in which work was registered, not the order
-// in which it was released.
+// Supersede (docs/20): every job registration that carries a supersede_key (the role), and
+// optionally a supersede_scope (the target, such as one pull request), gets one row in
+// supersede_registrations. Registrations replace each other only when scope and key both
+// match; those without a scope share one default scope, the empty string. A held entry and
+// the job it is later released into share that row (same request_id), so seq is the order
+// in which work was registered, not the order in which it was released.
 
 // SupersedeRef identifies one registration: a job, or a held entry that has no job.
 type SupersedeRef struct {
@@ -52,15 +53,23 @@ type supersedeRegistration struct {
 const supersedeRegistrationColumns = `seq, supersede_scope, supersede_key, request_id, owner, own_only`
 
 func supersedeReason(newer supersedeRegistration) string {
-	return fmt.Sprintf("superseded: newer registration request_id=%s has supersede_scope=%s supersede_key=%s",
-		newer.requestID, newer.scope, newer.key)
+	return fmt.Sprintf("superseded: newer registration request_id=%s has %s",
+		newer.requestID, supersedeLabel(newer.scope, newer.key))
 }
 
-// checkSupersedePair requires supersede_scope and supersede_key together. A key alone would
-// let unrelated work that happens to use the same key cancel each other.
-func checkSupersedePair(scope, key string) error {
-	if (scope == "") != (key == "") {
-		return fmt.Errorf("%w: supersede_scope and supersede_key must be specified together", ErrInvalidInput)
+// supersedeLabel names a scope and key in messages, leaving out the default scope.
+func supersedeLabel(scope, key string) string {
+	if scope == "" {
+		return "supersede_key=" + key
+	}
+	return fmt.Sprintf("supersede_scope=%s supersede_key=%s", scope, key)
+}
+
+// checkSupersedeScope rejects a supersede_scope without a supersede_key: it would look
+// like a request to supersede and do nothing.
+func checkSupersedeScope(scope, key string) error {
+	if scope != "" && key == "" {
+		return fmt.Errorf("%w: supersede_scope requires supersede_key", ErrInvalidInput)
 	}
 	return nil
 }
@@ -93,8 +102,7 @@ func checkCancelledHoldTx(ctx context.Context, conn *sql.Conn, p CreateJobParams
 // registration cancels every older one with its scope and key that has not started: held
 // entries, and queued or waiting jobs. Only those jobs change: claimed jobs and jobs
 // registered without that scope and key, including children of a cancelled job, are never
-// touched. With
-// reg.ownOnly, only registrations of the same owner are cancelled.
+// touched. With reg.ownOnly, only registrations of the same owner are cancelled.
 //
 // A request_id that is already registered (a held entry becoming a job) keeps its place in
 // the order and its owner, and cancels nothing; it is rejected when a newer registration
@@ -107,8 +115,8 @@ func registerSupersedeTx(
 	existing, err := querySupersedeRegistration(ctx, conn, reg.requestID)
 	if err == nil {
 		if existing.scope != reg.scope || existing.key != reg.key {
-			return nil, fmt.Errorf("%w: request_id=%s is registered with supersede_scope=%s supersede_key=%s",
-				ErrConflict, reg.requestID, existing.scope, existing.key)
+			return nil, fmt.Errorf("%w: request_id=%s is registered with %s",
+				ErrConflict, reg.requestID, supersedeLabel(existing.scope, existing.key))
 		}
 		newer, err := queryNewerRegistration(ctx, conn, existing)
 		if err == nil {

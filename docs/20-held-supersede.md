@@ -5,27 +5,37 @@ Issue #23。同じ役割の古い登録を、新しい登録が自動で取り�
 ## 1. 目的と範囲
 
 - チェーンをラウンドごとに登録すると、枠切れで保持された古いラウンドのジョブ（例: publish）が残る。放置すると、解放の順序しだいで古い publish が最新のレビューを読んで動く。
-- 登録側が同じ対象・同じ役割のジョブに同じ `supersede_scope` と `supersede_key` を付けると、まだ開始していない古いジョブは取り消される。
+- 登録側が同じ役割のジョブに同じ `supersede_key` を付けると、まだ開始していない古いジョブは取り消される。対象が複数あるときは `supersede_scope` で分ける。
 - 範囲外: 実行中（claimed）ジョブの停止、チェーン登録そのものの自動化。
 
 ## 2. 指定方法
 
-2 つの任意の文字列を組で指定する。
+どちらも任意の文字列。代替させるには `supersede_key` を指定する。
 
 | フィールド | 意味 | 例 |
 | --- | --- | --- |
-| `supersede_scope` | 対象。ラウンドをまたいで変わらない識別子 | `ypsilonmeister/quota-fleet#42` |
-| `supersede_key` | 対象の中の役割 | `publish` |
+| `supersede_key` | 役割。単独で指定できる | `publish` |
+| `supersede_scope` | 対象。ラウンドをまたいで変わらない識別子。`supersede_key` と併せて指定する | `ypsilonmeister/quota-fleet#42` |
 
-**両方が一致する登録だけが取り消し合う。** 別の対象のチェーンは、同じキーを使っていても影響し合わない。
+**scope と key の両方が一致する登録だけが取り消し合う。** scope を指定しない登録は、全体で 1 つの既定スコープに属する。
 
-どちらも前後の空白は無視し、大文字と小文字は区別する。空（または空白のみ）は未指定と同じ。両方とも未指定の登録は他の登録に影響せず、影響も受けない。**片方だけを指定した登録は 400** になり、何も作らず、何も取り消さない。ただし、ジョブがある `request_id` の再送は指定を確認せず既存のジョブを返し、enforce で保持がある `request_id` の再送は既存の保持の状態に応じて応答する。
+| 古い登録 | 新しい登録 | 代替 |
+| --- | --- | --- |
+| key=`publish` | key=`publish` | する |
+| scope=`#42`、key=`publish` | scope=`#42`、key=`publish` | する |
+| scope=`#42`、key=`publish` | scope=`#43`、key=`publish` | しない |
+| scope=`#42`、key=`publish` | key=`publish` | しない（逆の順も同じ） |
+
+- **キー単独の指定では、同じキーを使う無関係なチェーンも取り消し合う。** 独立したチェーンが同じキーを使う場合は、登録側が scope を指定して分ける。
+- 同じ対象のラウンドの途中で scope を付けたり外したりすると、その前後の登録は代替されない。
+
+どちらも前後の空白は無視し、大文字と小文字は区別する。空（または空白のみ）は未指定と同じ。`supersede_key` 未指定の登録は他の登録に影響せず、影響も受けない。**`supersede_scope` だけを指定した新規登録は 400** になり、何も作らず、何も取り消さない。ただし、ジョブがある `request_id` の再送は指定を確認せず既存のジョブを返し、enforce で保持がある `request_id` の再送は既存の保持の状態に応じて応答する。
 
 | 経路 | 指定 |
 | --- | --- |
 | HTTP API | `POST /jobs` の `supersede_scope` と `supersede_key` |
 | MCP | `create_job` の `supersede_scope` と `supersede_key` |
-| CLI | `quota-fleet job create --supersede-scope <対象> --supersede-key <役割>` |
+| CLI | `quota-fleet job create --supersede-key <役割> [--supersede-scope <対象>]` |
 
 Web UI の新規登録フォームには入力欄がない。
 
@@ -58,12 +68,14 @@ scope と key は DB 全体で照合し、agent・host・親ジョブをまた�
 superseded: newer registration request_id=<新しい request_id> has supersede_scope=<scope> supersede_key=<key>
 ```
 
-- 取り消すのは同じ scope と key の登録だけである。取り消したジョブを待っている waiting の子のうち、同じ組を持たないもの（未指定・別の scope や key）は変更しない。手動のキャンセルと違い、連鎖しない。
+scope を指定していない場合は `supersede_scope=<scope>` を含まない。
+
+- 取り消すのは同じ scope と key の登録だけである。取り消したジョブを待っている waiting の子のうち、scope と key が一致しないもの（キー未指定・別の scope や key）は変更しない。手動のキャンセルと違い、連鎖しない。
 - 残った子は `waiting` のままで、実行されない。Reconciler は親が終了した waiting ジョブ（`orphan_waiting`）として一度通知する。不要なら `quota-fleet job cancel` で取り消す。親を `requeue` して完了させれば、子は通常どおり `queued` になる。子の scope と key で新しい登録があれば、その時点で取り消される。
 - draft になる登録（`--draft` かつ親なし）に `supersede_key` を指定すると 400 になり、何も取り消さない。実行できるジョブがなくなるのを防ぐためである。
-- scope と key を指定して登録済みの `request_id` の再送は新しい登録ではないので、何も取り消さない。
+- `supersede_key` を指定して登録済みの `request_id` の再送は新しい登録ではないので、何も取り消さない。
 - **取り消された保持**（代替・手動のどちらでも）の `request_id` を再送すると、Gate のモードに関係なく 409 になり、ジョブは作らない。scope と key を省いても同じである。CLI の `job create --request-id` も失敗する。例外は、元の保持にも再送にも `supersede_key` がない場合で、従来どおり扱う（enforce は 409、off・dry-run・CLI はジョブを作る）。
-- 取り消されていない保持の `request_id` から scope と key を省いてジョブを作った場合は、そのジョブは保持の scope と key を引き継ぐ。登録済みの `request_id` に別の scope か key を指定してジョブを作ろうとすると 409 になる。
+- 取り消されていない保持の `request_id` から scope と key を両方省いてジョブを作った場合は、そのジョブは保持の scope と key を引き継ぐ。登録済みの `request_id` に別の scope か key を指定してジョブを作ろうとすると 409 になる。キーだけを指定した場合は既定スコープの指定になるので、scope 付きで登録した `request_id` では 409 になる。
 - `supersede_key` を指定した登録は、親が完了できない場合に 400 になり、何も取り消さない。親、または親が（間接的にも）待っているジョブが `failed` / `cancelled`、あるいはこの登録で取り消される場合である。実行できないジョブのために古い登録を取り消さないためである。保持になる場合は、親が存在しないときも 400 になる。キー未指定の登録にこの追加の確認はない。
 
 ## 4. 解放時の再確認
@@ -112,13 +124,13 @@ Web UI の保持一覧（`/ui/gate/held` とダッシュボード）は、作成
 
 ## 7. チェーン登録側の使い方
 
-**ラウンドをまたいで同じ役割を持つジョブには、同じ `supersede_scope` と `supersede_key` を付ける。**
+**ラウンドをまたいで同じ役割を持つジョブには、同じ `supersede_key` を付ける。** 対象（PR や Issue）が複数あるときは、同じ `supersede_scope` も付ける。付けないと、別の対象の同じ役割を取り消す。
 
-- `supersede_scope` には対象（PR や Issue）を入れる。リポジトリ名と番号のように、DB 全体で対象を一意に表し、ラウンドが変わっても同じになる値にする。コミット SHA やラウンド番号を入れると、古いラウンドが取り消されない。
+- `supersede_scope` には対象を入れる。リポジトリ名と番号のように、DB 全体で対象を一意に表し、ラウンドが変わっても同じになる値にする。コミット SHA やラウンド番号を入れると、古いラウンドが取り消されない。
 - 別の対象に同じ scope を使うと、同じ対象とみなして取り消し合う。ブランチ名（`origin/main` など）のように複数の対象で共通になる値は使わない。
 - `supersede_key` には役割（`review` / `fix` / `publish`）を入れる。役割を分けないと、同じチェーン内の別の役割が取り消し合う。
 - 1 ラウンドの中で並行して走らせるジョブ（複数のレビュアーなど）には、それぞれ別の key を付ける。
-- 次のラウンドは、親から順に新しいジョブを登録し直す。古いラウンドの子は、同じ役割の新しい登録が来るまで `waiting` のまま残る。指定していない子は残り続けるので、チェーンのジョブにはすべて指定する。
+- 次のラウンドは、親から順に新しいジョブを登録し直す。古いラウンドの子は、同じ役割の新しい登録が来るまで `waiting` のまま残る。キーを指定していない子は残り続けるので、チェーンのジョブにはすべて指定する。
 - `operate` を持たないトークンで登録する場合、全ラウンドを同じトークンで登録する。
 
 ```sh
@@ -133,9 +145,9 @@ quota-fleet job create --title "publish r2" --parent 31 \
 - 親が代替された waiting の子は自動では取り消されない（3 章）。
 - claimed のジョブが `reset`（手動、または Reconciler の自動 reset）で queued に戻った場合や、取り消したジョブを `requeue` した場合は、新しい登録があってもそのまま queued になる。次に同じ scope と key で登録されると取り消される。
 - 保持を経ていない queued のジョブには、claim 時の再確認はない。
-- `supersede_key` 導入前に登録されたジョブと保持は scope と key を持たないので、対象にならない。
+- `supersede_key` 導入前に登録されたジョブと保持はキーを持たないので、対象にならない。
 
 ## 9. データ
 
 - `jobs.supersede_scope`、`jobs.supersede_key`、`held_jobs.cancel_reason`（起動時に列を追加する）
-- `supersede_registrations`: scope と key を指定した登録 1 件につき 1 行。`seq` が登録順で、保持と解放後のジョブは同じ行を共有する。`owner`（トークン名）と `own_only` が取り消せる範囲を記録する
+- `supersede_registrations`: `supersede_key` を指定した登録 1 件につき 1 行（scope 未指定は空文字列）。`seq` が登録順で、保持と解放後のジョブは同じ行を共有する。`owner`（トークン名）と `own_only` が取り消せる範囲を記録する

@@ -31,14 +31,43 @@ func TestJobCreateSupersedeKeyFlag(t *testing.T) {
 	}
 }
 
-func TestJobCreateRequiresSupersedeScopeWithKey(t *testing.T) {
+func TestJobCreateSupersedeKeyWithoutScope(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "fleet.db")
-	for _, flag := range []string{"--supersede-key", "--supersede-scope"} {
+	create := func(args ...string) string {
+		t.Helper()
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"job", "create", "--db", dbPath, "--title", "publish", flag, "x"}, &stdout, &stderr)
-		if code == 0 || !strings.Contains(stderr.String(), "must be specified together") {
-			t.Errorf("%s alone = %d: %s%s", flag, code, stdout.String(), stderr.String())
+		full := append([]string{"job", "create", "--db", dbPath, "--title", "publish"}, args...)
+		if code := run(full, &stdout, &stderr); code != 0 {
+			t.Fatalf("job create exit = %d: %s", code, stderr.String())
 		}
+		return stdout.String()
+	}
+	create("--supersede-key", "pub")
+	create("--supersede-scope", "pr1", "--supersede-key", "pub")
+	out := create("--supersede-key", "pub")
+	for _, want := range []string{"supersede_key: pub", "superseded: job #1\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "supersede_scope") || strings.Contains(out, "superseded: job #2") {
+		t.Errorf("a key alone reached the scoped job or printed a scope: %s", out)
+	}
+	for id, want := range map[string]string{"1": "cancelled", "2": "queued", "3": "queued"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"job", "get", id, "--db", dbPath}, &stdout, &stderr); code != 0 ||
+			!strings.Contains(stdout.String(), want) {
+			t.Errorf("job get %s = %d, want %s: %s%s", id, code, want, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestJobCreateRejectsSupersedeScopeWithoutKey(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "fleet.db")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"job", "create", "--db", dbPath, "--title", "publish", "--supersede-scope", "pr1"}, &stdout, &stderr)
+	if code == 0 || !strings.Contains(stderr.String(), "supersede_scope requires supersede_key") {
+		t.Errorf("scope alone = %d: %s%s", code, stdout.String(), stderr.String())
 	}
 }
 

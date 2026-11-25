@@ -28,8 +28,8 @@ const (
 //   - If a held_jobs row already exists with status='released', returns ErrJobAlreadyExists.
 //   - If a held_jobs row already exists with status='cancelled', returns (existing, false, ErrConflict).
 //
-// A new hold with a supersede_scope and supersede_key cancels older unstarted registrations
-// with both in the same transaction (docs/20). It then requires an existing, non-terminal parent.
+// A new hold with a supersede_key cancels older unstarted registrations with the same scope
+// and key in the same transaction (docs/20). It then requires an existing, non-terminal parent.
 func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, error) {
 	reqID := strings.TrimSpace(p.RequestID)
 	if reqID == "" {
@@ -94,7 +94,7 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 		heldID := "held-" + suffix
 		nowStr := formatTime(time.Now().UTC())
 
-		if err := checkSupersedePair(payload.SupersedeScope, payload.SupersedeKey); err != nil {
+		if err := checkSupersedeScope(payload.SupersedeScope, payload.SupersedeKey); err != nil {
 			return err
 		}
 		if key := payload.SupersedeKey; key != "" {

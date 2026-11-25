@@ -356,7 +356,7 @@ func (s *Store) createJobTx(ctx context.Context, conn *sql.Conn, changes *[]stat
 			return nil, false, err
 		}
 	}
-	if err := checkSupersedePair(supersedeScope, supersedeKey); err != nil {
+	if err := checkSupersedeScope(supersedeScope, supersedeKey); err != nil {
 		return nil, false, err
 	}
 	if err := checkKeyedDraft(supersedeKey, p); err != nil {
