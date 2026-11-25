@@ -1231,6 +1231,23 @@ func TestAPIMCPHTTPDefaultsFalseAndParses(t *testing.T) {
 	}
 }
 
+func TestAPIJobEventsDefaultsFalseAndParses(t *testing.T) {
+	for yamlText, want := range map[string]bool{
+		"instance_id: x\n":                            false,
+		"instance_id: x\napi:\n  listen: \":1\"\n":    false,
+		"instance_id: x\napi:\n  job_events: false\n": false,
+		"instance_id: x\napi:\n  job_events: true\n":  true,
+	} {
+		cfg, err := Parse([]byte(yamlText))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", yamlText, err)
+		}
+		if cfg.API.JobEvents != want {
+			t.Errorf("Parse(%q) api.job_events = %v, want %v", yamlText, cfg.API.JobEvents, want)
+		}
+	}
+}
+
 func TestAPIMCPAllowedOriginHosts(t *testing.T) {
 	for host, ok := range map[string]bool{
 		"fleet.example.ts.net": true,

@@ -451,6 +451,18 @@ func toAgentVersionEventDTOs(items []*store.AgentVersionEvent) []*AgentVersionEv
 	return out
 }
 
+// JobStatusEventDTO is the data of a "job_status" server-sent event on GET /events.
+type JobStatusEventDTO struct {
+	JobID  int64  `json:"job_id"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+	// PrevStatus is empty for a newly created job.
+	PrevStatus string    `json:"prev_status"`
+	Agent      string    `json:"agent"`
+	Host       string    `json:"host"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 // AgentsResponse is returned by GET /agents with the latest version matrix and drift summaries.
 type AgentsResponse struct {
 	agentver.Matrix

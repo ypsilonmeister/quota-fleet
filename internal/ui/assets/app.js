@@ -767,10 +767,23 @@
     return;
   }
 
+  const notifyHelper = globalThis.__qfNotify;
+  // List views that are re-fetched when a job event arrives (docs/14).
+  const LIVE_ROUTES = new Set(["dashboard", "jobs", "deliveries"]);
+
   const state = {
     meta: null,
     status: null,
-    authenticated: false
+    authenticated: false,
+    // renderSeq changes whenever the view is redrawn by the user; a background
+    // refresh started before that is discarded.
+    renderSeq: 0,
+    rendering: 0,
+    viewDirty: false,
+    flatPages: 1,
+    // The button of the latest unanswered "さらに読み込む", and the number of clicks.
+    loadMoreButton: null,
+    loadMoreSeq: 0
   };
 
   const dom = {
@@ -780,6 +793,7 @@
     authTokenInput: document.getElementById("auth-token-input"),
     authError: document.getElementById("auth-error"),
     btnConnectNoAuth: document.getElementById("btn-connect-no-auth"),
+    btnNotify: document.getElementById("btn-notify"),
     btnRefresh: document.getElementById("btn-refresh"),
     btnToken: document.getElementById("btn-token"),
     directionSwitch: document.getElementById("direction-switch"),
@@ -1095,6 +1109,9 @@
     const route = parseRoute(urlObj);
     updateActiveNav(route.name);
 
+    state.renderSeq += 1;
+    state.rendering += 1;
+    state.viewDirty = false;
     try {
       switch (route.name) {
         case "dashboard":
@@ -1138,12 +1155,59 @@
       dom.app.replaceChildren(
         el("div", { className: "alert alert-error", text: "エラー: " + (err ? err.message : String(err)) })
       );
+    } finally {
+      state.rendering -= 1;
     }
   }
 
+  // ==================== Live list refresh (job events) ====================
+  function isEditingView() {
+    const active = document.activeElement;
+    const focused = Boolean(active && dom.app.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+    return focused || state.viewDirty;
+  }
+
+  // True while the displayed list waits for another page; redrawing it would drop that page.
+  function isLoadingMore() {
+    return Boolean(state.loadMoreButton && state.loadMoreButton.isConnected);
+  }
+
+  // refreshListView redraws the current list view without a loading placeholder.
+  // It returns false when it has to be retried later (a render, "load more" or user input
+  // is in progress).
+  async function refreshListView() {
+    const route = parseRoute(new URL(window.location.href));
+    if (!LIVE_ROUTES.has(route.name) || dom.app.hidden || !hasCredentialsConfigured()) {
+      return true;
+    }
+    if (state.rendering > 0 || isLoadingMore() || isEditingView()) {
+      return false;
+    }
+    const seq = state.renderSeq;
+    const loadMoreSeq = state.loadMoreSeq;
+    const view = {
+      isStale: function () {
+        return seq !== state.renderSeq || loadMoreSeq !== state.loadMoreSeq ||
+          dom.app.hidden || isEditingView();
+      }
+    };
+    if (route.name === "dashboard") {
+      await renderDashboard(view);
+    } else if (route.name === "jobs") {
+      await renderJobsList(route.search, view);
+    } else {
+      await renderDeliveries(route.search, view);
+    }
+    // Retry a refresh of this view that was dropped for "load more" or user input.
+    return !(seq === state.renderSeq && (loadMoreSeq !== state.loadMoreSeq || isEditingView()));
+  }
+
   // ==================== 1. Dashboard (/ui/) ====================
-  async function renderDashboard() {
-    setLoading("ダッシュボード");
+  // view is set only for a background refresh (see refreshListView).
+  async function renderDashboard(view) {
+    if (!view) {
+      setLoading("ダッシュボード");
+    }
     const [statusRes, metaRes, claimedRes, heldRes, delivRes] = await Promise.all([
       apiFetch("/status"),
       apiFetch("/meta"),
@@ -1254,6 +1318,9 @@
       ])
     );
 
+    if (view && (view.isStale() || !claimedRes.ok || !heldRes.ok || !delivRes.ok)) {
+      return;
+    }
     dom.app.replaceChildren.apply(dom.app, sections);
   }
 
@@ -1402,7 +1469,7 @@
   }
 
   // ==================== 2. Jobs List (/ui/jobs) ====================
-  async function renderJobsList(searchParams) {
+  async function renderJobsList(searchParams, view) {
     const requestedView = (searchParams && searchParams.get("view")) || "flat";
     const activeView = requestedView === "chain" ? "chain" : "flat";
     const requestedStatus = (searchParams && searchParams.get("status")) || (activeView === "chain" ? "all" : "queued");
@@ -1413,7 +1480,9 @@
     const filterHost = (searchParams && searchParams.get("host")) || "";
     const filterQ = (searchParams && searchParams.get("q")) || "";
 
-    setLoading("ジョブ一覧");
+    if (!view) {
+      setLoading("ジョブ一覧");
+    }
 
     function buildJobsURL(view, st, ag, ho, q) {
       const sp = new URLSearchParams();
@@ -1502,6 +1571,19 @@
       loadedJobs = (jobsRes.data && jobsRes.data.jobs) ? jobsRes.data.jobs.slice() : [];
       nextCursor = jobsRes.data ? jobsRes.data.next_cursor : 0;
       hasMore = Boolean(jobsRes.data && jobsRes.data.has_more);
+
+      // A background refresh keeps the pages the user had already loaded.
+      for (let page = 1; view && page < state.flatPages && hasMore && nextCursor; page += 1) {
+        const pageParams = new URLSearchParams(flatParams.toString());
+        pageParams.set("cursor", String(nextCursor));
+        const pageRes = await apiFetch("/jobs?" + pageParams.toString());
+        if (!pageRes.ok) {
+          throw new Error(errorMessageFromResp(pageRes, "ジョブ一覧の取得に失敗しました"));
+        }
+        loadedJobs = loadedJobs.concat((pageRes.data && pageRes.data.jobs) || []);
+        nextCursor = pageRes.data ? pageRes.data.next_cursor : 0;
+        hasMore = Boolean(pageRes.data && pageRes.data.has_more);
+      }
     }
 
     state.status = statusRes.data;
@@ -1664,10 +1746,16 @@
         onClick: async function () {
           btn.disabled = true;
           btn.textContent = "読み込み中...";
+          state.loadMoreSeq += 1;
+          state.loadMoreButton = btn;
           try {
             const nextParams = new URLSearchParams(flatParams.toString());
             nextParams.set("cursor", String(nextCursor));
             const moreRes = await apiFetch("/jobs?" + nextParams.toString());
+            // The list was redrawn while waiting: this page belongs to the old one.
+            if (!btn.isConnected) {
+              return;
+            }
             if (!moreRes.ok) {
               showBanner("error", errorMessageFromResp(moreRes, "追加取得に失敗しました"));
               return;
@@ -1676,11 +1764,16 @@
             loadedJobs = loadedJobs.concat(moreJobs);
             nextCursor = moreRes.data ? moreRes.data.next_cursor : 0;
             hasMore = Boolean(moreRes.data && moreRes.data.has_more);
+            state.flatPages += 1;
             tableContainer.replaceChildren(buildJobsTable(loadedJobs, "該当するジョブはありません。"));
             updateLoadMore();
           } catch (err) {
             if (!err || err.status !== 401) {
               showBanner("error", "追加取得エラー: " + (err ? err.message : String(err)));
+            }
+          } finally {
+            if (state.loadMoreButton === btn) {
+              state.loadMoreButton = null;
             }
           }
         }
@@ -1705,6 +1798,12 @@
     }
     pageNodes.push(tableContainer, loadMoreContainer);
 
+    if (view && view.isStale()) {
+      return;
+    }
+    if (!view) {
+      state.flatPages = 1;
+    }
     dom.app.replaceChildren.apply(dom.app, pageNodes);
   }
 
@@ -2756,7 +2855,7 @@
   }
 
   // ==================== 7. Deliveries (/ui/deliveries) ====================
-  async function renderDeliveries(searchParams) {
+  async function renderDeliveries(searchParams, view) {
     const validStatuses = [
       { key: "undelivered", label: "未納品" },
       { key: "delivered", label: "納品済み" },
@@ -2765,7 +2864,9 @@
     const reqStatus = (searchParams && searchParams.get("status")) || "undelivered";
     const activeStatus = validStatuses.some(function (s) { return s.key === reqStatus; }) ? reqStatus : "undelivered";
 
-    setLoading("納品");
+    if (!view) {
+      setLoading("納品");
+    }
     const res = await apiFetch("/deliveries?status=" + encodeURIComponent(activeStatus) + "&limit=100");
     if (!res.ok) {
       throw new Error(errorMessageFromResp(res, "納品一覧の取得に失敗しました"));
@@ -2783,12 +2884,16 @@
       });
     }));
 
+    if (view && view.isStale()) {
+      return;
+    }
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [
         el("h1", { text: "納品" })
       ]),
       tabs,
       buildDeliveriesTable(jobs, function () {
+        state.renderSeq += 1;
         void renderDeliveries(searchParams);
       })
     );
@@ -3149,9 +3254,62 @@
     ]);
   }
 
+  // ==================== Job Notifications (docs/14) ====================
+  const listRefresher = notifyHelper.createRefresher({
+    refresh: refreshListView,
+    delayMs: 500,
+    retryMs: 2000
+  });
+
+  function getNotificationCtor() {
+    return typeof window.Notification === "function" ? window.Notification : null;
+  }
+
+  const notifyController = notifyHelper.createNotifyController({
+    storage: {
+      getItem: function (key) { return localStorage.getItem(key); },
+      setItem: function (key, value) { localStorage.setItem(key, value); }
+    },
+    getNotification: getNotificationCtor,
+    isSecureContext: function () { return window.isSecureContext !== false; },
+    hasCredentials: hasCredentialsConfigured,
+    hasToken: function () { return getStoredToken() !== ""; },
+    createStream: function (handlers) {
+      return notifyHelper.createEventStream(Object.assign({
+        url: "/events",
+        fetch: function (url, opts) { return window.fetch(url, opts); },
+        getToken: getStoredToken
+      }, handlers));
+    },
+    notify: notifyHelper.createJobNotifier({
+      getNotification: getNotificationCtor,
+      focus: function () { window.focus(); },
+      openJob: function (jobID) { navigate("/ui/jobs/" + jobID); },
+      onError: function () {
+        showBanner("error", "このブラウザではページから通知を表示できませんでした。");
+      }
+    }),
+    onListChanged: function () { listRefresher.request(); },
+    onChange: function (view) {
+      dom.btnNotify.setAttribute("aria-pressed", view.enabled ? "true" : "false");
+      dom.btnNotify.classList.toggle("notify-problem", Boolean(view.problem));
+      dom.btnNotify.title = view.problem ||
+        ("ジョブ完了のブラウザ通知: " + (view.enabled ? "オン" : "オフ"));
+    },
+    onMessage: function (message) { showBanner("error", message); },
+    onUnauthorized: function (message) {
+      // Do not wipe a token the user is already typing.
+      if (dom.authGate.hidden) {
+        showAuthGate(message);
+      }
+    }
+  });
+
   // ==================== Global Event Wiring ====================
   async function tryConnect(tokenValue, noAuth) {
     dom.authError.hidden = true;
+    // The open stream belongs to the previous credentials.
+    notifyController.stop();
     if (noAuth) {
       sessionStorage.removeItem(TOKEN_KEY);
       sessionStorage.setItem(AUTH_MODE_KEY, "none");
@@ -3169,6 +3327,7 @@
       }
       state.status = res.data;
       hideAuthGate();
+      notifyController.restart();
       await refreshHeaderMeta();
       await renderCurrentRoute();
     } catch (err) {
@@ -3196,6 +3355,17 @@
     void tryConnect("", true);
   });
 
+  dom.btnNotify.addEventListener("click", function () {
+    clearBanner();
+    void notifyController.toggle();
+  });
+
+  ["input", "change"].forEach(function (type) {
+    dom.app.addEventListener(type, function () {
+      state.viewDirty = true;
+    });
+  });
+
   dom.btnRefresh.addEventListener("click", function () {
     clearBanner();
     void refreshHeaderMeta();
@@ -3219,6 +3389,9 @@
   window.addEventListener("storage", function (ev) {
     if (ev && ev.key === DIRECTION_KEY) {
       applyDirection(ev.newValue, false);
+    }
+    if (ev && ev.key === notifyHelper.NOTIFY_KEY) {
+      notifyController.reload();
     }
   });
 
@@ -3244,6 +3417,7 @@
   });
 
   // Boot
+  notifyController.sync();
   if (hasCredentialsConfigured()) {
     void refreshHeaderMeta();
     void renderCurrentRoute();

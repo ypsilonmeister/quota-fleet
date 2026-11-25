@@ -71,6 +71,10 @@ type Options struct {
 	// It receives the authenticated API handler so tool calls re-enter the normal API path
 	// (scope enforcement and created_by recording) with the caller's own token.
 	MCPHandler func(backend http.Handler) http.Handler
+	// JobEvents registers GET /events, the job status SSE stream (docs/14).
+	JobEvents bool
+	// EventsHeartbeat overrides the SSE heartbeat interval in tests when positive.
+	EventsHeartbeat time.Duration
 	// GateReleaser handles POST /gate/held/{id}/release via immediate quota re-evaluation.
 	GateReleaser GateReleaser
 	// AgentChecker handles POST /agents/check via immediate host×agent version probing.
@@ -142,6 +146,7 @@ type Server struct {
 	agentChecker    AgentChecker
 	nowFn           func() time.Time
 	snapshotLoader  func() (*quota.Snapshot, error)
+	eventsHeartbeat time.Duration
 	handler         http.Handler
 }
 
@@ -204,6 +209,11 @@ func NewServer(st *store.Store, opts Options) *Server {
 		})
 	}
 
+	eventsHeartbeat := opts.EventsHeartbeat
+	if eventsHeartbeat <= 0 {
+		eventsHeartbeat = defaultEventsHeartbeat
+	}
+
 	s := &Server{
 		store:           st,
 		instanceID:      opts.InstanceID,
@@ -223,6 +233,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 		agentChecker:    opts.AgentChecker,
 		nowFn:           nowFn,
 		snapshotLoader:  opts.SnapshotLoader,
+		eventsHeartbeat: eventsHeartbeat,
 	}
 
 	if len(s.tokens) == 0 && !s.requireAuth {
@@ -252,7 +263,6 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("GET /agents", s.requireScope(config.ScopeRead, s.handleGetAgents))
 	mux.HandleFunc("GET /agents/events", s.requireScope(config.ScopeRead, s.handleListAgentEvents))
 	mux.HandleFunc("POST /agents/check", s.requireScope(config.ScopeOperate, s.handleCheckAgents))
-
 	apiHandler := s.authMiddleware(mux)
 	uiHandler := ui.NewHandler()
 
@@ -265,6 +275,11 @@ func NewServer(st *store.Store, opts Options) *Server {
 		mcpHandler := s.requireTokenAuth(opts.MCPHandler(apiHandler))
 		rootMux.Handle("/mcp", mcpHandler)
 		rootMux.Handle("/mcp/", mcpHandler)
+	}
+	if opts.JobEvents {
+		// docs/14: /events always needs a bearer token. Unlike the JSON API it has no
+		// anonymous fallback.
+		rootMux.Handle("GET /events", s.requireTokenAuth(s.requireScope(config.ScopeRead, s.handleJobEvents)))
 	}
 	rootMux.Handle("/", apiHandler)
 

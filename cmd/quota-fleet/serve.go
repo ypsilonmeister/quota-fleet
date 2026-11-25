@@ -168,6 +168,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 	}
 	apiSrv := api.NewServer(st, api.Options{
 		MCPHandler:      mcpHandler,
+		JobEvents:       cfg.API.JobEvents,
 		InstanceID:      cfg.InstanceID,
 		MaxClaimed:      cfg.Limits.MaxClaimed,
 		Token:           cfg.API.Token,
@@ -191,6 +192,8 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		Handler:           apiSrv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// Event streams never end on their own; close them so Shutdown does not wait for them.
+	httpSrv.RegisterOnShutdown(st.CloseJobEvents)
 
 	errCh := make(chan error, 1)
 	go func() {
