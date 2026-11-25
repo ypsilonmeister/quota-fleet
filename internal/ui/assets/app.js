@@ -3265,6 +3265,14 @@
     return typeof window.Notification === "function" ? window.Notification : null;
   }
 
+  const notificationPresenter = notifyHelper.createNotificationPresenter({
+    // Absent in insecure contexts and some private browsing modes.
+    getServiceWorker: function () { return navigator.serviceWorker || null; },
+    getNotification: getNotificationCtor,
+    focus: function () { window.focus(); },
+    openJob: function (jobID) { navigate("/ui/jobs/" + jobID); }
+  });
+
   const notifyController = notifyHelper.createNotifyController({
     storage: {
       getItem: function (key) { return localStorage.getItem(key); },
@@ -3281,12 +3289,12 @@
         getToken: getStoredToken
       }, handlers));
     },
+    prepare: function () { void notificationPresenter.register(); },
     notify: notifyHelper.createJobNotifier({
       getNotification: getNotificationCtor,
-      focus: function () { window.focus(); },
-      openJob: function (jobID) { navigate("/ui/jobs/" + jobID); },
+      show: notificationPresenter.show,
       onError: function () {
-        showBanner("error", "このブラウザではページから通知を表示できませんでした。");
+        showBanner("error", "このブラウザでは通知を表示できませんでした。");
       }
     }),
     onListChanged: function () { listRefresher.request(); },

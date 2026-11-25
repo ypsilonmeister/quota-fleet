@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"testing"
@@ -18,7 +20,7 @@ func TestUINotifyAssetsPresent(t *testing.T) {
 	}
 
 	// docs/14: the token travels only in the Authorization header.
-	for name, src := range map[string]string{"notify.js": string(notifyJS), "app.js": string(appJS)} {
+	for name, src := range map[string]string{"notify.js": string(notifyJS), "app.js": string(appJS), "sw.js": string(swJS)} {
 		for _, forbidden := range []string{"new EventSource", "token="} {
 			if strings.Contains(src, forbidden) {
 				t.Errorf("%s must not contain %q", name, forbidden)
@@ -27,10 +29,151 @@ func TestUINotifyAssetsPresent(t *testing.T) {
 	}
 
 	js := string(appJS)
-	for _, token := range []string{`createNotifyController`, `createEventStream`, `createJobNotifier`, `refreshListView`} {
+	for _, token := range []string{`createNotifyController`, `createEventStream`, `createJobNotifier`, `refreshListView`,
+		`createNotificationPresenter`, `navigator.serviceWorker`, `show: notificationPresenter.show`, `notificationPresenter.register()`} {
 		if !strings.Contains(js, token) {
 			t.Errorf("app.js missing notification wiring %q", token)
 		}
+	}
+}
+
+func TestUIServiceWorkerServed(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ui/sw.js", nil)
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /ui/sw.js status = %d, want 200", rec.Code)
+	}
+	for header, want := range map[string]string{
+		"Content-Type":            "application/javascript; charset=utf-8",
+		"Cache-Control":           "no-store",
+		"Content-Security-Policy": ContentSecurityPolicy,
+		"X-Content-Type-Options":  "nosniff",
+	} {
+		if got := rec.Header().Get(header); got != want {
+			t.Errorf("GET /ui/sw.js %s = %q, want %q", header, got, want)
+		}
+	}
+	if got := rec.Body.String(); got != string(swJS) || !strings.Contains(got, `"notificationclick"`) {
+		t.Errorf("GET /ui/sw.js did not return the embedded service worker (%d bytes)", len(got))
+	}
+	// The module registers exactly the path served here.
+	for _, token := range []string{`const SW_URL = "/ui/sw.js";`, `const SW_SCOPE = "/ui/";`} {
+		if !strings.Contains(string(notifyJS), token) {
+			t.Errorf("notify.js missing %q", token)
+		}
+	}
+}
+
+func TestUIServiceWorkerWithNode(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available in PATH; skipping JS service worker test")
+	}
+	if out, err := exec.Command(nodeBin, "--check", "assets/sw.js").CombinedOutput(); err != nil {
+		t.Fatalf("node --check assets/sw.js failed: %v\n%s", err, string(out))
+	}
+
+	script := `
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("assets/sw.js", "utf8");
+const ORIGIN = "https://fleet.example";
+
+function load(windows) {
+  const listeners = {};
+  const log = { opened: [], queries: [], skipped: 0 };
+  const self = {
+    location: { origin: ORIGIN },
+    addEventListener: (type, fn) => { listeners[type] = fn; },
+    skipWaiting: () => { log.skipped++; },
+    clients: {
+      matchAll: async query => { log.queries.push(query); return windows; },
+      openWindow: async url => { log.opened.push(url); }
+    }
+  };
+  vm.runInNewContext(source, { self, URL });
+  const click = async data => {
+    let closed = false, waited = null;
+    listeners.notificationclick({
+      notification: { data, close: () => { closed = true; } },
+      waitUntil: p => { waited = p; }
+    });
+    assert.ok(closed, "the notification is closed");
+    await waited;
+    return waited !== null;
+  };
+  return { listeners, log, click };
+}
+
+function client(path, extra) {
+  const c = Object.assign({ url: ORIGIN + path, focused: false, visibilityState: "hidden", focuses: 0, messages: [] }, extra);
+  c.focus = async () => { c.focuses++; if (c.gone) throw new Error("gone"); return c; };
+  c.postMessage = m => { c.messages.push(JSON.parse(JSON.stringify(m))); };
+  return c;
+}
+
+async function main() {
+  {
+    const w = load([]);
+    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["install", "notificationclick"], "no fetch handler");
+    w.listeners.install({});
+    assert.strictEqual(w.log.skipped, 1);
+
+    assert.ok(await w.click({ jobId: 7 }));
+    assert.deepStrictEqual(w.log.opened, [ORIGIN + "/ui/jobs/7"], "no tab: open one");
+    assert.strictEqual(w.log.queries[0].type, "window");
+    assert.strictEqual(w.log.queries[0].includeUncontrolled, true);
+
+    for (const bad of [undefined, null, {}, { jobId: 0 }, { jobId: "7" }, { jobId: "../x" }]) {
+      assert.strictEqual(await w.click(bad), false, JSON.stringify(bad));
+    }
+    assert.strictEqual(w.log.opened.length, 1);
+  }
+
+  // Tab choice: already on the job, then focused, then visible, then any UI tab.
+  const preference = [
+    client("/ui/jobs/7"),
+    client("/ui/jobs", { focused: true }),
+    client("/ui/", { visibilityState: "visible" }),
+    client("/ui/deliveries")
+  ];
+  for (let skip = 0; skip < preference.length; skip++) {
+    const outside = client("/status", { focused: true, visibilityState: "visible" });
+    const tabs = [outside].concat(preference.slice(skip).reverse());
+    // Reversed order shows the choice is by preference; the last case has one tab left.
+    const w = load(tabs);
+    await w.click({ jobId: 7 });
+    const chosen = preference[skip];
+    assert.strictEqual(chosen.focuses, 1, "focus " + chosen.url);
+    assert.deepStrictEqual(chosen.messages, [{ type: "qf-open-job", jobId: 7 }]);
+    assert.strictEqual(tabs.reduce((sum, c) => sum + c.messages.length, 0), 1);
+    assert.strictEqual(outside.focuses, 0, "pages outside the UI are left alone");
+    assert.deepStrictEqual(w.log.opened, []);
+    for (const c of preference) { c.focuses = 0; c.messages.length = 0; }
+  }
+
+  {
+    const gone = client("/ui/", { gone: true });
+    const w = load([gone]);
+    await w.click({ jobId: 3 });
+    assert.deepStrictEqual(gone.messages, []);
+    assert.deepStrictEqual(w.log.opened, [ORIGIN + "/ui/jobs/3"], "unfocusable tab: open one");
+  }
+
+  console.log("ALL_UI_SW_TESTS_PASSED");
+}
+
+main().catch(err => { console.error(err); process.exit(1); });
+`
+	out, err := exec.Command(nodeBin, "-e", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node service worker unit tests failed: %v\n%s", err, string(out))
+	}
+	if !strings.Contains(string(out), "ALL_UI_SW_TESTS_PASSED") {
+		t.Fatalf("unexpected node test output: %s", string(out))
 	}
 }
 
@@ -95,51 +238,161 @@ async function main() {
     }
   }
 
-  // 2. Transition -> notification mapping, deduplication, click
+  // 2. Transition -> notification mapping and deduplication
   {
     const N = fakeNotification("granted");
-    const calls = [];
-    const notify = n.createJobNotifier({
-      getNotification: () => N,
-      focus: () => calls.push("focus"),
-      openJob: id => calls.push("open " + id)
-    });
+    const shown = [];
+    const notify = n.createJobNotifier({ getNotification: () => N, show: async m => { shown.push(m); } });
     for (const quiet of [ev(1, "queued", ""), ev(1, "claimed", "queued"), ev(1, "waiting", ""), ev(1, "draft", ""),
                          ev(1, "done", "done"), ev(0, "done", "claimed"), ev(1, "toString", "claimed"), null, {}]) {
       assert.strictEqual(notify(quiet), null, JSON.stringify(quiet));
     }
-    assert.strictEqual(N.created.length, 0);
+    assert.strictEqual(shown.length, 0);
 
-    notify(ev(1, "done", "claimed", "Build"));
-    notify(ev(2, "failed", "claimed", "Deploy"));
-    notify(ev(3, "cancelled", "waiting"));
-    assert.deepStrictEqual(N.created.map(x => x.title),
+    assert.strictEqual(await notify(ev(1, "done", "claimed", "Build")), true);
+    await notify(ev(2, "failed", "claimed", "Deploy"));
+    await notify(ev(3, "cancelled", "waiting"));
+    assert.deepStrictEqual(shown.map(x => x.title),
       ["ジョブ #1 が完了しました", "ジョブ #2 が失敗しました", "ジョブ #3 がキャンセルされました"]);
-    assert.strictEqual(N.created[1].options.body, "Deploy\n状態: failed（失敗）");
-    assert.strictEqual(N.created[1].options.tag, "qf-job-2:failed");
+    assert.deepStrictEqual(shown[1], {
+      jobID: 2, title: "ジョブ #2 が失敗しました", body: "Deploy\n状態: failed（失敗）", tag: "qf-job-2:failed"
+    });
 
     assert.strictEqual(notify(ev(1, "done", "claimed")), null, "duplicate job_id+status");
-    notify(ev(2, "done", "claimed"));
-    assert.strictEqual(N.created.length, 4, "same job, other status still notifies");
-
-    let prevented = false;
-    N.created[1].onclick({ preventDefault: () => { prevented = true; } });
-    assert.ok(prevented);
-    assert.deepStrictEqual(calls, ["focus", "open 2"]);
-    assert.strictEqual(N.created[1].closed, true);
+    await notify(ev(2, "done", "claimed"));
+    assert.strictEqual(shown.length, 4, "same job, other status still notifies");
 
     N.permission = "denied";
     assert.strictEqual(notify(ev(9, "done", "claimed")), null, "no permission");
     N.permission = "granted";
-    assert.ok(notify(ev(9, "done", "claimed")), "an unshown event is not remembered");
+    assert.ok(await notify(ev(9, "done", "claimed")), "an unshown event is not remembered");
   }
   {
-    let errors = 0;
-    function Throwing() { throw new TypeError("Illegal constructor"); }
-    Throwing.permission = "granted";
-    const notify = n.createJobNotifier({ getNotification: () => Throwing, onError: () => errors++ });
-    assert.strictEqual(notify(ev(1, "done", "claimed")), null);
+    const N = fakeNotification("granted");
+    let errors = 0, calls = 0, fail;
+    const notify = n.createJobNotifier({
+      getNotification: () => N,
+      show: () => { calls++; return new Promise((_res, rej) => { fail = rej; }); },
+      onError: () => errors++
+    });
+    const first = notify(ev(1, "done", "claimed"));
+    assert.strictEqual(notify(ev(1, "done", "claimed")), null, "duplicate while still being shown");
+    fail(new Error("no display"));
+    assert.strictEqual(await first, false);
     assert.strictEqual(errors, 1);
+    assert.ok(notify(ev(1, "done", "claimed")), "a failed notification may be retried");
+    assert.strictEqual(calls, 2);
+  }
+
+  // 2b. Display path: service worker first, new Notification() as the fallback
+  const message = { jobID: 5, title: "T", body: "B", tag: "qf-job-5:done" };
+  function fakeWorker(opts) {
+    const log = { registers: [], shown: [], listeners: {} };
+    const registration = {
+      showNotification: async (title, options) => {
+        if (opts.showFails) throw new TypeError("No active registration");
+        log.shown.push({ title, options });
+      }
+    };
+    const container = {
+      addEventListener: (type, fn) => { log.listeners[type] = fn; },
+      register: async (url, options) => {
+        log.registers.push([url, options.scope]);
+        if (opts.registerFails) throw new Error("SecurityError");
+        return registration;
+      },
+      ready: opts.neverReady ? new Promise(() => {}) : Promise.resolve(opts.registration || registration)
+    };
+    return { container, log, opts };
+  }
+  function presenterFixture(worker, Ctor) {
+    const timers = fakeTimers();
+    const calls = [];
+    const presenter = n.createNotificationPresenter({
+      getServiceWorker: () => worker && worker.container,
+      getNotification: () => Ctor,
+      focus: () => calls.push("focus"),
+      openJob: id => calls.push("open " + id),
+      setTimeout: timers.setTimeout,
+      clearTimeout: timers.clearTimeout
+    });
+    return { presenter, timers, calls };
+  }
+  function illegalConstructor() {
+    function Ctor() { Ctor.attempts++; throw new TypeError("Illegal constructor"); }
+    Ctor.permission = "granted";
+    Ctor.attempts = 0;
+    return Ctor;
+  }
+  {
+    // Android Chrome: the constructor throws, the registration works.
+    const w = fakeWorker({});
+    const Ctor = illegalConstructor();
+    const f = presenterFixture(w, Ctor);
+    await Promise.all([f.presenter.show(message), f.presenter.show(message)]);
+    await f.presenter.show(message);
+    assert.deepStrictEqual(w.log.registers, [["/ui/sw.js", "/ui/"]], "registered once");
+    assert.strictEqual(w.log.shown.length, 3);
+    assert.deepStrictEqual(w.log.shown[0], { title: "T", options: { body: "B", tag: "qf-job-5:done", data: { jobId: 5 } } });
+    assert.strictEqual(Ctor.attempts, 0, "service worker is preferred");
+    assert.deepStrictEqual(f.timers.delays(), []);
+
+    // clicks reach the page as messages from the worker
+    for (const data of [null, "x", {}, { type: "other", jobId: 5 }, { type: "qf-open-job" }, { type: "qf-open-job", jobId: "5" }, { type: "qf-open-job", jobId: -1 }]) {
+      w.log.listeners.message({ data });
+    }
+    assert.deepStrictEqual(f.calls, []);
+    w.log.listeners.message({ data: { type: "qf-open-job", jobId: 5 } });
+    assert.deepStrictEqual(f.calls, ["open 5"]);
+  }
+  for (const [name, worker] of [
+    ["no service worker", null],
+    ["register fails", fakeWorker({ registerFails: true })],
+    ["showNotification fails", fakeWorker({ showFails: true })],
+    ["no showNotification", fakeWorker({ registration: {} })]
+  ]) {
+    const N = fakeNotification("granted");
+    const f = presenterFixture(worker, N);
+    await f.presenter.show(message);
+    assert.strictEqual(N.created.length, 1, name);
+    assert.strictEqual(N.created[0].title, "T", name);
+    assert.deepStrictEqual(N.created[0].options, { body: "B", tag: "qf-job-5:done" }, name);
+    assert.deepStrictEqual(f.timers.delays(), [], name);
+
+    let prevented = false;
+    N.created[0].onclick({ preventDefault: () => { prevented = true; } });
+    assert.ok(prevented, name);
+    assert.deepStrictEqual(f.calls, ["focus", "open 5"], name);
+    assert.strictEqual(N.created[0].closed, true, name);
+
+    await assert.rejects(presenterFixture(worker, illegalConstructor()).presenter.show(message), /Illegal constructor/, name);
+  }
+  {
+    // a failed registration is tried again
+    const w = fakeWorker({ registerFails: true });
+    const N = fakeNotification("granted");
+    const f = presenterFixture(w, N);
+    assert.strictEqual(await f.presenter.register(), null);
+    w.opts.registerFails = false;
+    await f.presenter.show(message);
+    assert.strictEqual(w.log.registers.length, 2);
+    assert.strictEqual(w.log.shown.length, 1);
+    assert.strictEqual(N.created.length, 0);
+  }
+  {
+    // a worker that never activates does not hold the notification back forever
+    const w = fakeWorker({ neverReady: true });
+    const N = fakeNotification("granted");
+    const f = presenterFixture(w, N);
+    const shown = f.presenter.show(message);
+    await flush();
+    assert.strictEqual(N.created.length, 0);
+    await f.timers.fire(10000);
+    await shown;
+    assert.strictEqual(N.created.length, 1);
+    w.container.ready = Promise.resolve({ showNotification: async () => w.log.shown.push("late") });
+    await f.presenter.show(message);
+    assert.deepStrictEqual(w.log.shown, ["late"]);
   }
 
   // 3. Event stream: bearer header only, events, reconnect with backoff, idle abort, fatal status
@@ -222,7 +475,7 @@ async function main() {
   // 4. Toggle: default off, permission on enable, persistence, no backlog notifications
   function controllerFixture(opts) {
     const store = new Map(opts.stored ? [[n.NOTIFY_KEY, opts.stored]] : []);
-    const log = { streams: [], messages: [], views: [], notified: [], listChanged: 0, unauthorized: 0 };
+    const log = { streams: [], messages: [], views: [], notified: [], listChanged: 0, unauthorized: 0, prepared: 0 };
     const N = "notification" in opts ? opts.notification : fakeNotification("default", "granted");
     const env = { secure: true, credentials: true, token: true };
     const controller = n.createNotifyController({
@@ -238,6 +491,7 @@ async function main() {
         log.streams.push(s);
         return s;
       },
+      prepare: () => log.prepared++,
       notify: e => log.notified.push(e),
       onListChanged: () => log.listChanged++,
       onChange: v => log.views.push(v),
@@ -254,12 +508,14 @@ async function main() {
     assert.strictEqual(f.running(), 0, "default off");
     assert.strictEqual(f.view().enabled, false);
     assert.strictEqual(f.N.prompts, 0, "no permission prompt without a click");
+    assert.strictEqual(f.log.prepared, 0, "no service worker while off");
 
     await f.controller.toggle();
     assert.strictEqual(f.N.prompts, 1);
     assert.strictEqual(f.store.get("qf-job-notify"), "on");
     assert.strictEqual(f.running(), 1);
     assert.strictEqual(f.view().enabled, true);
+    assert.ok(f.log.prepared > 0, "enabling readies the display path");
     f.controller.sync();
     assert.strictEqual(f.log.streams.length, 1, "sync does not reconnect");
 

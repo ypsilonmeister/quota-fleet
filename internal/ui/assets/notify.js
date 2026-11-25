@@ -20,6 +20,10 @@
   const MAX_RETRY_MS = 30000;
   // The server sends a heartbeat every 25s; silence this long means a dead connection.
   const IDLE_TIMEOUT_MS = 60000;
+  const SW_URL = "/ui/sw.js";
+  const SW_SCOPE = "/ui/";
+  // A worker that fails to activate leaves serviceWorker.ready pending forever.
+  const SW_READY_TIMEOUT_MS = 10000;
 
   function defaultSetTimeout(fn, ms) {
     return setTimeout(fn, ms);
@@ -177,8 +181,96 @@
     };
   }
 
+  // createNotificationPresenter displays notifications through the service worker
+  // registration and falls back to new Notification() where that is not possible.
+  function createNotificationPresenter(options) {
+    const setTimer = options.setTimeout || defaultSetTimeout;
+    const clearTimer = options.clearTimeout || defaultClearTimeout;
+    const container = options.getServiceWorker();
+    let pending = null;
+
+    if (container) {
+      // sw.js sends this after a notification click focused this tab.
+      container.addEventListener("message", function (ev) {
+        const data = ev.data;
+        if (data && data.type === "qf-open-job" &&
+            Number.isInteger(data.jobId) && data.jobId > 0) {
+          options.openJob(data.jobId);
+        }
+      });
+    }
+
+    // register resolves to the active registration, or null when there is none. Only a
+    // success is remembered, so the next call tries again after a failure.
+    function register() {
+      if (!container) {
+        return Promise.resolve(null);
+      }
+      if (!pending) {
+        pending = new Promise(function (resolve) {
+          const timer = setTimer(function () { finish(null); }, SW_READY_TIMEOUT_MS);
+          function finish(registration) {
+            clearTimer(timer);
+            if (!registration) {
+              pending = null;
+            }
+            resolve(registration);
+          }
+          new Promise(function (done) {
+            done(container.register(SW_URL, { scope: SW_SCOPE }));
+          }).then(function () {
+            return container.ready;
+          }).then(finish, function () {
+            finish(null);
+          });
+        });
+      }
+      return pending;
+    }
+
+    function showFromPage(message) {
+      const NotificationCtor = options.getNotification();
+      const notification = new NotificationCtor(message.title, {
+        body: message.body,
+        tag: message.tag
+      });
+      notification.onclick = function (ev) {
+        if (ev && ev.preventDefault) {
+          ev.preventDefault();
+        }
+        options.focus();
+        options.openJob(message.jobID);
+        notification.close();
+      };
+    }
+
+    // show rejects when neither way can display the notification.
+    async function show(message) {
+      const registration = await register();
+      if (registration && typeof registration.showNotification === "function") {
+        try {
+          await registration.showNotification(message.title, {
+            body: message.body,
+            tag: message.tag,
+            data: { jobId: message.jobID }
+          });
+          return;
+        } catch (_err) {
+          // Fall back to the page notification below.
+        }
+      }
+      showFromPage(message);
+    }
+
+    return {
+      register: register,
+      show: show
+    };
+  }
+
   // createJobNotifier turns job_status events into browser notifications: only
-  // transitions into a terminal status, once per job_id and status.
+  // transitions into a terminal status, once per job_id and status. It returns null for
+  // an ignored event, otherwise a promise of whether the notification was shown.
   function createJobNotifier(options) {
     const notified = new Set();
 
@@ -199,30 +291,25 @@
         return null;
       }
       const text = TERMINAL_TEXT[event.status];
-      let notification;
-      try {
-        notification = new NotificationCtor("ジョブ #" + event.job_id + " が" + text.headline, {
+      // Remembered before showing so that a repeat arriving meanwhile is suppressed.
+      notified.add(key);
+      return new Promise(function (resolve) {
+        resolve(options.show({
+          jobID: event.job_id,
+          title: "ジョブ #" + event.job_id + " が" + text.headline,
           body: (event.title || "(無題)") + "\n状態: " + text.state,
           // Tabs sharing an origin replace each other's notification instead of stacking.
           tag: "qf-job-" + key
-        });
-      } catch (_err) {
-        // Some browsers (e.g. Android Chrome) only allow service worker notifications.
+        }));
+      }).then(function () {
+        return true;
+      }, function () {
+        notified.delete(key);
         if (options.onError) {
           options.onError();
         }
-        return null;
-      }
-      notified.add(key);
-      notification.onclick = function (ev) {
-        if (ev && ev.preventDefault) {
-          ev.preventDefault();
-        }
-        options.focus();
-        options.openJob(event.job_id);
-        notification.close();
-      };
-      return notification;
+        return false;
+      });
     };
   }
 
@@ -300,6 +387,10 @@
     }
 
     function sync() {
+      if (isEnabled() && options.prepare) {
+        // Ready the display path before the first event needs it.
+        options.prepare();
+      }
       const run = isEnabled() && problem === "" && options.hasCredentials();
       if (!run) {
         stop();
@@ -412,6 +503,7 @@
     NOTIFY_KEY: NOTIFY_KEY,
     createSSEParser: createSSEParser,
     createEventStream: createEventStream,
+    createNotificationPresenter: createNotificationPresenter,
     createJobNotifier: createJobNotifier,
     createNotifyController: createNotifyController,
     createRefresher: createRefresher
