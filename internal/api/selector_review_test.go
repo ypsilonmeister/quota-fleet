@@ -181,32 +181,59 @@ func TestSelectorRecordFixFollowsParentProposal(t *testing.T) {
 	}
 }
 
-func TestSelectorJudgeNotRoutedToAgy(t *testing.T) {
+// Round 3, item 4(b): judge is a Selector target and routes to agy Gemini (Neon).
+func TestSelectorJudgeRoutedToAgyNeon(t *testing.T) {
 	now := time.Now()
 	for _, mode := range []string{config.SelectorModeRecord, config.SelectorModeApply} {
 		url := selectorServer(t, mode, healthySnap(now), now)
 		_, job, _ := postJob(t, url, CreateJobRequest{RequestID: "j-" + mode, Title: "t", Role: "judge"})
-		if job.SelectedAgent == "agy" || job.Agent == "agy" {
-			t.Errorf("%s: judge must not select agy Neon: %s/%s", mode, job.SelectedAgent, job.Agent)
+		if job.SelectedAgent != "agy" || job.SelectedModel != "gemini-4-neon-medium" {
+			t.Errorf("%s: judge selection = %s/%s, want agy Neon", mode, job.SelectedAgent, job.SelectedModel)
 		}
-		if !strings.Contains(job.SelectionReason, "Gemini Decision") {
-			t.Errorf("%s: reason should explain judge: %s", mode, job.SelectionReason)
+		if mode == config.SelectorModeApply && job.Agent != "agy" {
+			t.Errorf("apply: judge executes on %s, want agy", job.Agent)
+		}
+		if mode == config.SelectorModeRecord && job.Agent != "codex" {
+			t.Errorf("record: judge executes on %s, want default codex", job.Agent)
 		}
 	}
 }
 
-// Round 2, item 5: an adopted unmeasured pool is never recorded as excluded.
-func TestSelectorAdoptedUnmeasuredNotExcluded(t *testing.T) {
+// Round 3, item 5: all candidates unmeasured -> abstain, register with existing defaults.
+func TestSelectorAbstainsWhenAllUnmeasured(t *testing.T) {
 	now := time.Now()
-	url := selectorGateServer(t, config.SelectorModeApply, config.GateModeEnforce, healthySnap(now), now, map[string]config.PoolConfig{
-		"agy-gemini": {Unmeasured: true, AppliesTo: []config.PoolTarget{{Agent: "agy", ModelFamily: "gemini"}}},
-	})
-	_, job, _ := postJob(t, url, CreateJobRequest{RequestID: "unm2", Title: "t", Role: "review", Weight: "light"})
-	if job.Pool != "agy-gemini" {
-		t.Fatalf("pool = %s", job.Pool)
+	for _, mode := range []string{config.SelectorModeRecord, config.SelectorModeApply} {
+		url := selectorGateServer(t, mode, config.GateModeEnforce, healthySnap(now), now, map[string]config.PoolConfig{
+			"agy-gemini": {Unmeasured: true, AppliesTo: []config.PoolTarget{{Agent: "agy", ModelFamily: "gemini"}}},
+		})
+		status, job, body := postJob(t, url, CreateJobRequest{RequestID: "abs-" + mode, Title: "t", Role: "review", Weight: "light"})
+		if status != http.StatusCreated {
+			t.Fatalf("%s: %d %s", mode, status, body)
+		}
+		if job.Agent != "codex" || job.Pool != "codex" || job.SelectedAgent != "" || job.SelectedPool != "" {
+			t.Errorf("%s: agent=%s pool=%s selected=%s/%s", mode, job.Agent, job.Pool, job.SelectedAgent, job.SelectedPool)
+		}
+		if mode == config.SelectorModeApply && job.SelectionMode != "abstained" {
+			t.Errorf("selection_mode = %s", job.SelectionMode)
+		}
+		if !strings.Contains(job.SelectionReason, "全候補が未測定のため自動選択を見送った") {
+			t.Errorf("%s: reason = %s", mode, job.SelectionReason)
+		}
 	}
-	r := job.SelectionReason
-	if strings.Contains(r, "excluded") || !strings.Contains(r, "adopted although unmeasured") {
-		t.Errorf("reason contradicts selection: %s", r)
+}
+
+// Round 3, item 4(a): exhausted parent pool + healthy other pool -> switch proposal recorded.
+func TestSelectorFixExhaustedParentProposesSwitch(t *testing.T) {
+	now := time.Now()
+	for _, mode := range []string{config.SelectorModeRecord, config.SelectorModeApply} {
+		url := selectorServer(t, mode, healthySnap(now), now)
+		_, parent, _ := postJob(t, url, CreateJobRequest{RequestID: "p-" + mode, Title: "t", Agent: "claude", Model: "claude-sonnet-5-5"})
+		// Re-create server snapshot is fixed; use a second server with claude exhausted.
+		url = selectorServer(t, mode, healthySnap(now, "claude"), now)
+		_, parent, _ = postJob(t, url, CreateJobRequest{RequestID: "p2-" + mode, Title: "t", Agent: "claude", Model: "claude-sonnet-5-5"})
+		_, job, body := postJob(t, url, CreateJobRequest{RequestID: "f-" + mode, Title: "t", ParentID: &parent.ID, Role: "fix"})
+		if !strings.Contains(job.SelectionReason, "proposing a switch to another line") {
+			t.Errorf("%s: no switch proposal: %s %s", mode, job.SelectionReason, body)
+		}
 	}
 }

@@ -32,6 +32,8 @@ const (
 	ModeExplicit = "explicit"
 	ModeRecorded = "recorded"
 	ModeApplied  = "applied"
+	// ModeAbstained: every candidate is unmeasured, so nothing was selected (docs/10 §1).
+	ModeAbstained = "abstained"
 )
 
 // Candidate is one agent/model/pool combination.
@@ -69,12 +71,12 @@ var table = map[string]map[string][]Candidate{
 		WeightHeavy:    {claudeOpus, codexAstra, agyNeonXHigh},
 	},
 	RoleJudge: {
-		// docs/10 §4: judge is the Gemini Decision evaluator, which is not a job and has
-		// no agent/model. A judge job is not routed to a model of its own: it uses the
-		// default candidate (see Select, which says so in the reason).
-		WeightLight:    {codexSol},
-		WeightStandard: {codexSol},
-		WeightHeavy:    {codexSol},
+		// docs/10 §4: the judge role is a Selector target and routes to agy Gemini (Neon).
+		// (The Gemini Decision evaluator's internal processing is a separate matter and is
+		// not a job assignment.)
+		WeightLight:    {agyNeonMedium},
+		WeightStandard: {agyNeonMedium},
+		WeightHeavy:    {agyNeonXHigh},
 	},
 }
 
@@ -138,6 +140,9 @@ type Result struct {
 	Candidate
 	Reason   string
 	Fallback bool // true when usage was unreliable and the deterministic default order was used
+	// Abstain is true when every candidate pool is unmeasured: the Selector selects nothing
+	// (Candidate keeps only explicit fields) and the job is registered with existing defaults.
+	Abstain bool
 }
 
 func (in Input) compatible(c Candidate) bool {
@@ -157,9 +162,6 @@ func (in Input) compatible(c Candidate) bool {
 // keeps the explicit values and only fills the empty ones.
 func Select(in Input) Result {
 	head := fmt.Sprintf("role=%s weight=%s", orDefault(in.Role, RoleImplement+"(default)"), orDefault(in.Weight, WeightStandard+"(default)"))
-	if in.Role == RoleJudge {
-		head += " (docs/10: judge is the Gemini Decision evaluator, not a job; no model is selected for it, default candidate used)"
-	}
 
 	var cands []Candidate
 	for _, c := range Candidates(in.Role, in.Weight) {
@@ -259,24 +261,27 @@ func Select(in Input) Result {
 			Reason:    fmt.Sprintf("%s; FALLBACK to deterministic default order (%s): chose %s/%s on pool %s; %s", head, kind, firstLive.Agent, firstLive.Model, firstLive.Pool, strings.Join(notes, ", ")),
 		}
 	}
-	// No pool is selectable (all exhausted, or all unmeasured / a mix). The candidate that
+	if allUnmeas {
+		// docs/10 §1: unmeasured pools are never candidates. Abstain instead of adopting one.
+		return Result{
+			Candidate: Candidate{Agent: in.Agent, Model: in.Model, Pool: in.Pool},
+			Abstain:   true,
+			Reason:    fmt.Sprintf("%s; all candidates unmeasured, automatic selection skipped (全候補が未測定のため自動選択を見送った): job registered with existing defaults; %s", head, strings.Join(notes, ", ")),
+		}
+	}
+	// No pool is selectable (all exhausted, or exhausted mixed with unmeasured). The candidate that
 	// is kept is NOT recorded as excluded: its note says it was adopted and why.
 	// Exhausted candidates are preferred (the Gate holds them, docs/10 §1); unmeasured pools
 	// are adopted only when nothing else exists (the Gate bypasses them).
 	ki := 0
-	adopt := "adopted as last resort, nothing selectable"
+	adopt := "kept for the Gate to judge (it holds exhausted pools)"
 	if exhaustedIdx >= 0 {
 		ki = exhaustedIdx
-		adopt = "kept for the Gate to judge (it holds exhausted pools)"
-	} else {
-		adopt = "adopted although unmeasured, no measured candidate exists (the Gate bypasses unmeasured pools)"
 	}
 	c := cands[ki]
 	notes[noteOf[ki]] = excluded[noteOf[ki]] + ", " + adopt
 	why := "all candidate pools exhausted"
-	if allUnmeas {
-		why = "all candidate pools unmeasured"
-	} else if anyUnmeas {
+	if anyUnmeas {
 		why = "all candidate pools exhausted or unmeasured"
 	}
 	return Result{

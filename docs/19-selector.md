@@ -37,26 +37,27 @@ title や指示文からの推定はしない（docs/10 §2）。
 | implement | agy Neon Medium / Codex sol | Codex sol / agy Neon Medium / claude sonnet 5.5 | claude opus 5.5 / codex astra / agy Neon xhigh |
 | review | agy Neon Medium | Codex sol / claude sonnet 5.5 | heavy implement と同じ並び（※） |
 | fix / publish / misc | implement と同じ行 | 同左 | 同左 |
-| judge | 既定候補 codex sol（※※） | 同左 | 同左 |
+| judge | agy Neon Medium（※※） | 同左 | agy Neon xhigh |
 
-※※ judge は docs/10 §4 の Gemini Decision（評価器）でありジョブのモデルではない。専用の割り当ては行わず既定候補を使う。
+※※ judge ロールは docs/10 §4 の表どおり Selector の対象で、record／apply とも agy Gemini（Neon）の専用ルーティングを使う。対象外なのは Gemini Decision 評価器の内部処理であって、judge ロールのジョブ割り当てではない。
 ※ 「実装の系統と排他」（docs/10 §4）は親ジョブのモデルを見る S3 の領分で、本実装では未対応。
 agy のモデル ID（`gemini-4-neon-medium` 等）は既存テストの表記に合わせた仮置きで、実機の `agy models` との突き合わせは未了。
 
 ## 5. 選択ロジック
 1. 明示値と矛盾する候補を除く。
 2. 各候補の pool を Gate と同じ `quota.EvaluatePool`（同じ usage スナップショット、同じ stale 判定）で評価する。
-3. 健全な最初の候補を採用。**枯渇**プールは候補から外し、理由に記録する。**未測定／unknown／stale** のプールも候補に入れない（docs/10 §1）。
+3. 健全な最初の候補を採用。**枯渇**プールは候補から外し、理由に記録する。**未測定／unknown／stale** のプールも候補に入れない（docs/10 §1）。全候補が未測定のときは自動割り当てをせず見送る（手順 5 の前の abstain）。
 4. 健全な候補が無く、実測が stale／欠落のとき: 決定論の既定順（表の先頭の非枯渇候補）にフォールバックし、理由に `FALLBACK ... (usage stale or missing)` と書く。
-5. 全候補が枯渇のとき: 表の先頭を残し、Gate の保持に委ねる（理由に記録）。
-6. 明示値が表のどの行とも合わないときは、明示値のまま、足りない項目は空のままにし、その旨を理由に記録する。
+5. 全候補が未測定のとき（abstain）: 自動割り当てをしない。ジョブは既存の既定（codex / gpt-6.2-sol / pool codex、明示値は維持）で登録し、`selection_mode=abstained`、選択記録（`selected_*`）は空、理由に「全候補が未測定のため自動選択を見送った」と残す（docs/10 §1。例外なし）。
+6. 全候補が枯渇（または枯渇と未測定の混在）のとき: 表の先頭を残し、Gate の保持に委ねる（理由に記録）。
+7. 明示値が表のどの行とも合わないときは、明示値のまま、足りない項目は空のままにし、その旨を理由に記録する。
 
 同格候補の評価式（残量×リセットまでの近さ）は docs/10 §7 の未決のままで、現状は表の順。
 
 ## 6. 記録の読み方
 ジョブ（`GET /jobs/{id}`、UI のジョブ詳細）に以下が出る。
 - `selected_agent` / `selected_model` / `selected_pool`: Selector の選択（record では実行値と異なり得る）。
-- `selection_mode`: `explicit` | `recorded` | `applied`（off では空）。
+- `selection_mode`: `explicit` | `recorded` | `applied` | `abstained`（off では空）。
 - `selection_reason`: 役割・重さ、各プールの状態、除外理由、フォールバックの有無、record のときは実行した既定値。
 store には jobs テーブルの列追加マイグレーションで保持する（既存 DB は起動時に追加）。Gate 保持（enforce）されたジョブも、保持時のペイロードに含まれて解放後のジョブへ引き継がれる。
 
@@ -69,6 +70,6 @@ store には jobs テーブルの列追加マイグレーションで保持す�
 - **Gate の入力**: enforce / dry-run とも、Selector 適用後に実際に実行されるプール（apply は選択結果、record は既定 codex）を評価する。apply で全候補が枯渇、record の既定プールが枯渇している場合は Gate が保持（HTTP 202）する。
 - **部分指定の補完**: role/weight の行に適合候補が無い場合は全既知候補（固定順）へ広げて、指定された agent / model / pool と両立するものを探す。agent+model が表の既知ペアなら pool も補完（apply のみ）。表に無い組み合わせは指定値のまま保持し、足りない項目は空のまま理由に記録する。
 - **off**: 従来の API 挙動を完全に維持する（コーディネーター確定）。agent / model 未指定でもエラーにせず従来の既定で受理し、role / weight ヒントは検証も使用もせず無視する（不正値でも 400 にしない）。Issue #21 本文の「未指定はバリデーションエラーになる現行挙動」は誤りで、この確定内容で「要合意」を解消した。record / apply でのみ不正な role / weight は 400。
-- **fix**: record / apply とも、`parent_id` があり agent/model 未指定なら提案先は親ジョブの agent/model に追従する（docs/10 §4「実装者と同一」）。record は提案を記録するだけで実行は既定値のまま。親が取得できない場合は implement 行。実装者のプールが枯渇していても勝手に系統は変えず、Gate の保持に委ねる。**judge**: docs/10 §4 の judge は Gemini Decision（評価器）でありジョブの agent/model ではない。Selector は judge に専用モデルを割り当てず（agy Neon へは振らない）、既定候補（codex / gpt-6.2-sol）を使い、理由にその旨を記録する。
-- **未測定プール**: `unmeasured` のプールは自動選択から除外する。選べる候補が無い（全て枯渇／未測定）ときは、枯渇プールを優先して採用し Gate の保持に委ねる。未測定しか無い場合のみ最後の手段として表の先頭を採用し、理由に「採用（Gate は未測定をバイパス）」と明記する。**採用したプールを「excluded」とは記録しない**。理由には usage 欠落（missing）／stale／unmeasured／exhausted を区別して記録する。
+- **fix**: record / apply とも、`parent_id` があり agent/model 未指定なら提案先は親ジョブの agent/model に追従する（docs/10 §4「実装者と同一」）。record は提案を記録するだけで実行は既定値のまま。親が取得できない場合は implement 行。親のプールが枯渇し他プールが健全な場合は、勝手に系統は変えず（Gate の保持に委ねる）、選択記録の理由に docs/10 §4 の別系統への切替提案（切替先の agent/model）を含める。**judge**: docs/10 の表どおり Selector の対象で、record／apply とも agy Gemini（Neon）へ割り当てる。対象外なのは Decision 評価器の内部処理であり、judge ロールのジョブ割り当てではない。
+- **未測定プール**: `unmeasured` のプールは自動選択から除外する。**全候補が未測定のときは abstain**（自動割り当てをせず、既存の既定で登録、選択記録に「全候補が未測定のため自動選択を見送った」旨と理由を残す。`selection_mode=abstained`）。枯渇と未測定が混在し選べる候補が無いときは、枯渇プールを残して Gate の保持に委ねる。採用したプールを「excluded」とは記録しない。理由には usage 欠落（missing）／stale／unmeasured／exhausted を区別して記録する。
 - **usage スナップショット**: 1 リクエストにつき 1 回だけ読み込み、Selector の選択と Gate の判定で同じスナップショットを使う。

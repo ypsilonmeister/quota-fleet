@@ -692,15 +692,18 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 
 	reqAgent, reqModel := agent, model // what the client sent; record mode executes with these + defaults
 	var parentNote string
+	parentFollowed := false
 	if strings.TrimSpace(req.Role) == selector.RoleFix && req.ParentID != nil && agent == "" && model == "" {
 		// docs/10 §4: fix runs on the same implementer as the parent job.
 		if parent, err := s.store.GetJob(context.Background(), *req.ParentID); err == nil && parent.Agent != "" {
 			agent, model = parent.Agent, parent.Model
 			parentNote = fmt.Sprintf("fix follows parent job #%d (%s/%s); ", parent.ID, agent, model)
+			parentFollowed = true
 		}
 	}
 
 	snap, snapErr := usage.get()
+	evalOpts := quota.EvalOptions{Now: s.nowFn(), StaleAfter: s.quotaStaleAfter, Pools: s.pools}
 	res := selector.Select(selector.Input{
 		Role:        strings.TrimSpace(req.Role),
 		Weight:      strings.TrimSpace(req.Weight),
@@ -709,14 +712,41 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 		Pool:        explicitPool,
 		Usage:       snap,
 		UsageErr:    snapErr,
-		Eval:        quota.EvalOptions{Now: s.nowFn(), StaleAfter: s.quotaStaleAfter, Pools: s.pools},
+		Eval:        evalOpts,
 		ResolvePool: resolve,
 	})
+	if parentFollowed && !res.Abstain && snap != nil {
+		// docs/10 §4: when the parent's pool is exhausted and another pool is healthy,
+		// propose switching to another line (the proposal is recorded only).
+		if ev := quota.EvaluatePool(res.Pool, snap, evalOpts); ev.Status == quota.PoolExhausted {
+			alt := selector.Select(selector.Input{Role: selector.RoleImplement, Weight: strings.TrimSpace(req.Weight), Pool: "", Usage: snap, UsageErr: snapErr, Eval: evalOpts, ResolvePool: resolve})
+			if !alt.Abstain && !alt.Fallback && alt.Pool != "" && alt.Pool != res.Pool {
+				parentNote += fmt.Sprintf("parent pool %s is exhausted and pool %s is healthy: proposing a switch to another line %s/%s (docs/10 §4); ", res.Pool, alt.Pool, alt.Agent, alt.Model)
+			}
+		}
+	}
 	params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Agent, res.Model, res.Pool
 	params.SelectionReason = parentNote + res.Reason
 
-	switch s.selectorMode {
-	case config.SelectorModeApply:
+	if res.Abstain {
+		// Every candidate is unmeasured (docs/10 §1): nothing is assigned automatically.
+		// The job is registered with the existing defaults, as in record mode.
+		params.SelectionMode = selector.ModeAbstained
+	}
+	switch {
+	case res.Abstain:
+		def := selector.Defaults(reqAgent, reqModel, explicitPool, resolve)
+		if reqAgent == "" {
+			params.Agent = def.Agent
+		}
+		if reqModel == "" {
+			params.Model = def.Model
+		}
+		if explicitPool == "" {
+			params.Pool = def.Pool
+		}
+		params.SelectionReason += fmt.Sprintf("; registered with defaults %s/%s on pool %s", params.Agent, params.Model, params.Pool)
+	case s.selectorMode == config.SelectorModeApply:
 		params.SelectionMode = selector.ModeApplied
 		if strings.TrimSpace(req.Agent) == "" {
 			params.Agent = res.Agent
