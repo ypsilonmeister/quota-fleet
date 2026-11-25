@@ -436,6 +436,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		SessionID:          req.SessionID,
 		CreatedBy:          createdBy,
 		SupersedeKey:       req.SupersedeKey,
+		SupersedeScope:     req.SupersedeScope,
 		SupersedeOwnOnly:   supersedeOwnOnly,
 	}
 

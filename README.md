@@ -144,7 +144,7 @@ the missing control plane around them.
 - `docs/14-job-notifications.md` — job completion browser notifications (SSE)
 - `docs/15-pwa.md` — installable web UI (manifest, icons, app shell cache)
 - `docs/17-i18n.md` — web UI internationalization (dictionary, how to add strings)
-- `docs/20-held-supersede.md` — superseding older unstarted jobs with `supersede_key`
+- `docs/20-held-supersede.md` — superseding older unstarted jobs with `supersede_scope` and `supersede_key`
 
 ## License
 

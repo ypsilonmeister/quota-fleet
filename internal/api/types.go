@@ -41,6 +41,7 @@ type JobDTO struct {
 	SelectionReason string `json:"selection_reason,omitempty"`
 	SelectionMode   string `json:"selection_mode,omitempty"`
 	SupersedeKey       string     `json:"supersede_key,omitempty"`
+	SupersedeScope     string     `json:"supersede_scope,omitempty"`
 	// SupersedeDTO is filled by POST /jobs and GET /jobs/{id}, not by job lists.
 	SupersedeDTO
 }
@@ -108,6 +109,7 @@ func toJobDTO(j *store.Job) *JobDTO {
 		SessionID:          j.SessionID,
 		CreatedBy:          j.CreatedBy,
 		SupersedeKey:       j.SupersedeKey,
+		SupersedeScope:     j.SupersedeScope,
 	}
 	if len(j.AltPools) > 0 {
 		dto.AltPools = append([]string(nil), j.AltPools...)
@@ -154,6 +156,7 @@ type CreateJobRequest struct {
 	AltPools           []string `json:"alt_pools"`
 	SessionID          string   `json:"session_id"`
 	SupersedeKey       string   `json:"supersede_key"`
+	SupersedeScope     string   `json:"supersede_scope"`
 	// Selector hints (docs/19). Optional.
 	Role   string `json:"role"`
 	Weight string `json:"weight"`
@@ -297,6 +300,7 @@ type HeldJobDTO struct {
 	UpdatedAt       time.Time             `json:"updated_at"`
 	CancelReason    string                `json:"cancel_reason,omitempty"`
 	SupersedeKey    string                `json:"supersede_key,omitempty"`
+	SupersedeScope  string                `json:"supersede_scope,omitempty"`
 	ParentID        *int64                `json:"parent_id,omitempty"`
 	// ParentStatus, AgeSeconds and SupersedeDTO are filled by GET /gate/held and by the
 	// 202 response of POST /jobs. ParentStatus is "missing" when the parent does not exist.
@@ -327,6 +331,7 @@ func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
 		UpdatedAt:       h.UpdatedAt,
 		CancelReason:    h.CancelReason,
 		SupersedeKey:    h.Payload.SupersedeKey,
+		SupersedeScope:  h.Payload.SupersedeScope,
 		ParentID:        h.Payload.ParentID,
 	}
 	if len(h.AltPools) > 0 {

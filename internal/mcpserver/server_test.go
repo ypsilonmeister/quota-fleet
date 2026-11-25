@@ -320,6 +320,7 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 			"pool":                "claude",
 			"alt_pools":           []string{"codex"},
 			"supersede_key":       "publish-1",
+			"supersede_scope":     "pr-1",
 			"worktree_spec": map[string]any{
 				"repo_path": "/repos/qf",
 				"base_ref":  "impl/phase1-core",
@@ -342,8 +343,8 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 	if err := json.Unmarshal(lr.Body, &sentBody); err != nil {
 		t.Fatalf("unmarshal create_job body: %v", err)
 	}
-	if sentBody["supersede_key"] != "publish-1" {
-		t.Errorf("create_job did not send supersede_key: %+v", sentBody)
+	if sentBody["supersede_key"] != "publish-1" || sentBody["supersede_scope"] != "pr-1" {
+		t.Errorf("create_job did not send supersede_scope and supersede_key: %+v", sentBody)
 	}
 	if sentBody["request_id"] != "req-1" || sentBody["title"] != "Build MCP" {
 		t.Errorf("unexpected create_job body: %+v", sentBody)

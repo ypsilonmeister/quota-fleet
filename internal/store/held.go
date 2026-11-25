@@ -28,8 +28,8 @@ const (
 //   - If a held_jobs row already exists with status='released', returns ErrJobAlreadyExists.
 //   - If a held_jobs row already exists with status='cancelled', returns (existing, false, ErrConflict).
 //
-// A new hold with a supersede_key cancels older unstarted registrations with that key in
-// the same transaction (docs/20). It then requires an existing, non-terminal parent.
+// A new hold with a supersede_scope and supersede_key cancels older unstarted registrations
+// with both in the same transaction (docs/20). It then requires an existing, non-terminal parent.
 func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, error) {
 	reqID := strings.TrimSpace(p.RequestID)
 	if reqID == "" {
@@ -44,6 +44,7 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 
 	payload := p.Payload
 	payload.RequestID = reqID
+	payload.SupersedeScope = strings.TrimSpace(payload.SupersedeScope)
 	payload.SupersedeKey = strings.TrimSpace(payload.SupersedeKey)
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -93,12 +94,15 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 		heldID := "held-" + suffix
 		nowStr := formatTime(time.Now().UTC())
 
+		if err := checkSupersedePair(payload.SupersedeScope, payload.SupersedeKey); err != nil {
+			return err
+		}
 		if key := payload.SupersedeKey; key != "" {
 			if err := checkKeyedDraft(key, payload); err != nil {
 				return err
 			}
 			superseded, err := registerSupersedeTx(ctx, conn, changes, supersedeRegistration{
-				key: key, requestID: reqID,
+				scope: payload.SupersedeScope, key: key, requestID: reqID,
 				owner: strings.TrimSpace(payload.CreatedBy), ownOnly: payload.SupersedeOwnOnly,
 			}, nowStr)
 			if err != nil {

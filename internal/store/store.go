@@ -109,6 +109,10 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs.supersede_key: %w", err)
 	}
+	if err := ensureSupersedeScopeColumn(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs.supersede_scope: %w", err)
+	}
 	if err := ensureSelectionColumns(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs selection columns: %w", err)
@@ -333,19 +337,27 @@ func (s *Store) createJobTx(ctx context.Context, conn *sql.Conn, changes *[]stat
 	now := time.Now().UTC()
 	nowStr := formatTime(now)
 
+	if err := checkCancelledHoldTx(ctx, conn, p); err != nil {
+		return nil, false, err
+	}
+
 	// Supersede before looking at the parent, so a parent cancelled by this registration
 	// rejects it (and rolls the cancellations back).
+	supersedeScope := strings.TrimSpace(p.SupersedeScope)
 	supersedeKey := strings.TrimSpace(p.SupersedeKey)
-	if supersedeKey == "" {
+	if supersedeScope == "" && supersedeKey == "" {
 		// A request_id registered by a keyed hold stays registered when it is sent again
-		// without the key, so superseded work cannot come back that way.
+		// without the scope and key, so superseded work cannot come back that way.
 		reg, err := querySupersedeRegistration(ctx, conn, p.RequestID)
 		switch {
 		case err == nil:
-			supersedeKey = reg.key
+			supersedeScope, supersedeKey = reg.scope, reg.key
 		case !errors.Is(err, ErrNotFound):
 			return nil, false, err
 		}
+	}
+	if err := checkSupersedePair(supersedeScope, supersedeKey); err != nil {
+		return nil, false, err
 	}
 	if err := checkKeyedDraft(supersedeKey, p); err != nil {
 		return nil, false, err
@@ -353,7 +365,7 @@ func (s *Store) createJobTx(ctx context.Context, conn *sql.Conn, changes *[]stat
 	var superseded map[int64]bool
 	if supersedeKey != "" {
 		superseded, err = registerSupersedeTx(ctx, conn, changes, supersedeRegistration{
-			key: supersedeKey, requestID: p.RequestID,
+			scope: supersedeScope, key: supersedeKey, requestID: p.RequestID,
 			owner: strings.TrimSpace(p.CreatedBy), ownOnly: p.SupersedeOwnOnly,
 		}, nowStr)
 		if err != nil {
@@ -404,19 +416,19 @@ func (s *Store) createJobTx(ctx context.Context, conn *sql.Conn, changes *[]stat
 			request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 			instructions, acceptance_criteria, parent_id,
 			claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-			created_at, updated_at, model, pool, alt_pools, session_id, created_by, supersede_key,
+			created_at, updated_at, model, pool, alt_pools, session_id, created_by, supersede_key, supersede_scope,
 			selected_agent, selected_model, selected_pool, selection_reason, selection_mode
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?,
 			'', NULL, 0, '', '', NULL,
-			?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?
 		)
 	`,
 		p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
 		p.Instructions, p.AcceptanceCriteria, parentArg,
-		nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy), supersedeKey,
+		nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy), supersedeKey, supersedeScope,
 		p.SelectedAgent, p.SelectedModel, p.SelectedPool, p.SelectionReason, p.SelectionMode,
 	)
 	if err != nil {
@@ -1611,7 +1623,7 @@ const jobColumns = `
 	id, request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 	instructions, acceptance_criteria, parent_id,
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-	created_at, updated_at, model, pool, alt_pools, session_id, created_by, supersede_key,
+	created_at, updated_at, model, pool, alt_pools, session_id, created_by, supersede_key, supersede_scope,
 	selected_agent, selected_model, selected_pool, selection_reason, selection_mode
 `
 
@@ -1650,7 +1662,7 @@ func scanJob(s rowScanner) (*Job, error) {
 		&j.Agent, &j.Host, &j.Workdir, &worktreeSpecStr, &j.TargetRef,
 		&j.Instructions, &j.AcceptanceCriteria, &parentID,
 		&j.ClaimedBy, &claimedAt, &j.Attempts, &j.ResultText, &j.LastError, &deliveredAt,
-		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy, &j.SupersedeKey,
+		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy, &j.SupersedeKey, &j.SupersedeScope,
 		&j.SelectedAgent, &j.SelectedModel, &j.SelectedPool, &j.SelectionReason, &j.SelectionMode,
 	)
 	if err != nil {
@@ -1965,6 +1977,10 @@ func ensureCreatedByColumn(ctx context.Context, db *sql.DB) error {
 
 func ensureSupersedeKeyColumn(ctx context.Context, db *sql.DB) error {
 	return ensureJobsColumn(ctx, db, "supersede_key", `ALTER TABLE jobs ADD COLUMN supersede_key TEXT NOT NULL DEFAULT ''`)
+}
+
+func ensureSupersedeScopeColumn(ctx context.Context, db *sql.DB) error {
+	return ensureJobsColumn(ctx, db, "supersede_scope", `ALTER TABLE jobs ADD COLUMN supersede_scope TEXT NOT NULL DEFAULT ''`)
 }
 
 // ensureSelectionColumns adds the Selector record columns (docs/19) to pre-existing databases.

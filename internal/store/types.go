@@ -91,6 +91,7 @@ type Job struct {
 	SessionID          string
 	CreatedBy          string
 	SupersedeKey       string
+	SupersedeScope     string
 
 	// Selector record (docs/19). Empty when the Selector did not run (mode off).
 	SelectedAgent   string
@@ -118,9 +119,10 @@ type CreateJobParams struct {
 	AltPools           []string      `json:"alt_pools,omitempty"`
 	SessionID          string        `json:"session_id,omitempty"`
 	CreatedBy          string        `json:"created_by,omitempty"`
-	// SupersedeKey, when non-empty, cancels older unstarted registrations with the same
-	// key (docs/20).
-	SupersedeKey string `json:"supersede_key,omitempty"`
+	// SupersedeScope names the target and SupersedeKey the role. They are set together;
+	// registering cancels older unstarted registrations with both (docs/20).
+	SupersedeScope string `json:"supersede_scope,omitempty"`
+	SupersedeKey   string `json:"supersede_key,omitempty"`
 	// SupersedeOwnOnly limits that to registrations with the same CreatedBy, for a caller
 	// that may register jobs but not cancel them. It is recorded with the registration,
 	// not in a held payload.

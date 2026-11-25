@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     selected_pool TEXT NOT NULL DEFAULT '',
     selection_reason TEXT NOT NULL DEFAULT '',
     selection_mode TEXT NOT NULL DEFAULT '',
-    supersede_key TEXT NOT NULL DEFAULT ''
+    supersede_key TEXT NOT NULL DEFAULT '',
+    supersede_scope TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id);
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS held_jobs (
 
 CREATE TABLE IF NOT EXISTS supersede_registrations (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    supersede_scope TEXT NOT NULL,
     supersede_key TEXT NOT NULL,
     request_id TEXT NOT NULL UNIQUE,
     held_id TEXT NOT NULL DEFAULT '',

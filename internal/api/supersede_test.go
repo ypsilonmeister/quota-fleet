@@ -40,13 +40,13 @@ func TestSupersedeKeyOverHTTP(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			_, _, ts := newTestServer(t, Options{InstanceID: "test-supersede", GateMode: mode})
 
-			old := registerJob(t, ts.URL, CreateJobRequest{RequestID: "r1", Title: "publish", SupersedeKey: "pub"}, 201)
+			old := registerJob(t, ts.URL, CreateJobRequest{RequestID: "r1", Title: "publish", SupersedeScope: "pr1", SupersedeKey: "pub"}, 201)
 			child := registerJob(t, ts.URL, CreateJobRequest{RequestID: "r1-child", Title: "notify", ParentID: &old.Job.ID}, 201)
-			next := registerJob(t, ts.URL, CreateJobRequest{RequestID: "r2", Title: "publish", SupersedeKey: "pub"}, 201)
+			next := registerJob(t, ts.URL, CreateJobRequest{RequestID: "r2", Title: "publish", SupersedeScope: "pr1", SupersedeKey: "pub"}, 201)
 
 			check := func(j *JobDTO) {
 				t.Helper()
-				if j.SupersedeKey != "pub" || !slices.Equal(j.SupersededJobIDs, []int64{old.Job.ID}) ||
+				if j.SupersedeScope != "pr1" || j.SupersedeKey != "pub" || !slices.Equal(j.SupersededJobIDs, []int64{old.Job.ID}) ||
 					j.SupersededBy != nil {
 					t.Fatalf("new job = %+v supersede = %+v", j, j.SupersedeDTO)
 				}
@@ -55,7 +55,7 @@ func TestSupersedeKeyOverHTTP(t *testing.T) {
 			got := getSupersedeJob(t, ts.URL, next.Job.ID)
 			check(&got)
 			// An idempotent replay reports the same relations.
-			check(registerJob(t, ts.URL, CreateJobRequest{RequestID: "r2", Title: "publish", SupersedeKey: "pub"}, 200).Job)
+			check(registerJob(t, ts.URL, CreateJobRequest{RequestID: "r2", Title: "publish", SupersedeScope: "pr1", SupersedeKey: "pub"}, 200).Job)
 
 			gotOld := getSupersedeJob(t, ts.URL, old.Job.ID)
 			if gotOld.Status != "cancelled" || !strings.HasPrefix(gotOld.LastError, "superseded:") ||
@@ -70,7 +70,7 @@ func TestSupersedeKeyOverHTTP(t *testing.T) {
 
 			// Depending on the work being replaced is a client error.
 			resp := doJSON(t, http.MethodPost, ts.URL+"/jobs", "",
-				CreateJobRequest{RequestID: "r3", Title: "publish", SupersedeKey: "pub", ParentID: &next.Job.ID})
+				CreateJobRequest{RequestID: "r3", Title: "publish", SupersedeScope: "pr1", SupersedeKey: "pub", ParentID: &next.Job.ID})
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("self-superseding chain status = %d, want 400", resp.StatusCode)
 			}
@@ -106,7 +106,7 @@ func TestSupersedeRequiresOperateForOthersJobs(t *testing.T) {
 			register := func(token, requestID string) {
 				t.Helper()
 				resp := doJSON(t, http.MethodPost, ts.URL+"/jobs", token,
-					CreateJobRequest{RequestID: requestID, Title: "publish", SupersedeKey: "pub", Pool: "claude"})
+					CreateJobRequest{RequestID: requestID, Title: "publish", SupersedeScope: "pr1", SupersedeKey: "pub", Pool: "claude"})
 				defer resp.Body.Close()
 				if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
 					body, _ := io.ReadAll(resp.Body)
@@ -177,7 +177,7 @@ func TestSupersedeKeyedDraftAndUnkeyedReplayOverHTTP(t *testing.T) {
 			// is switched off.
 			for _, id := range []string{"old", "new"} {
 				if _, _, err := st.HoldJob(ctx, store.HoldJobParams{RequestID: id, Pool: "claude",
-					Payload: store.CreateJobParams{RequestID: id, Title: "publish", Pool: "claude", SupersedeKey: "pub"}}); err != nil {
+					Payload: store.CreateJobParams{RequestID: id, Title: "publish", Pool: "claude", SupersedeScope: "pr1", SupersedeKey: "pub"}}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -187,12 +187,130 @@ func TestSupersedeKeyedDraftAndUnkeyedReplayOverHTTP(t *testing.T) {
 			if _, err := st.GetJobByRequestID(ctx, "old"); !errors.Is(err, store.ErrNotFound) {
 				t.Errorf("job created for superseded hold: %v", err)
 			}
-			if got := post(CreateJobRequest{RequestID: "draft", SupersedeKey: "pub", Draft: true}); got != http.StatusBadRequest {
+			if got := post(CreateJobRequest{RequestID: "draft", SupersedeScope: "pr1", SupersedeKey: "pub", Draft: true}); got != http.StatusBadRequest {
 				t.Errorf("keyed draft = %d, want 400", got)
 			}
 			held, err := st.GetHeldJobByRequestID(ctx, "new")
 			if err != nil || held.Status != store.HeldStatusHeld {
 				t.Errorf("new held = %+v, %v", held, err)
+			}
+		})
+	}
+}
+
+// The same key in different scopes is different work; a key alone is rejected.
+func TestSupersedeScopeOverHTTP(t *testing.T) {
+	now := time.Now().UTC()
+	reset := now.Add(24 * time.Hour)
+	zero := 0
+	for _, mode := range []string{config.GateModeOff, config.GateModeDryRun, config.GateModeEnforce} {
+		for _, pool := range []string{"claude", "codex"} { // codex is healthy, claude is exhausted
+			t.Run(mode+"/"+pool, func(t *testing.T) {
+				_, st, ts := newTestServer(t, Options{
+					InstanceID: "test-supersede-scope",
+					GateMode:   mode,
+					Pools: map[string]config.PoolConfig{
+						"claude": {Provider: "anthropic"}, "codex": {Provider: "openai"},
+					},
+					SnapshotLoader: func() (*quota.Snapshot, error) {
+						full := 90
+						return &quota.Snapshot{MeasuredAt: now, Pools: map[string]quota.PoolSnapshot{
+							"claude": {WeeklyRemainingPercent: 0, WeeklyResetAt: &reset, ShortRemainingPercent: &zero, MeasuredAt: now},
+							"codex":  {WeeklyRemainingPercent: 90, WeeklyResetAt: &reset, ShortRemainingPercent: &full, MeasuredAt: now},
+						}}, nil
+					},
+				})
+				post := func(requestID, scope, key string) int {
+					t.Helper()
+					resp := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
+						RequestID: requestID, Title: "publish", Pool: pool, SupersedeScope: scope, SupersedeKey: key,
+					})
+					_ = resp.Body.Close()
+					return resp.StatusCode
+				}
+				live := func(requestID string) bool {
+					t.Helper()
+					if job, err := st.GetJobByRequestID(context.Background(), requestID); err == nil {
+						return job.Status == store.StatusQueued
+					}
+					held, err := st.GetHeldJobByRequestID(context.Background(), requestID)
+					if err != nil {
+						t.Fatalf("%s: %v", requestID, err)
+					}
+					return held.Status == store.HeldStatusHeld
+				}
+				accepted := http.StatusCreated
+				if mode == config.GateModeEnforce && pool == "claude" {
+					accepted = http.StatusAccepted
+				}
+				for _, r := range [][2]string{{"a1", "pr1"}, {"b1", "pr2"}} {
+					if got := post(r[0], r[1], "publish"); got != accepted {
+						t.Fatalf("%s = %d, want %d", r[0], got, accepted)
+					}
+				}
+				if got := post("no-scope", "", "publish"); got != http.StatusBadRequest {
+					t.Errorf("key without scope = %d, want 400", got)
+				}
+				if got := post("no-key", "pr1", ""); got != http.StatusBadRequest {
+					t.Errorf("scope without key = %d, want 400", got)
+				}
+				if !live("a1") || !live("b1") {
+					t.Fatalf("a1 live=%v b1 live=%v, want both", live("a1"), live("b1"))
+				}
+				if got := post("a2", "pr1", "publish"); got != accepted {
+					t.Fatalf("a2 = %d", got)
+				}
+				if live("a1") || !live("b1") || !live("a2") {
+					t.Errorf("after a2: a1=%v b1=%v a2=%v, want false true true", live("a1"), live("b1"), live("a2"))
+				}
+			})
+		}
+	}
+}
+
+// A hold cancelled by hand answers 409 to a replay in every gate mode.
+func TestCancelledHeldReplayOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	for _, mode := range []string{config.GateModeOff, config.GateModeDryRun, config.GateModeEnforce} {
+		t.Run(mode, func(t *testing.T) {
+			_, st, ts := newTestServer(t, Options{InstanceID: "test-cancelled-replay", GateMode: mode})
+			status := func(method, path string, body any) int {
+				t.Helper()
+				resp := doJSON(t, method, ts.URL+path, "", body)
+				_ = resp.Body.Close()
+				return resp.StatusCode
+			}
+			hold := func(requestID, scope, key string) {
+				t.Helper()
+				held, _, err := st.HoldJob(ctx, store.HoldJobParams{RequestID: requestID, Pool: "claude",
+					Payload: store.CreateJobParams{RequestID: requestID, Title: "publish", SupersedeScope: scope, SupersedeKey: key}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := status(http.MethodDelete, "/gate/held/"+held.ID, nil); got != http.StatusOK {
+					t.Fatalf("cancel = %d", got)
+				}
+			}
+			hold("keyed", "pr1", "publish")
+			for _, req := range []CreateJobRequest{
+				{RequestID: "keyed", Title: "publish"},
+				{RequestID: "keyed", Title: "publish", SupersedeScope: "pr1", SupersedeKey: "publish"},
+			} {
+				if got := status(http.MethodPost, "/jobs", req); got != http.StatusConflict {
+					t.Errorf("replay key=%q = %d, want 409", req.SupersedeKey, got)
+				}
+			}
+			if _, err := st.GetJobByRequestID(ctx, "keyed"); !errors.Is(err, store.ErrNotFound) {
+				t.Errorf("job created for cancelled hold: %v", err)
+			}
+			// Unkeyed holds behave as before: only enforce refuses the replay.
+			hold("plain", "", "")
+			want := http.StatusCreated
+			if mode == config.GateModeEnforce {
+				want = http.StatusConflict
+			}
+			if got := status(http.MethodPost, "/jobs", CreateJobRequest{RequestID: "plain", Title: "publish"}); got != want {
+				t.Errorf("unkeyed replay = %d, want %d", got, want)
 			}
 		})
 	}
@@ -243,8 +361,12 @@ func TestSupersedeHeldListOverHTTP(t *testing.T) {
 
 	hold := func(requestID, key string, parentID *int64) HoldJobResponse {
 		t.Helper()
+		scope := ""
+		if key != "" {
+			scope = "pr1"
+		}
 		resp := doJSON(t, http.MethodPost, ts.URL+"/jobs", "", CreateJobRequest{
-			RequestID: requestID, Title: "publish", Pool: "claude", SupersedeKey: key, ParentID: parentID,
+			RequestID: requestID, Title: "publish", Pool: "claude", SupersedeScope: scope, SupersedeKey: key, ParentID: parentID,
 		})
 		if resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("hold %s status = %d, want 202", requestID, resp.StatusCode)
@@ -259,7 +381,7 @@ func TestSupersedeHeldListOverHTTP(t *testing.T) {
 		t.Fatalf("202 response = %+v supersede = %+v", second.Held, second.Held.SupersedeDTO)
 	}
 	replay := doJSON(t, http.MethodPost, ts.URL+"/jobs", "",
-		CreateJobRequest{RequestID: "r1", Title: "publish", Pool: "claude", SupersedeKey: "pub"})
+		CreateJobRequest{RequestID: "r1", Title: "publish", Pool: "claude", SupersedeScope: "pr1", SupersedeKey: "pub"})
 	if replay.StatusCode != http.StatusConflict {
 		t.Fatalf("replay superseded hold status = %d, want 409", replay.StatusCode)
 	}
@@ -278,7 +400,7 @@ func TestSupersedeHeldListOverHTTP(t *testing.T) {
 		t.Fatalf("active = %+v", active)
 	}
 	got := active[0]
-	if got.SupersedeKey != "pub" || got.ParentID == nil || *got.ParentID != parent.Job.ID ||
+	if got.SupersedeScope != "pr1" || got.SupersedeKey != "pub" || got.ParentID == nil || *got.ParentID != parent.Job.ID ||
 		got.ParentStatus != "queued" || got.CreatedAt.IsZero() ||
 		got.AgeSeconds == nil || *got.AgeSeconds < 89*60 || *got.AgeSeconds > 91*60 {
 		t.Fatalf("held entry = %+v", got)

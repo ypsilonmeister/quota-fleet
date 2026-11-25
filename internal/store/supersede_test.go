@@ -12,7 +12,13 @@ import (
 )
 
 func keyedParams(requestID, key string, parent *int64) CreateJobParams {
-	return CreateJobParams{RequestID: requestID, Title: "publish", SupersedeKey: key, ParentID: parent}
+	return scopedParams(requestID, testScope, key, parent)
+}
+
+const testScope = "pr1"
+
+func scopedParams(requestID, scope, key string, parent *int64) CreateJobParams {
+	return CreateJobParams{RequestID: requestID, Title: "publish", SupersedeScope: scope, SupersedeKey: key, ParentID: parent}
 }
 
 func mustCreate(t *testing.T, st *Store, p CreateJobParams) *Job {
@@ -203,10 +209,10 @@ func TestSupersedeKeyScopeAndUnkeyedBehavior(t *testing.T) {
 	other := mustCreate(t, st, keyedParams("other", "other-key", nil))
 	upper := mustCreate(t, st, keyedParams("upper", "K", nil))
 	keyed := mustCreate(t, st, keyedParams("keyed", "k", nil))
-	blank := mustCreate(t, st, keyedParams("blank", "   ", nil))
+	blank := mustCreate(t, st, scopedParams("blank", "  ", "   ", nil))
 	plain2 := mustCreate(t, st, CreateJobParams{RequestID: "plain2", Title: "publish"})
-	// Surrounding space is not part of a key.
-	spaced := mustCreate(t, st, keyedParams("spaced", " k ", nil))
+	// Surrounding space is not part of a scope or a key.
+	spaced := mustCreate(t, st, scopedParams("spaced", " pr1 ", " k ", nil))
 
 	for _, id := range []int64{plain1.ID, plain2.ID, other.ID, upper.ID, blank.ID, spaced.ID} {
 		if got := mustJob(t, st, id); got.Status != StatusQueued || got.LastError != "" {
@@ -216,8 +222,8 @@ func TestSupersedeKeyScopeAndUnkeyedBehavior(t *testing.T) {
 	if got := mustJob(t, st, keyed.ID); got.Status != StatusCancelled {
 		t.Errorf("keyed status = %s, want cancelled", got.Status)
 	}
-	if blank.SupersedeKey != "" || spaced.SupersedeKey != "k" {
-		t.Errorf("keys = %q, %q", blank.SupersedeKey, spaced.SupersedeKey)
+	if blank.SupersedeKey != "" || blank.SupersedeScope != "" || spaced.SupersedeKey != "k" || spaced.SupersedeScope != testScope {
+		t.Errorf("blank = %q/%q, spaced = %q/%q", blank.SupersedeScope, blank.SupersedeKey, spaced.SupersedeScope, spaced.SupersedeKey)
 	}
 	if got := mustHeld(t, st, plainHeld.ID); got.Status != HeldStatusHeld || got.CancelReason != "" {
 		t.Errorf("unkeyed held = %+v", got)
@@ -358,27 +364,120 @@ func TestSupersedeDoesNotCascadeAndRejectsOwnAncestor(t *testing.T) {
 	}
 }
 
-// Independent chains whose keys name their target do not touch each other, either when
-// registering or when releasing.
-func TestSupersedeTargetQualifiedKeysKeepChainsApart(t *testing.T) {
+// Independent chains that use the same key stay apart as long as their scopes differ, when
+// registering and when releasing. The next round of one target replaces only its own.
+func TestSupersedeScopeKeepsChainsApart(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 
 	parentA := mustCreate(t, st, CreateJobParams{RequestID: "pa", Title: "review A"})
 	parentB := mustCreate(t, st, CreateJobParams{RequestID: "pb", Title: "review B"})
-	heldA := mustHold(t, st, keyedParams("a1", "pr1:publish", &parentA.ID))
-	heldB := mustHold(t, st, keyedParams("b1", "pr2:publish", &parentB.ID))
+	jobA := mustCreate(t, st, scopedParams("a1", "pr1", "publish", &parentA.ID))
+	jobB := mustCreate(t, st, scopedParams("b1", "pr2", "publish", &parentB.ID))
+	for _, id := range []int64{jobA.ID, jobB.ID} {
+		if got := mustJob(t, st, id); got.Status != StatusWaiting {
+			t.Fatalf("job %s = %s, want waiting", got.RequestID, got.Status)
+		}
+	}
 
+	heldA := mustHold(t, st, scopedParams("a-held", "pr1", "notify", nil))
+	heldB := mustHold(t, st, scopedParams("b-held", "pr2", "notify", nil))
 	res, err := st.ReleaseKeyedHeld(ctx, heldA.ID, "claude")
-	if err != nil || res.Job == nil {
+	if err != nil || res.Job == nil || res.SupersededReason != "" {
 		t.Fatalf("release A = %+v, %v", res, err)
 	}
 	if got := mustHeld(t, st, heldB.ID); got.Status != HeldStatusHeld {
 		t.Fatalf("B held = %s", got.Status)
 	}
-	mustCreate(t, st, keyedParams("b2", "pr2:publish", &parentB.ID))
-	if got := mustJob(t, st, res.Job.ID); got.Status != StatusWaiting {
-		t.Fatalf("A job = %s after a registration for B", got.Status)
+
+	// A new round has a new parent; the scope is what ties it to the old one.
+	roundTwo := mustCreate(t, st, CreateJobParams{RequestID: "pa2", Title: "review A r2"})
+	next := mustCreate(t, st, scopedParams("a2", "pr1", "publish", &roundTwo.ID))
+	if got := mustJobInfo(t, st, next.ID).Superseded; !slices.Equal(got, []SupersedeRef{{JobID: jobA.ID}}) {
+		t.Fatalf("superseded = %+v, want only job %d", got, jobA.ID)
+	}
+	if got := mustJob(t, st, jobA.ID); !strings.Contains(got.LastError, "supersede_scope=pr1 supersede_key=publish") {
+		t.Errorf("reason = %q", got.LastError)
+	}
+	if got := mustJob(t, st, jobB.ID); got.Status != StatusWaiting {
+		t.Fatalf("B job = %s after a new round of A", got.Status)
+	}
+}
+
+// A key without a scope would let unrelated work cancel each other, and a scope without a
+// key does nothing: both are rejected without changing anything.
+func TestSupersedeKeyAndScopeAreRequiredTogether(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	old := mustCreate(t, st, keyedParams("old", "publish", nil))
+	oldHeld := mustHold(t, st, keyedParams("old-held", "notify", nil))
+
+	for i, pair := range [][2]string{{"", "publish"}, {"  ", "notify"}, {testScope, ""}, {testScope, "  "}} {
+		p := scopedParams(fmt.Sprintf("half-%d", i), pair[0], pair[1], nil)
+		if _, _, err := st.CreateJob(ctx, p); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("create scope=%q key=%q err = %v, want ErrInvalidInput", pair[0], pair[1], err)
+		}
+		if _, _, err := st.HoldJob(ctx, HoldJobParams{RequestID: p.RequestID, Payload: p}); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("hold scope=%q key=%q err = %v, want ErrInvalidInput", pair[0], pair[1], err)
+		}
+		if _, err := st.GetJobByRequestID(ctx, p.RequestID); !errors.Is(err, ErrNotFound) {
+			t.Errorf("rejected job was stored: %v", err)
+		}
+		if _, err := st.GetHeldJobByRequestID(ctx, p.RequestID); !errors.Is(err, ErrNotFound) {
+			t.Errorf("rejected hold was stored: %v", err)
+		}
+	}
+	if got := mustJob(t, st, old.ID); got.Status != StatusQueued {
+		t.Errorf("old job = %s", got.Status)
+	}
+	if got := mustHeld(t, st, oldHeld.ID); got.Status != HeldStatusHeld {
+		t.Errorf("old held = %s", got.Status)
+	}
+	// A request_id keeps the scope it was held with.
+	if _, _, err := st.CreateJob(ctx, scopedParams("old-held", "pr2", "notify", nil)); !errors.Is(err, ErrConflict) {
+		t.Errorf("replay with another scope err = %v, want ErrConflict", err)
+	}
+}
+
+// A cancelled hold stays cancelled when its request_id is sent straight to CreateJob, as
+// happens after the gate is switched from enforce to off or dry-run.
+func TestCancelledHoldIsNotRevivedByReplay(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	unkeyed := func(requestID string) CreateJobParams {
+		return CreateJobParams{RequestID: requestID, Title: "publish"}
+	}
+	cancelHeld := func(p CreateJobParams) {
+		t.Helper()
+		if _, err := st.CancelHeldJob(ctx, mustHold(t, st, p).ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rejected := func(name string, p CreateJobParams) {
+		t.Helper()
+		if job, created, err := st.CreateJob(ctx, p); !errors.Is(err, ErrConflict) || created {
+			t.Errorf("%s: CreateJob = %+v, %v, %v; want ErrConflict", name, job, created, err)
+		}
+		if _, err := st.GetJobByRequestID(ctx, strings.TrimSpace(p.RequestID)); !errors.Is(err, ErrNotFound) {
+			t.Errorf("%s: a job exists for the cancelled hold: %v", name, err)
+		}
+	}
+
+	cancelHeld(keyedParams("manual", "publish", nil))
+	rejected("key dropped", unkeyed("manual"))
+	rejected("key kept", keyedParams("manual", "publish", nil))
+	rejected("padded request_id", unkeyed(" manual "))
+
+	// Without a key before or now, replaying a cancelled hold creates a job, as before.
+	cancelHeld(unkeyed("plain"))
+	older := mustCreate(t, st, keyedParams("older", "notify", nil))
+	// Adding a key on replay is not a new registration: it must not cancel anything.
+	rejected("key added", keyedParams("plain", "notify", nil))
+	if got := mustJob(t, st, older.ID); got.Status != StatusQueued {
+		t.Errorf("older = %s after a rejected replay", got.Status)
+	}
+	if job := mustCreate(t, st, unkeyed("plain")); job.Status != StatusQueued || job.SupersedeKey != "" {
+		t.Errorf("unkeyed replay = %+v", job)
 	}
 }
 
@@ -405,7 +504,7 @@ func TestSupersedeReplayWithoutKey(t *testing.T) {
 
 	// A hold that is not superseded keeps its key and place when it becomes a job this way.
 	job := mustCreate(t, st, unkeyed("live"))
-	if job.SupersedeKey != "k" || job.Status != StatusQueued {
+	if job.SupersedeKey != "k" || job.SupersedeScope != testScope || job.Status != StatusQueued {
 		t.Fatalf("job from live hold = %+v", job)
 	}
 	res, err := st.ReleaseKeyedHeld(ctx, live.ID, "claude")
@@ -670,6 +769,7 @@ func TestOpenMigratesDatabaseWithoutSupersedeSchema(t *testing.T) {
 	for _, ddl := range []string{
 		`DROP TABLE supersede_registrations`,
 		`ALTER TABLE jobs DROP COLUMN supersede_key`,
+		`ALTER TABLE jobs DROP COLUMN supersede_scope`,
 		`ALTER TABLE held_jobs DROP COLUMN cancel_reason`,
 	} {
 		if _, err := st.writeDB.ExecContext(ctx, ddl); err != nil {

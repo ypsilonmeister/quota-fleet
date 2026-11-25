@@ -45,7 +45,7 @@ func runJob(args []string, stdout, stderr io.Writer) int {
 
 func printJobUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  quota-fleet job create --title <title> [--agent ...] [--host ...] [--workdir ...] [--instructions ...] [--acceptance ...] [--request-id ...] [--parent <id>] [--target-ref ...] [--model ...] [--pool ...] [--supersede-key <key>] [--db path] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet job create --title <title> [--agent ...] [--host ...] [--workdir ...] [--instructions ...] [--acceptance ...] [--request-id ...] [--parent <id>] [--target-ref ...] [--model ...] [--pool ...] [--supersede-scope <target> --supersede-key <role>] [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet job list --status <status> [--limit N] [--cursor ID] [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet job get <id> [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet job cancel <id> [--reason ...] [--db path] [--config fleet.yaml]")
@@ -96,6 +96,7 @@ func runJobCreate(args []string, stdout, stderr io.Writer) int {
 		model        string
 		pool         string
 		supersedeKey string
+		scope        string
 		draft        bool
 	)
 
@@ -114,7 +115,8 @@ func runJobCreate(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&model, "model", "", "model name")
 	fs.StringVar(&pool, "pool", "", "quota pool name")
 	fs.BoolVar(&draft, "draft", false, "create job in draft status")
-	fs.StringVar(&supersedeKey, "supersede-key", "", "cancel older unstarted jobs registered with the same key")
+	fs.StringVar(&scope, "supersede-scope", "", "target that --supersede-key applies to, such as one pull request")
+	fs.StringVar(&supersedeKey, "supersede-key", "", "cancel older unstarted jobs registered with the same scope and key")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -157,6 +159,7 @@ func runJobCreate(args []string, stdout, stderr io.Writer) int {
 		AcceptanceCriteria: acceptance,
 		Model:              model,
 		Pool:               pool,
+		SupersedeScope:     scope,
 		SupersedeKey:       supersedeKey,
 	}
 	if parentID > 0 {
@@ -177,6 +180,7 @@ func runJobCreate(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "%s job #%d [%s] %s\n", verb, job.ID, job.Status, job.Title)
 	fmt.Fprintf(stdout, "  request_id: %s\n", job.RequestID)
 	if job.SupersedeKey != "" {
+		fmt.Fprintf(stdout, "  supersede_scope: %s\n", job.SupersedeScope)
 		fmt.Fprintf(stdout, "  supersede_key: %s\n", job.SupersedeKey)
 		info, err := st.SupersedeInfoForJob(ctx, job.ID)
 		if err != nil {

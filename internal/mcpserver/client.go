@@ -1031,7 +1031,8 @@ type CreateJobInput struct {
 	Pool               string        `json:"pool,omitempty" jsonschema:"Primary quota pool name"`
 	AltPools           []string      `json:"alt_pools,omitempty" jsonschema:"Alternative quota pool names"`
 	SessionID          string        `json:"session_id,omitempty" jsonschema:"Session identifier"`
-	SupersedeKey       string        `json:"supersede_key,omitempty" jsonschema:"Registering cancels older unstarted (held, queued, waiting) jobs with the same key; without the operate scope, only jobs registered by the same token"`
+	SupersedeScope     string        `json:"supersede_scope,omitempty" jsonschema:"Target that supersede_key applies to, such as one pull request (owner/repo#42); keep it the same across rounds. Required with supersede_key"`
+	SupersedeKey       string        `json:"supersede_key,omitempty" jsonschema:"Role within supersede_scope, such as publish. Registering cancels older unstarted (held, queued, waiting) jobs with the same scope and key; without the operate scope, only jobs registered by the same token. Required with supersede_scope"`
 }
 
 // CreateJobOutput is the structured result returned by create_job.

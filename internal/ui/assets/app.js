@@ -983,6 +983,9 @@
     return el("td", null, [
       el("div", { text: title }),
       detail ? el("div", { className: "small muted mono", text: detail }) : null,
+      h.supersede_scope
+        ? el("div", { className: "small mono", text: "supersede_scope: " + h.supersede_scope })
+        : null,
       h.supersede_key
         ? el("div", { className: "small mono", text: "supersede_key: " + h.supersede_key })
         : null

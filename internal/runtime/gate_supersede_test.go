@@ -45,7 +45,7 @@ func TestGateCheckerCancelsSupersededHeldInsteadOfReleasing(t *testing.T) {
 					RequestID: requestID,
 					Pool:      "claude",
 					Payload: store.CreateJobParams{
-						RequestID: requestID, Title: "publish", Pool: "claude", SupersedeKey: "publish",
+						RequestID: requestID, Title: "publish", Pool: "claude", SupersedeScope: "pr1", SupersedeKey: "publish",
 					},
 				})
 				if err != nil {
@@ -120,7 +120,7 @@ func TestGateCheckerKeyedReleaseFailureStaysHeld(t *testing.T) {
 		RequestID: "child",
 		Pool:      "local",
 		Payload: store.CreateJobParams{
-			RequestID: "child", Title: "publish", Pool: "local", SupersedeKey: "publish", ParentID: &parent.ID,
+			RequestID: "child", Title: "publish", Pool: "local", SupersedeScope: "pr1", SupersedeKey: "publish", ParentID: &parent.ID,
 		},
 	})
 	if err != nil {

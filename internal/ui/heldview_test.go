@@ -57,7 +57,7 @@ function storage(init) {
 
 const base = { status: "held", pool: "claude", payload: { title: "publish" }, created_at: "2026-11-25T00:00:00Z" };
 const held = [
-  Object.assign({}, base, { id: "held-a", age_seconds: 42, parent_id: 7, parent_status: "done", supersede_key: "pub-42" }),
+  Object.assign({}, base, { id: "held-a", age_seconds: 42, parent_id: 7, parent_status: "done", supersede_scope: "pr-42", supersede_key: "publish" }),
   Object.assign({}, base, { id: "held-b", age_seconds: 3 * 3600 + 5 * 60, parent_id: 9, parent_status: "missing" }),
   Object.assign({}, base, { id: "held-c", age_seconds: 2 * 86400 + 3600 }),
   Object.assign({}, base, { id: "held-d", age_seconds: 600, status: "cancelled", cancel_reason: "superseded: by x" })
@@ -118,7 +118,7 @@ async function open(href) {
     const parentColumn = head.indexOf("親ジョブ");
     assert.ok(parentColumn >= 0, href + ": parent column");
     const text = rows.slice(1).map((r) => r.textContent);
-    for (const want of ["supersede_key: pub-42", "42秒経過"]) assert.ok(text[0].includes(want), href + ": " + want + " in " + text[0]);
+    for (const want of ["supersede_scope: pr-42", "supersede_key: publish", "42秒経過"]) assert.ok(text[0].includes(want), href + ": " + want + " in " + text[0]);
     assert.strictEqual(rows[1].children[parentColumn].textContent, "#7 done", href);
     assert.strictEqual(rows[2].children[parentColumn].textContent, "#9 missing", href);
     assert.strictEqual(rows[3].children[parentColumn].textContent, "-", href);

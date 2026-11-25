@@ -9,8 +9,9 @@ import (
 	"time"
 )
 
-// Supersede (docs/20): every job registration that carries a supersede_key gets one row in
-// supersede_registrations. A held entry and the job it is later released into share that
+// Supersede (docs/20): every job registration that carries a supersede_scope (the target,
+// such as one pull request) and a supersede_key (the role) gets one row in
+// supersede_registrations. Registrations replace each other only when both match. A held entry and the job it is later released into share that
 // row (same request_id), so seq is the order in which work was registered, not the order
 // in which it was released.
 
@@ -20,7 +21,7 @@ type SupersedeRef struct {
 	HeldID string
 }
 
-// SupersedeInfo describes how one registration relates to others with the same key.
+// SupersedeInfo describes how one registration relates to others with the same scope and key.
 type SupersedeInfo struct {
 	// Superseded lists the registrations this one cancelled.
 	Superseded []SupersedeRef
@@ -39,6 +40,7 @@ type KeyedReleaseResult struct {
 
 type supersedeRegistration struct {
 	seq       int64
+	scope     string
 	key       string
 	requestID string
 	// owner is the API token that registered it, empty for CLI and anonymous use.
@@ -47,16 +49,51 @@ type supersedeRegistration struct {
 	ownOnly bool
 }
 
-const supersedeRegistrationColumns = `seq, supersede_key, request_id, owner, own_only`
+const supersedeRegistrationColumns = `seq, supersede_scope, supersede_key, request_id, owner, own_only`
 
-func supersedeReason(key, newerRequestID string) string {
-	return fmt.Sprintf("superseded: newer registration request_id=%s has supersede_key=%s", newerRequestID, key)
+func supersedeReason(newer supersedeRegistration) string {
+	return fmt.Sprintf("superseded: newer registration request_id=%s has supersede_scope=%s supersede_key=%s",
+		newer.requestID, newer.scope, newer.key)
+}
+
+// checkSupersedePair requires supersede_scope and supersede_key together. A key alone would
+// let unrelated work that happens to use the same key cancel each other.
+func checkSupersedePair(scope, key string) error {
+	if (scope == "") != (key == "") {
+		return fmt.Errorf("%w: supersede_scope and supersede_key must be specified together", ErrInvalidInput)
+	}
+	return nil
+}
+
+// checkCancelledHoldTx keeps a cancelled hold cancelled when its request_id is sent again to
+// create a job directly (gate switched to off or dry-run, or the CLI), whether it was
+// cancelled by hand or superseded. A hold and replay that both lack a supersede_key keep
+// the older behaviour and create the job.
+func checkCancelledHoldTx(ctx context.Context, conn *sql.Conn, p CreateJobParams) error {
+	held, err := queryHeldJobByRequestID(ctx, conn, strings.TrimSpace(p.RequestID))
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if held.Status != HeldStatusCancelled ||
+		(held.Payload.SupersedeKey == "" && strings.TrimSpace(p.SupersedeKey) == "") {
+		return nil
+	}
+	detail := ""
+	if held.CancelReason != "" {
+		detail = ": " + held.CancelReason
+	}
+	return fmt.Errorf("%w: held job %s for request_id=%s is %s%s",
+		ErrConflict, held.ID, held.RequestID, held.Status, detail)
 }
 
 // registerSupersedeTx records the registration reg (seq is assigned here). A new
-// registration cancels every older one with its key that has not started: held entries,
-// and queued or waiting jobs. Only those jobs change: claimed jobs and jobs registered
-// without the key, including children of a cancelled job, are never touched. With
+// registration cancels every older one with its scope and key that has not started: held
+// entries, and queued or waiting jobs. Only those jobs change: claimed jobs and jobs
+// registered without that scope and key, including children of a cancelled job, are never
+// touched. With
 // reg.ownOnly, only registrations of the same owner are cancelled.
 //
 // A request_id that is already registered (a held entry becoming a job) keeps its place in
@@ -69,12 +106,13 @@ func registerSupersedeTx(
 ) (map[int64]bool, error) {
 	existing, err := querySupersedeRegistration(ctx, conn, reg.requestID)
 	if err == nil {
-		if existing.key != reg.key {
-			return nil, fmt.Errorf("%w: request_id=%s is registered with supersede_key=%s", ErrConflict, reg.requestID, existing.key)
+		if existing.scope != reg.scope || existing.key != reg.key {
+			return nil, fmt.Errorf("%w: request_id=%s is registered with supersede_scope=%s supersede_key=%s",
+				ErrConflict, reg.requestID, existing.scope, existing.key)
 		}
 		newer, err := queryNewerRegistration(ctx, conn, existing)
 		if err == nil {
-			return nil, fmt.Errorf("%w: request_id=%s is %s", ErrConflict, reg.requestID, supersedeReason(reg.key, newer.requestID))
+			return nil, fmt.Errorf("%w: request_id=%s is %s", ErrConflict, reg.requestID, supersedeReason(newer))
 		}
 		if !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -86,9 +124,9 @@ func registerSupersedeTx(
 	}
 
 	res, err := conn.ExecContext(ctx, `
-		INSERT INTO supersede_registrations (supersede_key, request_id, owner, own_only, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, reg.key, reg.requestID, reg.owner, reg.ownOnly, nowStr)
+		INSERT INTO supersede_registrations (supersede_scope, supersede_key, request_id, owner, own_only, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, reg.scope, reg.key, reg.requestID, reg.owner, reg.ownOnly, nowStr)
 	if err != nil {
 		return nil, err
 	}
@@ -112,11 +150,11 @@ func supersedeOlderTx(
 		FROM supersede_registrations r
 		LEFT JOIN jobs j ON j.id = r.job_id
 		LEFT JOIN held_jobs h ON r.job_id IS NULL AND h.id = r.held_id
-		WHERE r.supersede_key = ? AND r.seq < ?
+		WHERE r.supersede_scope = ? AND r.supersede_key = ? AND r.seq < ?
 			AND (j.status IN ('queued', 'waiting') OR h.status = 'held')
 			AND (? = 0 OR (r.owner = ? AND r.owner <> ''))
 		ORDER BY r.seq ASC
-	`, newer.key, newer.seq, newer.ownOnly, newer.owner)
+	`, newer.scope, newer.key, newer.seq, newer.ownOnly, newer.owner)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +176,7 @@ func supersedeOlderTx(
 		return nil, err
 	}
 
-	reason := supersedeReason(newer.key, newer.requestID)
+	reason := supersedeReason(newer)
 	cancelled := map[int64]bool{}
 
 	// Unlike a manual cancel, this does not cascade: a child that is not itself a target
@@ -253,7 +291,7 @@ func (s *Store) ReleaseKeyedHeld(ctx context.Context, heldID, selectedPool strin
 		newer, err := queryNewerRegistration(ctx, conn, reg)
 		switch {
 		case err == nil:
-			reason := supersedeReason(reg.key, newer.requestID)
+			reason := supersedeReason(newer)
 			nowStr := formatTime(time.Now().UTC())
 			if err := cancelHeldSupersededTx(ctx, conn, heldID, reason, nowStr); err != nil {
 				return err
@@ -356,21 +394,21 @@ func querySupersedeRegistration(ctx context.Context, q queryRower, requestID str
 }
 
 // queryNewerRegistration returns the latest registration that came after reg and may
-// supersede it (same key, and not limited to another owner), whatever state it is in now,
+// supersede it (same scope and key, and not limited to another owner), whatever state it is in now,
 // or ErrNotFound.
 func queryNewerRegistration(ctx context.Context, q queryRower, reg supersedeRegistration) (supersedeRegistration, error) {
 	return scanSupersedeRegistration(q.QueryRowContext(ctx, `
 		SELECT `+supersedeRegistrationColumns+` FROM supersede_registrations
-		WHERE supersede_key = ? AND seq > ?
+		WHERE supersede_scope = ? AND supersede_key = ? AND seq > ?
 			AND (own_only = 0 OR (owner = ? AND owner <> ''))
 		ORDER BY seq DESC
 		LIMIT 1
-	`, reg.key, reg.seq, reg.owner))
+	`, reg.scope, reg.key, reg.seq, reg.owner))
 }
 
 func scanSupersedeRegistration(row rowScanner) (supersedeRegistration, error) {
 	var reg supersedeRegistration
-	err := row.Scan(&reg.seq, &reg.key, &reg.requestID, &reg.owner, &reg.ownOnly)
+	err := row.Scan(&reg.seq, &reg.scope, &reg.key, &reg.requestID, &reg.owner, &reg.ownOnly)
 	if errors.Is(err, sql.ErrNoRows) {
 		return reg, ErrNotFound
 	}
