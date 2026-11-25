@@ -409,8 +409,31 @@ type MetaResponse struct {
 	PoolRules     map[string][]PoolAppliesToDTO    `json:"pool_rules,omitempty"`
 	GateMode      string                           `json:"gate_mode"`
 	EvaluatorMode string                           `json:"evaluator_mode"`
+	ReviewGate    ReviewGateDTO                    `json:"review_gate"`
 	PoolSummaries []PoolSummaryDTO                 `json:"pool_summaries"`
 	Scopes        []string                         `json:"scopes"`
+}
+
+// ReviewGateDTO is the review verdict gate state exposed by GET /meta (docs/18). It says
+// only whether an API key is configured, never anything about its value.
+type ReviewGateDTO struct {
+	Enabled       bool   `json:"enabled"`
+	Model         string `json:"model"`
+	KeyConfigured bool   `json:"key_configured"`
+}
+
+// ReviewVerdictRequest is the body of POST /decision/review-verdict.
+type ReviewVerdictRequest struct {
+	Text        string `json:"text"`
+	JobID       *int64 `json:"job_id,omitempty"`
+	ReviewJobID *int64 `json:"review_job_id,omitempty"`
+}
+
+// ReviewVerdictResponse is returned by POST /decision/review-verdict.
+type ReviewVerdictResponse struct {
+	Verdict string  `json:"verdict"`
+	Score   float64 `json:"score"`
+	Reason  string  `json:"reason"`
 }
 
 // AgentVersionEventDTO is the JSON representation of an agent_version_events entry.

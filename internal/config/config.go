@@ -111,6 +111,7 @@ type Config struct {
 	Pools               map[string]PoolConfig  `yaml:"pools"`
 	Quota               QuotaConfig            `yaml:"quota"`
 	Evaluator           EvaluatorConfig        `yaml:"evaluator"`
+	ReviewGate          ReviewGateConfig       `yaml:"review_gate"`
 	Notifier            NotifierConfig         `yaml:"notifier"`
 }
 
@@ -225,8 +226,11 @@ func (n NotifierConfig) EffectiveWebhookRetries() int {
 
 // EvaluatorConfig holds acceptance criteria evaluator settings.
 type EvaluatorConfig struct {
-	Mode              string   `yaml:"mode"`
-	APIKeyEnv         string   `yaml:"api_key_env"`
+	Mode      string `yaml:"mode"`
+	APIKeyEnv string `yaml:"api_key_env"`
+	// APIKey is the Gemini API key itself (optional). When set it takes precedence over the
+	// APIKeyEnv environment variable. It is a secret: never log it or return it (docs/18).
+	APIKey            string   `yaml:"api_key"`
 	DecisionThreshold *float64 `yaml:"decision_threshold"`
 	MaxEvalRetries    *int     `yaml:"max_eval_retries"`
 }
@@ -248,6 +252,26 @@ func (e EvaluatorConfig) EffectiveAPIKeyEnv() string {
 		return DefaultEvaluatorAPIKeyEnv
 	}
 	return v
+}
+
+// ResolveAPIKey returns the Decision 1 API key: api_key when set, otherwise the value of
+// the environment variable named by EffectiveAPIKeyEnv. It returns "" when neither is set.
+// A nil getenv means os.Getenv. The result is a secret.
+func (e EvaluatorConfig) ResolveAPIKey(getenv func(string) string) string {
+	if v := strings.TrimSpace(e.APIKey); v != "" {
+		return v
+	}
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	return strings.TrimSpace(getenv(e.EffectiveAPIKeyEnv()))
+}
+
+// ReviewGateConfig holds the review verdict gate settings (docs/18). The gate uses the
+// Decision 1 client and API key configured under evaluator.
+type ReviewGateConfig struct {
+	// Enabled turns on POST /decision/review-verdict. Default false.
+	Enabled bool `yaml:"enabled"`
 }
 
 // EffectiveDecisionThreshold returns the configured Decision 1 noul probability threshold,

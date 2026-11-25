@@ -61,6 +61,7 @@ func apiScopeEndpoints(jobID int64) []apiEndpointCase {
 		{name: "POST /gate/held/{id}/release", method: http.MethodPost, path: "/gate/held/held-missing/release", requiredScope: config.ScopeOperate},
 		{name: "DELETE /gate/held/{id}", method: http.MethodDelete, path: "/gate/held/held-missing", requiredScope: config.ScopeOperate},
 		{name: "POST /agents/check", method: http.MethodPost, path: "/agents/check", requiredScope: config.ScopeOperate},
+		{name: "POST /decision/review-verdict", method: http.MethodPost, path: "/decision/review-verdict", body: ReviewVerdictRequest{Text: "verdict: OK TO MERGE"}, requiredScope: config.ScopeOperate},
 
 		// worker
 		{name: "POST /jobs/{id}/claim", method: http.MethodPost, path: fmt.Sprintf("/jobs/%d/claim", jobID+999), requiredScope: config.ScopeWorker},
@@ -243,7 +244,7 @@ func TestLegacySingleTokenBackwardCompatibility(t *testing.T) {
 		t.Fatalf("POST /agents/check status = %d, want 200", resp.StatusCode)
 	}
 
-	// All 22 API endpoints must be reachable with the legacy single token when api.tokens is unset,
+	// All 23 API endpoints must be reachable with the legacy single token when api.tokens is unset,
 	// and must still reject unauthenticated requests with 401.
 	for _, ep := range apiScopeEndpoints(created.Job.ID) {
 		t.Run("all_routes/"+ep.name+"/no_token", func(t *testing.T) {
