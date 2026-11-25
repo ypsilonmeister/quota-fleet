@@ -47,16 +47,39 @@ function shellCacheKey(request) {
   return url.search === "" && SHELL_ASSETS.includes(url.pathname) ? url.pathname : null;
 }
 
+const SHELL_PATHS = [SHELL_PAGE].concat(SHELL_ASSETS);
+
 async function precacheShell() {
   const cache = await caches.open(SHELL_CACHE);
   // "reload" skips the HTTP cache. addAll stores all of the files or none of them.
-  await cache.addAll([SHELL_PAGE].concat(SHELL_ASSETS).map(function (path) {
+  await cache.addAll(SHELL_PATHS.map(function (path) {
     return new Request(path, { cache: "reload" });
   }));
 }
 
+async function precacheMissingShell() {
+  const cache = await caches.open(SHELL_CACHE);
+  const found = await Promise.all(SHELL_PATHS.map(function (path) {
+    return cache.match(path);
+  }));
+  if (!found.every(Boolean)) {
+    await precacheShell();
+  }
+}
+
+let filling = null;
+
+// fillShell completes the cache if anything is missing. Requests arriving meanwhile share
+// the same download, and a failed one is tried again at the next request.
+function fillShell() {
+  if (!filling) {
+    filling = precacheMissingShell().finally(function () { filling = null; });
+  }
+  return filling;
+}
+
 // The network comes first so that a deployed change shows up at once. The cache is only
-// written during installation, which keeps it a consistent copy of one version.
+// written as a whole shell, never from the responses passed through here.
 async function fetchOrFallBack(request, key) {
   try {
     return await fetch(request);
@@ -80,13 +103,11 @@ async function deleteOldShellCaches() {
 }
 
 self.addEventListener("install", function (event) {
-  event.waitUntil(precacheShell().catch(function (err) {
-    // An update that cannot be cached is retried later while the active worker stays.
-    // A first installation goes on without a cache: notifications need the worker.
-    if (self.registration.active) {
-      throw err;
-    }
-  }).then(function () {
+  // A first installation does not wait for the cache: notifications need the worker to
+  // become active soon, and pages ask for the cache afterwards (see "message"). An update
+  // caches first; if that fails it is retried later while the active worker stays.
+  const cached = self.registration.active ? precacheShell() : Promise.resolve();
+  event.waitUntil(cached.then(function () {
     // Pages load all of their files up front, so a new version can take over at once.
     return self.skipWaiting();
   }));
@@ -99,6 +120,16 @@ self.addEventListener("activate", function (event) {
     // Take control of tabs that are already open: navigate() only works on controlled ones.
     return self.clients.claim();
   }));
+});
+
+// Pages send this when they load and when the browser comes back online (notify.js).
+self.addEventListener("message", function (event) {
+  if (event.data && event.data.type === "qf-cache-shell") {
+    // waitUntil keeps the worker running for the download without delaying other events.
+    event.waitUntil(fillShell().catch(function () {
+      // Still unreachable; the next request tries again.
+    }));
+  }
 });
 
 self.addEventListener("fetch", function (event) {

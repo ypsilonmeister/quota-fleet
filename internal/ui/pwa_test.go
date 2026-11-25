@@ -187,8 +187,14 @@ func TestUIIndexHasPWAMeta(t *testing.T) {
 		t.Errorf("index.html must declare theme-color before loading direction.js")
 	}
 	// The app shell cache needs the worker even while notifications are off.
-	if !strings.Contains(string(appJS), "void notificationPresenter.register();\n  notifyController.sync();") {
-		t.Errorf("app.js must register the service worker at boot")
+	// cacheShell registers the worker and asks it for the cache.
+	for _, token := range []string{
+		"\n  void notificationPresenter.cacheShell();\n",
+		`window.addEventListener("online", function () { void notificationPresenter.cacheShell(); });`,
+	} {
+		if !strings.Contains(string(appJS), token) {
+			t.Errorf("app.js missing app shell cache wiring %q", token)
+		}
 	}
 }
 
@@ -286,12 +292,15 @@ const ASSETS = ["/ui/assets/style.css", "/ui/assets/direction.js", "/ui/assets/n
   "/ui/assets/icon-512.png", "/ui/assets/icon-maskable-512.png", "/ui/assets/apple-touch-icon.png"];
 
 function load(options) {
-  const opts = Object.assign({ active: null, offline: false, addAllFails: false, deleteFails: false, caches: [] }, options);
+  // gate, if set, holds every addAll back until it resolves (a slow network).
+  const opts = Object.assign({ active: null, offline: false, addAllFails: false, gate: null, deleteFails: false, caches: [] }, options);
   const listeners = {};
-  const log = { fetched: [], added: [], matched: [], deleted: [], skipped: 0, claimed: 0 };
+  const log = { fetched: [], addAlls: 0, added: [], matched: [], deleted: [], skipped: 0, claimed: 0 };
   const stores = new Map(opts.caches.map(name => [name, new Map()]));
   const cacheFor = name => ({
     addAll: async requests => {
+      log.addAlls++;
+      await opts.gate;
       if (opts.addAllFails) throw new TypeError("addAll failed");
       for (const r of requests) {
         log.added.push([name, r.url, r.cache]);
@@ -299,8 +308,8 @@ function load(options) {
       }
     },
     match: async key => { log.matched.push([name, key]); return stores.get(name).get(key); },
-    put: async () => assert.fail("the cache is only written during installation"),
-    add: async () => assert.fail("the cache is only written during installation")
+    put: async () => assert.fail("the cache is only written as a whole shell"),
+    add: async () => assert.fail("the cache is only written as a whole shell")
   });
   const caches = {
     open: async name => { if (!stores.has(name)) stores.set(name, new Map()); return cacheFor(name); },
@@ -342,15 +351,64 @@ function load(options) {
     });
     return response;
   };
-  return { log, stores, lifecycle, request };
+  // message resolves to null when the worker ignores the data.
+  const message = data => {
+    let waited = null;
+    listeners.message({ data, waitUntil: p => { waited = p; } });
+    return waited;
+  };
+  return { opts, log, stores, lifecycle, request, message };
+}
+
+const CACHE_SHELL = { type: "qf-cache-shell" };
+// settles tells whether the promise resolves without waiting for anything external.
+const settles = p => Promise.race([p.then(() => true), new Promise(r => setImmediate(r, false))]);
+function gate() {
+  let open;
+  const promise = new Promise(r => { open = r; });
+  return { promise, open };
 }
 
 async function main() {
-  // Installation precaches exactly the app shell into the versioned cache.
-  const w = load({});
-  await w.lifecycle("install");
-  assert.deepStrictEqual(w.log.added, ["/ui/"].concat(ASSETS).map(path => [CACHE, path, "reload"]));
+  const SHELL = ["/ui/"].concat(ASSETS).map(path => [CACHE, path, "reload"]);
+
+  // An update precaches exactly the app shell into the versioned cache before it takes over.
+  const slow = gate();
+  const w = load({ active: {}, gate: slow.promise });
+  const installing = w.lifecycle("install");
+  assert.strictEqual(await settles(installing), false, "an update waits for its cache");
+  assert.strictEqual(w.log.skipped, 0);
+  slow.open();
+  await installing;
+  assert.deepStrictEqual(w.log.added, SHELL);
   assert.strictEqual(w.log.skipped, 1);
+  // A complete cache is not downloaded again.
+  await w.message(CACHE_SHELL);
+  assert.strictEqual(w.log.addAlls, 1);
+
+  // A first installation does not wait for the shell: on a slow network the worker must
+  // still become active in time to show notifications.
+  const network = gate();
+  const first = load({ gate: network.promise });
+  assert.strictEqual(await settles(first.lifecycle("install")), true, "first installation");
+  assert.strictEqual(first.log.skipped, 1);
+  assert.strictEqual(await settles(first.lifecycle("activate")), true, "first activation");
+  assert.strictEqual(first.log.claimed, 1);
+  // The cache is filled on request, once for all the tabs asking meanwhile.
+  const asked = [first.message(CACHE_SHELL), first.message(CACHE_SHELL)];
+  assert.strictEqual(await settles(asked[0]), false, "the worker is kept alive for the download");
+  network.open();
+  await Promise.all(asked);
+  assert.strictEqual(first.log.addAlls, 1);
+  assert.deepStrictEqual(first.log.added, SHELL);
+  // One missing entry makes the whole shell be fetched again.
+  first.stores.get(CACHE).delete("/ui/assets/app.js");
+  await first.message(CACHE_SHELL);
+  assert.strictEqual(first.log.addAlls, 2);
+  assert.ok(first.stores.get(CACHE).has("/ui/assets/app.js"));
+  for (const data of [null, undefined, "qf-cache-shell", {}, { type: "other" }]) {
+    assert.strictEqual(first.message(data), null, JSON.stringify(data));
+  }
 
   // API, event stream, MCP, non-GET and foreign requests are never intercepted,
   // whether the network is up or not.
@@ -385,6 +443,7 @@ async function main() {
   }
 
   // Online: the network answers and the cache is not consulted.
+  w.log.matched.length = 0;
   for (const path of ASSETS) {
     assert.strictEqual(await w.request(path), "network " + ORIGIN + path);
   }
@@ -395,7 +454,7 @@ async function main() {
 
   // Offline: assets come from the cache, and every page falls back to the one shell.
   const off = load({ offline: true });
-  await off.lifecycle("install");
+  await off.message(CACHE_SHELL);
   for (const path of ASSETS) {
     assert.strictEqual(await off.request(path), "cached " + path);
   }
@@ -404,10 +463,23 @@ async function main() {
   }
   await assert.rejects(load({ offline: true }).request("/ui/assets/app.js"), /offline/);
 
-  // A failed precache: a first installation proceeds, an update is abandoned.
-  const first = load({ addAllFails: true });
-  await first.lifecycle("install");
-  assert.strictEqual(first.log.skipped, 1);
+  // A first installation whose download fails recovers with the same version once the
+  // network is back.
+  const flaky = load({ addAllFails: true });
+  await flaky.lifecycle("install");
+  await flaky.lifecycle("activate");
+  await flaky.message(CACHE_SHELL);
+  await flaky.message(CACHE_SHELL);
+  assert.strictEqual(flaky.log.addAlls, 2, "every request tries again after a failure");
+  assert.deepStrictEqual(flaky.log.added, []);
+  flaky.opts.addAllFails = false;
+  await flaky.message(CACHE_SHELL);
+  assert.deepStrictEqual(flaky.log.added, SHELL);
+  flaky.opts.offline = true;
+  assert.strictEqual(await flaky.request("/ui/jobs/7", { mode: "navigate" }), "cached /ui/");
+  assert.strictEqual(await flaky.request("/ui/assets/app.js"), "cached /ui/assets/app.js");
+
+  // An update whose download fails is abandoned.
   const update = load({ addAllFails: true, active: {} });
   await assert.rejects(update.lifecycle("install"), /addAll failed/);
   assert.strictEqual(update.log.skipped, 0);

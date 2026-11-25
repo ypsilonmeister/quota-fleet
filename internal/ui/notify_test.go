@@ -138,7 +138,7 @@ function client(path, extra) {
 async function main() {
   {
     const w = load([]);
-    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["activate", "fetch", "install", "notificationclick"]);
+    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["activate", "fetch", "install", "message", "notificationclick"]);
     let installing = null;
     w.listeners.install({ waitUntil: p => { installing = p; } });
     await installing;
@@ -340,9 +340,16 @@ async function main() {
     };
     const container = {
       addEventListener: (type, fn) => { log.listeners[type] = fn; },
+      getRegistration: async scope => {
+        assert.strictEqual(scope, "/ui/");
+        if (opts.lookupFails) throw new Error("InvalidStateError");
+        return opts.existing;
+      },
       register: async (url, options) => {
         log.registers.push([url, options.scope]);
         if (opts.registerFails) throw new Error("SecurityError");
+        // Queued behind an update that is still installing.
+        if (opts.registerHangs) await new Promise(() => {});
         return registration;
       },
       ready: opts.neverReady ? new Promise(() => {}) : Promise.resolve(opts.registration || registration)
@@ -490,6 +497,52 @@ async function main() {
     assert.strictEqual(w.log.registers.length, 2);
     assert.strictEqual(w.log.shown.length, 1);
     assert.strictEqual(N.created.length, 0);
+  }
+  // A registration that is already active does not wait for register(), which is queued
+  // behind an update's download, and survives a failing one.
+  for (const [name, opts] of [["slow update", { registerHangs: true }], ["failed update check", { registerFails: true }]]) {
+    const shown = [], messages = [];
+    const existing = {
+      active: { postMessage: m => messages.push(m) },
+      showNotification: async title => shown.push(title)
+    };
+    const w = fakeWorker(Object.assign({ existing }, opts));
+    const f = presenterFixture(w, fakeNotification("granted"));
+    let result = null;
+    f.presenter.show(message).then(v => { result = v; });
+    await flush();
+    assert.strictEqual(result, true, name);
+    assert.deepStrictEqual(shown, ["T"], name);
+    assert.deepStrictEqual(w.log.registers, [["/ui/sw.js", "/ui/"]], name + ": the update check still runs");
+    assert.deepStrictEqual(f.timers.delays(), [], name);
+    await f.presenter.cacheShell();
+    assert.deepStrictEqual(messages, [{ type: "qf-cache-shell" }], name);
+  }
+  // Without an active worker, or when the lookup fails, registration is awaited as usual.
+  for (const [name, opts] of [["installing only", { existing: { active: null } }], ["lookup fails", { lookupFails: true }]]) {
+    const w = fakeWorker(opts);
+    const f = presenterFixture(w, fakeNotification("granted"));
+    assert.strictEqual(await f.presenter.show(message), true, name);
+    assert.strictEqual(w.log.registers.length, 1, name);
+    assert.strictEqual(w.log.shown.length, 1, name);
+  }
+  {
+    // the active worker is asked for the app shell cache, after a failed registration too
+    const messages = [];
+    const registration = { active: { postMessage: m => messages.push(m) } };
+    const w = fakeWorker({ registerFails: true, registration });
+    const f = presenterFixture(w, fakeNotification("default"));
+    f.state.enabled = false;
+    await f.presenter.cacheShell();
+    assert.deepStrictEqual(messages, []);
+    w.opts.registerFails = false;
+    await f.presenter.cacheShell();
+    await f.presenter.cacheShell();
+    assert.deepStrictEqual(messages, [{ type: "qf-cache-shell" }, { type: "qf-cache-shell" }]);
+    assert.strictEqual(w.log.registers.length, 2, "registered again only after the failure");
+    assert.deepStrictEqual(f.timers.delays(), []);
+    await presenterFixture(fakeWorker({ registration: {} }), null).presenter.cacheShell();
+    await presenterFixture(null, null).presenter.cacheShell();
   }
   {
     // a worker that never activates does not hold the notification back forever

@@ -206,6 +206,26 @@
       });
     }
 
+    // activate registers the worker and resolves to the active registration. register()
+    // waits behind an update that is still downloading its app shell (docs/15), so a
+    // registration that is already active is used without waiting for it.
+    async function activate() {
+      // A failed lookup leaves the normal registration path.
+      const existing = await Promise.resolve().then(function () {
+        return container.getRegistration(SW_SCOPE);
+      }).catch(function () { return null; });
+      const registered = new Promise(function (done) {
+        done(container.register(SW_URL, { scope: SW_SCOPE }));
+      });
+      if (existing && existing.active) {
+        // The active worker serves even if this update check fails.
+        registered.catch(function () {});
+        return existing;
+      }
+      await registered;
+      return container.ready;
+    }
+
     // register resolves to the active registration, or null when there is none. Only a
     // success is remembered, so the next call tries again after a failure.
     function register() {
@@ -222,16 +242,20 @@
             }
             resolve(registration);
           }
-          new Promise(function (done) {
-            done(container.register(SW_URL, { scope: SW_SCOPE }));
-          }).then(function () {
-            return container.ready;
-          }).then(finish, function () {
+          activate().then(finish, function () {
             finish(null);
           });
         });
       }
       return pending;
+    }
+
+    // cacheShell asks the worker to complete the app shell cache (docs/15).
+    async function cacheShell() {
+      const registration = await register();
+      if (registration && registration.active) {
+        registration.active.postMessage({ type: "qf-cache-shell" });
+      }
     }
 
     function showFromPage(message) {
@@ -286,6 +310,7 @@
 
     return {
       register: register,
+      cacheShell: cacheShell,
       show: show
     };
   }
