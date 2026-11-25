@@ -15,6 +15,7 @@ import (
 
 	"github.com/ypsilonmeister/quota-fleet/internal/api"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/push"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -32,6 +33,8 @@ func newPushAPI(t *testing.T, publicKey string, withTokens bool) (*httptest.Serv
 		for _, scope := range config.AllAPIScopes {
 			opts.Tokens = append(opts.Tokens, config.APITokenConfig{Name: scope, Token: "tok-" + scope, Scopes: []string{scope}})
 		}
+		opts.Tokens = append(opts.Tokens, config.APITokenConfig{Name: "subscriber", Token: "tok-subscriber",
+			Scopes: []string{config.ScopeRead, config.ScopeOperate}})
 		opts.Token = "tok-all"
 	}
 	ts := httptest.NewServer(api.NewServer(st, opts).Handler())
@@ -91,14 +94,23 @@ func TestPushSubscribeAndUnsubscribe(t *testing.T) {
 
 	const endpoint = "https://push.example/s/1"
 	sub := subscriptionJSON(t, endpoint)
-	if code, body = pushCall(t, ts, "POST", "/push/subscriptions", "tok-operate", sub); code != http.StatusCreated || body != `{"created":true}` {
+	if code, body = pushCall(t, ts, "POST", "/push/subscriptions", "tok-subscriber", sub); code != http.StatusCreated || body != `{"created":true}` {
 		t.Fatalf("register = %d %s", code, body)
 	}
-	if code, body = pushCall(t, ts, "POST", "/push/subscriptions", "tok-operate", sub); code != http.StatusOK || body != `{"created":false}` {
+	if code, body = pushCall(t, ts, "POST", "/push/subscriptions", "tok-subscriber", sub); code != http.StatusOK || body != `{"created":false}` {
 		t.Fatalf("register again = %d %s", code, body)
 	}
 	stored, err := st.ListPushSubscriptions(context.Background())
-	if err != nil || len(stored) != 1 || stored[0].Endpoint != endpoint || stored[0].UserAgent != "test-browser/1.0" {
+	if err != nil || len(stored) != 1 || stored[0].Endpoint != endpoint || stored[0].UserAgent != "test-browser/1.0" ||
+		stored[0].TokenID != push.TokenID("tok-subscriber") {
+		t.Fatalf("stored = %+v, %v", stored, err)
+	}
+	// Registering again with another token moves the subscription to that token.
+	if code, body = pushCall(t, ts, "POST", "/push/subscriptions", "tok-all", sub); code != http.StatusOK {
+		t.Fatalf("register with another token = %d %s", code, body)
+	}
+	if stored, err = st.ListPushSubscriptions(context.Background()); err != nil || len(stored) != 1 ||
+		stored[0].TokenID != push.TokenID("tok-all") {
 		t.Fatalf("stored = %+v, %v", stored, err)
 	}
 
@@ -115,7 +127,7 @@ func TestPushSubscribeAndUnsubscribe(t *testing.T) {
 
 	for _, bad := range []string{"", "not json", "{}", `{"endpoint":"https://push.example/s"}`,
 		subscriptionJSON(t, "http://push.example/s")} {
-		if code, body = pushCall(t, ts, "POST", "/push/subscriptions", "tok-operate", bad); code != http.StatusBadRequest {
+		if code, body = pushCall(t, ts, "POST", "/push/subscriptions", "tok-subscriber", bad); code != http.StatusBadRequest {
 			t.Errorf("register %q = %d %s, want 400", bad, code, body)
 		}
 	}
@@ -137,6 +149,13 @@ func TestPushScopes(t *testing.T) {
 		for _, token := range []string{"", "wrong"} {
 			if code, _ := pushCall(t, ts, route.method, route.path, token, route.body); code != http.StatusUnauthorized {
 				t.Errorf("%s %s token %q = %d, want 401", route.method, route.path, token, code)
+			}
+		}
+		if route.method == "POST" {
+			// Registering needs read as well as operate.
+			code, body := pushCall(t, ts, route.method, route.path, "tok-operate", route.body)
+			if code != http.StatusForbidden || !strings.Contains(body, `"required_scope":"read"`) {
+				t.Errorf("register with operate only = %d %s, want 403", code, body)
 			}
 		}
 		for _, scope := range config.AllAPIScopes {
@@ -172,8 +191,21 @@ func TestPushNeedsTokenAndIsOffByDefault(t *testing.T) {
 	}
 	off, _ := newPushAPI(t, "", true)
 	for _, r := range routes {
+		// While disabled these are unknown paths, so authentication comes first.
+		for _, token := range []string{"", "wrong"} {
+			if code, _ := pushCall(t, off, r[0], r[1], token, "{}"); code != http.StatusUnauthorized {
+				t.Errorf("disabled %s %s token %q = %d, want 401", r[0], r[1], token, code)
+			}
+		}
 		if code, _ := pushCall(t, off, r[0], r[1], "tok-all", "{}"); code != http.StatusNotFound {
 			t.Errorf("disabled %s %s = %d, want 404", r[0], r[1], code)
+		}
+	}
+	// A server that is open because it has no tokens answers 404 to anyone.
+	offOpen, _ := newPushAPI(t, "", false)
+	for _, r := range routes {
+		if code, _ := pushCall(t, offOpen, r[0], r[1], "", "{}"); code != http.StatusNotFound {
+			t.Errorf("disabled, no tokens: %s %s = %d, want 404", r[0], r[1], code)
 		}
 	}
 }

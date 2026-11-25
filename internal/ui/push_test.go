@@ -11,6 +11,9 @@ func TestUIWebPushAssetsPresent(t *testing.T) {
 	for _, token := range []string{
 		`createPushController`,
 		`getRegistration: notificationPresenter.register`,
+		`navigator.serviceWorker.getRegistration("/ui/")`,
+		`"通知: 解除中"`,
+		`"通知: 解除未確認"`,
 		`isEnabled: function () { return notifyController.isEnabled(); }`,
 		`void pushController.sync();`,
 		`pushController.settled()`,
@@ -80,6 +83,10 @@ function fixture(opts) {
   const controller = n.createPushController({
     isSupported: () => env.supported,
     getRegistration: async () => env.registration,
+    findRegistration: async () => {
+      if (env.findError) throw env.findError;
+      return env.registration;
+    },
     getToken: () => env.token,
     isEnabled: () => env.enabled,
     setTimeout: (fn, ms) => { log.timers.set(++timer, { fn, ms }); return timer; },
@@ -147,6 +154,85 @@ async function main() {
       assert.strictEqual((await f.controller.sync()).state, "off");
       assert.deepStrictEqual(f.log.unsubscribed, ["https://push.example/old"]);
     }
+  }
+  {
+    // Off is not reported while neither the server nor the browser has confirmed it.
+    const breakBrowser = {
+      rejects: s => { s.unsubscribe = async () => { throw new Error("boom"); }; },
+      "answers false": s => { s.unsubscribe = async () => false; }
+    };
+    const breakServer = {
+      "503": e => { e.status.DELETE = 503; },
+      "403": e => { e.status.DELETE = 403; },
+      offline: e => { e.offline = true; },
+      "no token": e => { e.token = ""; }
+    };
+    for (const [browserName, browser] of Object.entries(breakBrowser)) {
+      for (const [serverName, server] of Object.entries(breakServer)) {
+        const label = browserName + " / " + serverName;
+        const f = fixture({ enabled: false, existing: KEY });
+        const unsubscribe = f.env.current.unsubscribe;
+        browser(f.env.current);
+        server(f.env);
+        const view = await f.controller.sync();
+        assert.strictEqual(view.state, "unconfirmed", label);
+        assert.ok(view.message.includes("解除を確認できません"), view.message);
+        assert.deepStrictEqual(f.log.views, ["removing", "unconfirmed"], label);
+
+        // A retry that still fails says so again; one that works ends in off.
+        assert.strictEqual((await f.controller.sync()).state, "unconfirmed", label);
+        f.env.current.unsubscribe = unsubscribe;
+        assert.strictEqual((await f.controller.sync()).state, "off", label);
+        assert.strictEqual(f.env.current, null, label);
+      }
+      // The server alone confirming is enough: it sends nothing any more.
+      const f = fixture({ enabled: false, existing: KEY });
+      browser(f.env.current);
+      assert.strictEqual((await f.controller.sync()).state, "off", browserName);
+      assert.deepStrictEqual(f.calls(), [DELETE]);
+    }
+    // false from a subscription that is already gone counts as unsubscribed.
+    const gone = fixture({ enabled: false, existing: KEY });
+    gone.env.status.DELETE = 503;
+    gone.env.current.unsubscribe = async () => { gone.env.current = null; return false; };
+    assert.strictEqual((await gone.controller.sync()).state, "off");
+
+    // A subscription that cannot be looked up is not known to be gone.
+    for (const breakLookup of [
+      f => { f.env.registration.pushManager.getSubscription = async () => { throw new Error("boom"); }; },
+      f => { f.env.findError = new Error("boom"); }]) {
+      const f = fixture({ enabled: false, existing: KEY });
+      breakLookup(f);
+      assert.strictEqual((await f.controller.sync()).state, "unconfirmed");
+    }
+    // Without a registration, or without push in it, there is nothing to remove.
+    for (const registration of [undefined, {}]) {
+      const f = fixture({ enabled: false });
+      f.env.registration = registration;
+      assert.strictEqual((await f.controller.sync()).state, "off");
+      assert.deepStrictEqual(f.log.views, ["off"]);
+    }
+
+    // An unsubscribe() that never settles times out as unconfirmed.
+    const hung = fixture({ enabled: false, existing: KEY });
+    hung.env.status.DELETE = 503;
+    hung.env.current.unsubscribe = () => new Promise(() => {});
+    const running = hung.controller.sync();
+    await flush();
+    assert.strictEqual(hung.controller.view().state, "removing");
+    for (const [id, t] of hung.log.timers) { hung.log.timers.delete(id); t.fn(); }
+    assert.strictEqual((await running).state, "unconfirmed");
+
+    // Turning off an active subscription does not show off before it is confirmed.
+    const active = fixture({});
+    await active.controller.sync();
+    active.reset();
+    active.env.enabled = false;
+    active.env.status.DELETE = 503;
+    active.env.current.unsubscribe = async () => { throw new Error("boom"); };
+    await active.controller.sync();
+    assert.ok(!active.log.views.includes("off"), String(active.log.views));
+    assert.strictEqual(active.controller.view().state, "unconfirmed");
   }
   {
     // A new server key pair replaces the subscription.

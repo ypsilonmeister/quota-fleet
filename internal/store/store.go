@@ -114,6 +114,11 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("migrate gate_decisions: %w", err)
 	}
 
+	if err := ensurePushTokenIDColumn(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate push_subscriptions.token_id: %w", err)
+	}
+
 	var readDB *sql.DB
 	shared := isMem
 	if isMem {
@@ -1921,6 +1926,19 @@ func ensureJobsColumn(ctx context.Context, db *sql.DB, colName, alterSQL string)
 		return err
 	}
 	_, err = db.ExecContext(ctx, alterSQL)
+	return err
+}
+
+// ensurePushTokenIDColumn upgrades a table created without the token binding. Its rows
+// get an empty token_id, so they receive nothing until they are registered again.
+func ensurePushTokenIDColumn(ctx context.Context, db *sql.DB) error {
+	var found int
+	err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('push_subscriptions') WHERE name = 'token_id'`).Scan(&found)
+	if err != nil || found > 0 {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `ALTER TABLE push_subscriptions ADD COLUMN token_id TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 

@@ -17,10 +17,13 @@ type PushSubscription struct {
 	Auth      string
 	CreatedAt time.Time
 	UserAgent string
+	// TokenID identifies the API token that registered the subscription. It is empty
+	// for a subscription that belongs to no token, which receives nothing.
+	TokenID string
 }
 
 // UpsertPushSubscription stores sub, keyed by its endpoint. Registering a known endpoint
-// again replaces its keys and user agent and keeps created_at. created reports whether the
+// again replaces its keys, user agent and token and keeps created_at. created reports whether the
 // endpoint was new. sub.CreatedAt is ignored.
 func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription) (created bool, err error) {
 	if strings.TrimSpace(sub.Endpoint) == "" || sub.P256dh == "" || sub.Auth == "" {
@@ -35,11 +38,12 @@ func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription
 		}
 		created = errors.Is(err, sql.ErrNoRows)
 		_, err = conn.ExecContext(ctx, `
-			INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, user_agent)
-			VALUES (?, ?, ?, ?, ?)
+			INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, user_agent, token_id)
+			VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT(endpoint) DO UPDATE SET
-				p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent
-		`, sub.Endpoint, sub.P256dh, sub.Auth, now, sub.UserAgent)
+				p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent,
+				token_id = excluded.token_id
+		`, sub.Endpoint, sub.P256dh, sub.Auth, now, sub.UserAgent, sub.TokenID)
 		return err
 	})
 	if err != nil {
@@ -82,7 +86,7 @@ func (s *Store) deletePushSubscriptions(ctx context.Context, query string, args 
 // ListPushSubscriptions returns every stored subscription, oldest first.
 func (s *Store) ListPushSubscriptions(ctx context.Context) ([]PushSubscription, error) {
 	rows, err := s.readDB.QueryContext(ctx, `
-		SELECT endpoint, p256dh, auth, created_at, user_agent
+		SELECT endpoint, p256dh, auth, created_at, user_agent, token_id
 		FROM push_subscriptions ORDER BY created_at, endpoint
 	`)
 	if err != nil {
@@ -96,7 +100,7 @@ func (s *Store) ListPushSubscriptions(ctx context.Context) ([]PushSubscription, 
 			sub       PushSubscription
 			createdAt string
 		)
-		if err := rows.Scan(&sub.Endpoint, &sub.P256dh, &sub.Auth, &createdAt, &sub.UserAgent); err != nil {
+		if err := rows.Scan(&sub.Endpoint, &sub.P256dh, &sub.Auth, &createdAt, &sub.UserAgent, &sub.TokenID); err != nil {
 			return nil, err
 		}
 		if sub.CreatedAt, err = parseTime(createdAt); err != nil {

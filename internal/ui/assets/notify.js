@@ -32,6 +32,9 @@
   const PUSH_FALLBACK = "通知はこの画面を開いている間だけ届きます。";
   const PUSH_MESSAGES = {
     off: "Web Push: オフ",
+    removing: "Web Push: 登録を解除しています。",
+    unconfirmed: "Web Push: 解除を確認できませんでした。通知が届き続ける可能性があります。" +
+      "通知ボタンを押すと解除を再試行します。",
     pending: "Web Push: 登録を確認しています。",
     active: "Web Push: 登録済みです。画面を閉じていても完了・失敗の通知が届きます。",
     unsupported: "Web Push: この環境では使えません。" + PUSH_FALLBACK,
@@ -556,7 +559,9 @@
 
   // createPushController keeps this browser's Web Push subscription, here and on the
   // server, in step with the notification toggle (docs/16). It never turns notifications
-  // off: whatever fails here, the event stream keeps working as before.
+  // off: whatever fails here, the event stream keeps working as before. It reports "off"
+  // only when nothing can arrive any more: there is no subscription, or the server or the
+  // browser confirmed removing it.
   function createPushController(options) {
     const setTimer = options.setTimeout || defaultSetTimeout;
     const clearTimer = options.clearTimeout || defaultClearTimeout;
@@ -596,16 +601,31 @@
       return within(options.fetch(path, init));
     }
 
-    // forget removes the endpoint from the server. If that fails, the push service will
-    // report the endpoint gone and the server deletes it then.
+    // forget removes the endpoint from the server and resolves to whether the server
+    // confirmed it.
     async function forget(endpoint) {
       if (!options.getToken()) {
-        return;
+        return false;
       }
       try {
-        await call("DELETE", "/push/subscriptions", { endpoint: endpoint });
+        return (await call("DELETE", "/push/subscriptions", { endpoint: endpoint })).ok;
       } catch (_err) {
-        // Unsubscribing in the browser is what stops the notifications.
+        return false;
+      }
+    }
+
+    // release unsubscribes in the browser and resolves to whether the subscription is
+    // gone. If only the server fails to hear of it, the push service reports the endpoint
+    // gone and the server deletes it then.
+    async function release(manager, subscription) {
+      try {
+        if (await within(subscription.unsubscribe())) {
+          return true;
+        }
+        // false also means that there was nothing left to unsubscribe.
+        return !(await within(manager.getSubscription()));
+      } catch (_err) {
+        return false;
       }
     }
 
@@ -617,14 +637,27 @@
       return (registration && registration.pushManager) || null;
     }
 
+    // remove rejects, like its steps, when it cannot tell whether a subscription exists.
     async function remove() {
-      const manager = await pushManager();
-      const subscription = manager && await within(manager.getSubscription());
-      if (subscription) {
-        await forget(subscription.endpoint);
-        await within(subscription.unsubscribe());
+      if (!options.isSupported()) {
+        return "off";
       }
-      return "off";
+      if (view.state !== "off") {
+        report("removing");
+      }
+      // Looking up does not register the worker: without one there is no subscription.
+      const registration = await within(options.findRegistration());
+      const manager = registration && registration.pushManager;
+      const subscription = manager && await within(manager.getSubscription());
+      if (!subscription) {
+        return "off";
+      }
+      if (view.state !== "removing") {
+        report("removing");
+      }
+      const deleted = await forget(subscription.endpoint);
+      const released = await release(manager, subscription);
+      return deleted || released ? "off" : "unconfirmed";
     }
 
     function failure(status) {
@@ -688,7 +721,7 @@
           try {
             return report(await (enabled ? ensure() : remove()));
           } catch (_err) {
-            return report(enabled ? "error" : "off");
+            return report(enabled ? "error" : "unconfirmed");
           }
         });
         chain = waiting;

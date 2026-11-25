@@ -2,7 +2,9 @@ package push
 
 import (
 	"crypto/ecdh"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -17,6 +19,13 @@ const (
 	// authSecretBytes is the length of the authentication secret (RFC 8291).
 	authSecretBytes = 16
 )
+
+// TokenID is what a subscription stores about the API token that registered it. It
+// changes when the token's secret changes, and does not reveal the secret.
+func TokenID(token string) string {
+	sum := sha256.Sum256([]byte("quota-fleet web push token\x00" + token))
+	return hex.EncodeToString(sum[:])
+}
 
 // NewSubscription validates what a browser sent and returns the subscription to store.
 // Errors wrap store.ErrInvalidInput and never contain the endpoint or the keys.

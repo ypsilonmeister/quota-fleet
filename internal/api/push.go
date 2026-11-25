@@ -26,6 +26,9 @@ func (s *Server) handleCreatePushSubscription(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The subscription receives only while this token may read jobs (docs/16).
+	principal, _ := authPrincipalFromContext(r.Context())
+	sub.TokenID = principal.tokenID
 	created, err := s.store.UpsertPushSubscription(r.Context(), sub)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {

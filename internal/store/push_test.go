@@ -16,7 +16,7 @@ func TestPushSubscriptionsUpsertListDelete(t *testing.T) {
 	}
 	defer func() { _ = st.Close() }()
 
-	first := PushSubscription{Endpoint: "https://push.example/a", P256dh: "k1", Auth: "a1", UserAgent: "ua1"}
+	first := PushSubscription{Endpoint: "https://push.example/a", P256dh: "k1", Auth: "a1", UserAgent: "ua1", TokenID: "t1"}
 	if created, err := st.UpsertPushSubscription(ctx, first); err != nil || !created {
 		t.Fatalf("first upsert = %v, %v", created, err)
 	}
@@ -24,7 +24,7 @@ func TestPushSubscriptionsUpsertListDelete(t *testing.T) {
 	if err != nil || len(before) != 1 || before[0].CreatedAt.IsZero() {
 		t.Fatalf("list = %+v, %v", before, err)
 	}
-	renewed := PushSubscription{Endpoint: first.Endpoint, P256dh: "k2", Auth: "a2", UserAgent: "ua2"}
+	renewed := PushSubscription{Endpoint: first.Endpoint, P256dh: "k2", Auth: "a2", UserAgent: "ua2", TokenID: "t2"}
 	if created, err := st.UpsertPushSubscription(ctx, renewed); err != nil || created {
 		t.Fatalf("second upsert = %v, %v", created, err)
 	}
@@ -69,6 +69,48 @@ func TestPushSubscriptionsUpsertListDelete(t *testing.T) {
 		if _, err := st.UpsertPushSubscription(ctx, bad); !errors.Is(err, ErrInvalidInput) {
 			t.Errorf("upsert %+v = %v, want ErrInvalidInput", bad, err)
 		}
+	}
+}
+
+// A table created before subscriptions were bound to tokens gains the column; its rows
+// belong to no token.
+func TestPushSubscriptionsGainTokenID(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fleet.db")
+	st, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	for _, stmt := range []string{
+		`DROP TABLE push_subscriptions`,
+		`CREATE TABLE push_subscriptions (endpoint TEXT PRIMARY KEY, p256dh TEXT NOT NULL,
+			auth TEXT NOT NULL, created_at TEXT NOT NULL, user_agent TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO push_subscriptions VALUES ('https://push.example/old', 'k', 'a', '2026-11-25T00:00:00Z', '')`,
+	} {
+		if _, err := st.writeDB.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	// The second reopen finds the column in place.
+	for range 2 {
+		if err := st.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if st, err = Open(ctx, path, Options{}); err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+	}
+	defer st.Close()
+	got, err := st.ListPushSubscriptions(ctx)
+	if err != nil || len(got) != 1 || got[0].TokenID != "" {
+		t.Fatalf("list = %+v, %v", got, err)
+	}
+	got[0].TokenID = "t"
+	if _, err := st.UpsertPushSubscription(ctx, got[0]); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if got, err = st.ListPushSubscriptions(ctx); err != nil || len(got) != 1 || got[0].TokenID != "t" {
+		t.Fatalf("list = %+v, %v", got, err)
 	}
 }
 

@@ -24,6 +24,12 @@ import (
 // startPushServe runs serve until the returned stop function is called.
 func startPushServe(t *testing.T, dir string, webPush bool) (base string, stop func() string) {
 	t.Helper()
+	return startPushServeWithAuth(t, dir, webPush, `  token: "serve-push-token"`)
+}
+
+// startPushServeWithAuth is startPushServe with the token lines of the api section.
+func startPushServeWithAuth(t *testing.T, dir string, webPush bool, auth string) (base string, stop func() string) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
@@ -38,7 +44,7 @@ state_dir: "%s"
 api:
   listen: "%s"
   web_push: %v
-  token: "serve-push-token"
+%s
 runtime:
   adapter: "mock"
   dispatch_interval: "15ms"
@@ -47,7 +53,7 @@ runtime:
   stale_claimed_after: "5s"
 evaluator:
   mode: "always-pass"
-`, filepath.ToSlash(filepath.Join(dir, "state")), addr, webPush)
+`, filepath.ToSlash(filepath.Join(dir, "state")), addr, webPush, auth)
 	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -89,11 +95,16 @@ evaluator:
 
 func serveCall(t *testing.T, method, url, body string) (int, string) {
 	t.Helper()
+	return serveCallAs(t, "serve-push-token", method, url, body)
+}
+
+func serveCallAs(t *testing.T, token, method, url, body string) (int, string) {
+	t.Helper()
 	req, err := http.NewRequest(method, url, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer serve-push-token")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, url, err)
@@ -181,6 +192,66 @@ func TestServeWebPushKeysPersistAndPush(t *testing.T) {
 	defer st.Close()
 	if subs, err := st.ListPushSubscriptions(context.Background()); err != nil || len(subs) != 0 {
 		t.Errorf("subscriptions after 410 = %+v, %v", subs, err)
+	}
+}
+
+// A subscription stops receiving as soon as the token that registered it is removed from
+// the configuration or loses the read scope (docs/16).
+func TestServeWebPushStopsForRevokedTokens(t *testing.T) {
+	pushed := make(chan string, 16)
+	service := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pushed <- r.URL.Path
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer service.Close()
+	webPushTransport = service.Client().Transport
+	defer func() { webPushTransport = nil }()
+
+	tokens := func(entries ...string) string {
+		out := "  tokens:"
+		for _, e := range entries {
+			name, scopes, _ := strings.Cut(e, ":")
+			out += fmt.Sprintf("\n    - name: %q\n      token: %q\n      scopes: [%s]", name, "tok-"+name, scopes)
+		}
+		return out
+	}
+	dir := t.TempDir()
+	base, stop := startPushServeWithAuth(t, dir, true,
+		tokens("removed:read, operate", "downgraded:read, operate", "kept:read, operate, register"))
+	for _, name := range []string{"removed", "downgraded", "kept"} {
+		private, err := ecdh.P256().GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub := fmt.Sprintf(`{"endpoint":%q,"keys":{"p256dh":%q,"auth":%q}}`, service.URL+"/"+name,
+			base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes()),
+			base64.RawURLEncoding.EncodeToString(make([]byte, 16)))
+		if code, body := serveCallAs(t, "tok-"+name, "POST", base+"/push/subscriptions", sub); code != http.StatusCreated {
+			t.Fatalf("register %s = %d %s", name, code, body)
+		}
+	}
+	stop()
+
+	base, stop = startPushServeWithAuth(t, dir, true,
+		tokens("downgraded:operate", "kept:read, operate, register"))
+	if code, body := serveCallAs(t, "tok-kept", "POST", base+"/jobs",
+		`{"request_id":"revoke-1","title":"Revoke","acceptance_criteria":"build ok"}`); code != http.StatusCreated {
+		t.Fatalf("create job = %d %s", code, body)
+	}
+	select {
+	case path := <-pushed:
+		pushed <- path
+	case <-time.After(10 * time.Second):
+		t.Fatal("no push for the finished job")
+	}
+	// Stopping waits for the delivery to every subscription of the job.
+	stop()
+	var got []string
+	for len(pushed) > 0 {
+		got = append(got, <-pushed)
+	}
+	if len(got) != 1 || got[0] != "/kept" {
+		t.Errorf("pushed to %v, want only /kept", got)
 	}
 }
 

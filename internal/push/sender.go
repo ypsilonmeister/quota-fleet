@@ -31,8 +31,7 @@ const (
 	defaultSendTimeout   = 10 * time.Second
 	defaultShutdownGrace = 2 * time.Second
 
-	maxTitleRunes   = 100
-	maxExcerptRunes = 200
+	maxTitleRunes = 100
 )
 
 // Payload is the JSON message the service worker receives.
@@ -51,7 +50,11 @@ type Options struct {
 	Keys VAPIDKeys
 	// Subject is the VAPID contact: an https: or mailto: URL.
 	Subject string
-	Logger  *log.Logger
+	// ReadTokenIDs lists the TokenID of every API token that may currently read jobs.
+	// Only subscriptions registered with one of them receive messages; an empty list
+	// means that none does.
+	ReadTokenIDs []string
+	Logger       *log.Logger
 	// Transport overrides the HTTP transport in tests when non-nil.
 	Transport http.RoundTripper
 	// SendTimeout bounds one request to a push service when positive.
@@ -71,6 +74,7 @@ type Sender struct {
 	// subscriber is the subject in the form webpush-go expects: it adds "mailto:" to
 	// anything that is not an https: URL.
 	subscriber  string
+	readTokens  map[string]bool
 	sendTimeout time.Duration
 	grace       time.Duration
 
@@ -111,6 +115,7 @@ func Start(st *store.Store, opts Options) *Sender {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		subscriber:  strings.TrimPrefix(opts.Subject, "mailto:"),
+		readTokens:  map[string]bool{},
 		sendTimeout: sendTimeout,
 		grace:       grace,
 		queue:       make(chan store.JobEvent, queueSize),
@@ -118,6 +123,12 @@ func Start(st *store.Store, opts Options) *Sender {
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+	for _, id := range opts.ReadTokenIDs {
+		if id != "" {
+			s.readTokens[id] = true
+		}
+	}
+	s.logUnauthorized()
 	events, unsubscribe := st.SubscribeJobEvents()
 	s.unsubscribe = unsubscribe
 	go s.collect(events)
@@ -187,8 +198,36 @@ func (s *Sender) run() {
 	}
 }
 
+// recipients returns the subscriptions whose token may still read jobs. The others are
+// kept: they receive again if the token regains access or the browser registers anew.
+func (s *Sender) recipients(ctx context.Context) (allowed []store.PushSubscription, excluded int, err error) {
+	subs, err := s.store.ListPushSubscriptions(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, sub := range subs {
+		if s.readTokens[sub.TokenID] {
+			allowed = append(allowed, sub)
+		}
+	}
+	return allowed, len(subs) - len(allowed), nil
+}
+
+// logUnauthorized tells the operator once, at startup, about subscriptions that no
+// longer receive anything. The tokens only change with a restart.
+func (s *Sender) logUnauthorized() {
+	_, excluded, err := s.recipients(s.ctx)
+	if err != nil {
+		s.logger.Printf("WARNING: web push: list subscriptions: %v", err)
+		return
+	}
+	if excluded > 0 {
+		s.logger.Printf("web push: %d subscription(s) receive nothing: no configured token with the read scope registered them", excluded)
+	}
+}
+
 func (s *Sender) deliver(ev store.JobEvent) {
-	subs, err := s.store.ListPushSubscriptions(s.ctx)
+	subs, _, err := s.recipients(s.ctx)
 	if err != nil {
 		s.logger.Printf("WARNING: web push for job %d: list subscriptions: %v", ev.JobID, err)
 		return
@@ -196,19 +235,7 @@ func (s *Sender) deliver(ev store.JobEvent) {
 	if len(subs) == 0 {
 		return
 	}
-	var result string
-	job, err := s.store.GetJob(s.ctx, ev.JobID)
-	if err != nil {
-		// The notification is still worth sending without the excerpt.
-		s.logger.Printf("WARNING: web push for job %d: read job: %v", ev.JobID, err)
-	} else if job.Status == ev.Status {
-		// A job requeued meanwhile no longer holds the result of this transition.
-		result = job.ResultText
-		if ev.Status == store.StatusFailed && strings.TrimSpace(job.LastError) != "" {
-			result = job.LastError
-		}
-	}
-	message, err := json.Marshal(newPayload(ev, result))
+	message, err := json.Marshal(newPayload(ev))
 	if err != nil {
 		s.logger.Printf("WARNING: web push for job %d: encode payload: %v", ev.JobID, err)
 		return
@@ -228,22 +255,20 @@ func (s *Sender) deliver(ev store.JobEvent) {
 	wg.Wait()
 }
 
-func newPayload(ev store.JobEvent, result string) Payload {
-	state := "完了"
+// newPayload takes nothing from the job's result or error: a notification may appear on
+// a lock screen, and those texts can hold secrets. The job page shows them.
+func newPayload(ev store.JobEvent) Payload {
+	state, detail := "完了", "done（完了）"
 	if ev.Status == store.StatusFailed {
-		state = "失敗"
+		state, detail = "失敗", "failed（失敗）"
 	}
 	title := excerpt(ev.Title, maxTitleRunes)
 	if title == "" {
 		title = "(無題)"
 	}
-	body := excerpt(result, maxExcerptRunes)
-	if body == "" {
-		body = "状態: " + string(ev.Status)
-	}
 	return Payload{
 		Title:  fmt.Sprintf("ジョブ #%d %s: %s", ev.JobID, state, title),
-		Body:   body,
+		Body:   "状態: " + detail,
 		JobID:  ev.JobID,
 		URL:    fmt.Sprintf("/ui/jobs/%d", ev.JobID),
 		Status: string(ev.Status),

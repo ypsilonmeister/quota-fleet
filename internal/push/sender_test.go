@@ -106,6 +106,9 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+// readerToken is the API token the fixture's subscriptions are registered with.
+const readerToken = "reader-token"
+
 type fixture struct {
 	st     *store.Store
 	keys   VAPIDKeys
@@ -131,6 +134,9 @@ func newFixture(t *testing.T, opts Options) *fixture {
 	if opts.Subject == "" {
 		opts.Subject = "mailto:ops@fleet.example"
 	}
+	if opts.ReadTokenIDs == nil {
+		opts.ReadTokenIDs = []string{TokenID(readerToken)}
+	}
 	sender := Start(st, opts)
 	t.Cleanup(sender.Close)
 	return &fixture{st: st, keys: keys, logs: logs, sender: sender}
@@ -150,6 +156,7 @@ func (f *fixture) subscribe(t *testing.T, endpoint string) browser {
 	if err != nil {
 		t.Fatalf("NewSubscription: %v", err)
 	}
+	sub.TokenID = TokenID(readerToken)
 	if _, err := f.st.UpsertPushSubscription(context.Background(), sub); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -319,24 +326,85 @@ func TestSenderPushesDoneAndFailed(t *testing.T) {
 		}
 
 		id, token := f.claim(t, "done-1", "Build the thing")
-		if _, err := f.st.Complete(ctx, id, token, "All tests pass.\n\n  PR opened.\t"); err != nil {
+		if _, err := f.st.Complete(ctx, id, token, "SECRET-result"); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		want := Payload{Title: "ジョブ #1 完了: Build the thing", Body: "All tests pass. PR opened.",
+		want := Payload{Title: "ジョブ #1 完了: Build the thing", Body: "状態: done（完了）",
 			JobID: id, URL: "/ui/jobs/1", Status: "done"}
 		if got := receive(); got["/a"] != want || got["/b"] != want {
 			t.Errorf("done payloads = %+v, want %+v", got, want)
 		}
 
 		id, token = f.claim(t, "failed-1", "Break the thing")
-		if _, err := f.st.FailWithResult(ctx, id, token, "criteria not met", "long evaluator output"); err != nil {
+		if _, err := f.st.FailWithResult(ctx, id, token, "SECRET-error", "SECRET-output"); err != nil {
 			t.Fatalf("Fail: %v", err)
 		}
-		want = Payload{Title: "ジョブ #2 失敗: Break the thing", Body: "criteria not met",
+		want = Payload{Title: "ジョブ #2 失敗: Break the thing", Body: "状態: failed（失敗）",
 			JobID: id, URL: "/ui/jobs/2", Status: "failed"}
 		if got := receive(); got["/a"] != want {
 			t.Errorf("failed payload = %+v, want %+v", got["/a"], want)
 		}
+	}
+}
+
+func TestSenderSendsOnlyForReadTokens(t *testing.T) {
+	for name, allowed := range map[string][]string{
+		"current tokens": {TokenID(readerToken)},
+		"no tokens":      {},
+		// An empty ID must not admit the subscriptions that belong to no token.
+		"empty id": {""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service := newPushService(t)
+			f := newFixture(t, Options{Transport: service.Client().Transport, ReadTokenIDs: allowed})
+			ctx := context.Background()
+			f.subscribe(t, service.URL+"/reader")
+			for path, tokenID := range map[string]string{"/revoked": TokenID("revoked-token"), "/unbound": ""} {
+				f.subscribe(t, service.URL+path)
+				subs, err := f.st.ListPushSubscriptions(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, s := range subs {
+					if s.Endpoint == service.URL+path {
+						s.TokenID = tokenID
+						if _, err := f.st.UpsertPushSubscription(ctx, s); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			id, token := f.claim(t, "j", "job")
+			if _, err := f.st.Complete(ctx, id, token, "ok"); err != nil {
+				t.Fatal(err)
+			}
+			f.sender.Close()
+			var got []string
+			for len(service.requests) > 0 {
+				got = append(got, (<-service.requests).path)
+			}
+			want := ""
+			if name == "current tokens" {
+				want = "/reader"
+			}
+			if strings.Join(got, ",") != want {
+				t.Errorf("pushed to %v, want %q", got, want)
+			}
+			// Excluded subscriptions are kept.
+			if n := len(f.endpoints(t)); n != 3 {
+				t.Errorf("%d subscriptions left, want 3", n)
+			}
+		})
+	}
+}
+
+func TestSenderReportsExcludedSubscriptionsAtStart(t *testing.T) {
+	f := newFixture(t, Options{})
+	f.subscribe(t, "https://push.example/secret-capability")
+	logs := &syncBuffer{}
+	Start(f.st, Options{Keys: f.keys, Logger: log.New(logs, "", 0)}).Close()
+	if got := logs.String(); !strings.Contains(got, "1 subscription(s) receive nothing") || strings.Contains(got, "secret-capability") {
+		t.Errorf("log = %q", got)
 	}
 }
 
@@ -493,8 +561,8 @@ func TestSenderClosePushesPendingAndSurvivesEventShutdown(t *testing.T) {
 }
 
 func TestPayloadIsBounded(t *testing.T) {
-	long := strings.Repeat("<&>長い結果\x00\n", 2000)
-	p := newPayload(store.JobEvent{JobID: 9223372036854775807, Status: store.StatusDone, Title: long}, long)
+	long := strings.Repeat("<&>長い題名\x00\n", 2000)
+	p := newPayload(store.JobEvent{JobID: 9223372036854775807, Status: store.StatusDone, Title: long})
 	data, err := json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -503,11 +571,11 @@ func TestPayloadIsBounded(t *testing.T) {
 	if len(data) > 3000 {
 		t.Errorf("payload is %d bytes", len(data))
 	}
-	if n := utf8.RuneCountInString(p.Body); n != maxExcerptRunes || !strings.HasSuffix(p.Body, "…") {
-		t.Errorf("body has %d runes: %q", n, p.Body)
+	if !strings.HasSuffix(p.Title, "…") {
+		t.Errorf("title is not cut: %q", p.Title)
 	}
-	empty := newPayload(store.JobEvent{JobID: 1, Status: store.StatusFailed}, " \n ")
-	if empty.Title != "ジョブ #1 失敗: (無題)" || empty.Body != "状態: failed" {
+	empty := newPayload(store.JobEvent{JobID: 1, Status: store.StatusFailed, Title: " \n "})
+	if empty.Title != "ジョブ #1 失敗: (無題)" || empty.Body != "状態: failed（失敗）" {
 		t.Errorf("empty payload = %+v", empty)
 	}
 	if got := excerpt("abcde", 5); got != "abcde" {

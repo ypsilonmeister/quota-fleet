@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -142,10 +143,11 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		// Started before the runtime so that no transition is missed. Its deferred Close
 		// runs after rt.Stop and before st.Close.
 		sender := push.Start(st, push.Options{
-			Keys:      keys,
-			Subject:   cfg.API.EffectiveWebPushSubject(),
-			Logger:    logger,
-			Transport: webPushTransport,
+			Keys:         keys,
+			Subject:      cfg.API.EffectiveWebPushSubject(),
+			ReadTokenIDs: webPushReadTokenIDs(cfg.API),
+			Logger:       logger,
+			Transport:    webPushTransport,
 		})
 		defer sender.Close()
 	}
@@ -244,6 +246,21 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		}
 		return 0
 	}
+}
+
+// webPushReadTokenIDs identifies the configured tokens whose subscriptions may receive
+// job notifications: those the API accepts with the read scope.
+func webPushReadTokenIDs(cfg config.APIConfig) []string {
+	var ids []string
+	if cfg.Token != "" {
+		ids = append(ids, push.TokenID(cfg.Token))
+	}
+	for _, t := range cfg.Tokens {
+		if t.Token != "" && slices.Contains(t.Scopes, config.ScopeRead) {
+			ids = append(ids, push.TokenID(t.Token))
+		}
+	}
+	return ids
 }
 
 func formatPlannedUIURL(listen string) string {

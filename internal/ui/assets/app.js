@@ -3282,8 +3282,13 @@
 
   function renderNotifyButton() {
     const push = pushController.view();
+    // Notifications are off here, but pushes may still arrive.
+    const removal = !notifyView.enabled &&
+      (push.state === "removing" || push.state === "unconfirmed");
     let label = "通知";
-    if (notifyView.enabled) {
+    if (removal) {
+      label = push.state === "removing" ? "通知: 解除中" : "通知: 解除未確認";
+    } else if (notifyView.enabled) {
       if (push.state === "active") {
         label = "通知: Push";
       } else if (push.state === "pending") {
@@ -3302,7 +3307,7 @@
       Boolean(notifyView.problem) && push.state !== "active");
     dom.btnNotify.title = [
       notifyView.problem || ("ジョブ完了のブラウザ通知: " + (notifyView.enabled ? "オン" : "オフ")),
-      notifyView.enabled ? push.message : "",
+      notifyView.enabled || removal ? push.message : "",
       notifyHelper.IOS_PUSH_NOTE
     ].filter(Boolean).join("\n");
   }
@@ -3319,6 +3324,9 @@
         typeof window.PushManager === "function";
     },
     getRegistration: notificationPresenter.register,
+    findRegistration: function () {
+      return navigator.serviceWorker.getRegistration("/ui/");
+    },
     // Not apiFetch: a token without the operate scope must not open the auth gate.
     fetch: function (url, opts) { return window.fetch(url, opts); },
     getToken: getStoredToken,
@@ -3416,11 +3424,30 @@
     void tryConnect("", true);
   });
 
-  // After turning notifications on, say whether they also arrive with the page closed.
+  // After turning notifications on, say whether they also arrive with the page closed;
+  // after turning them off, say if pushes may still arrive.
   async function toggleNotifications() {
     const wasEnabled = notifyController.isEnabled();
+    const before = pushController.view().state;
+    // Until a removal is confirmed, the button retries it instead of turning on.
+    if (!wasEnabled && (before === "removing" || before === "unconfirmed")) {
+      const retried = await pushController.sync();
+      if (retried.state === "unconfirmed") {
+        showBanner("error", retried.message);
+      } else if (retried.state === "off") {
+        showBanner("success", "Web Push: 解除しました。");
+      }
+      return;
+    }
     await notifyController.toggle();
-    if (wasEnabled || !notifyController.isEnabled()) {
+    if (wasEnabled) {
+      const removed = await pushController.settled();
+      if (removed.state === "unconfirmed") {
+        showBanner("error", removed.message);
+      }
+      return;
+    }
+    if (!notifyController.isEnabled()) {
       return;
     }
     const view = await pushController.settled();

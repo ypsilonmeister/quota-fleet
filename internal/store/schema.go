@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     p256dh TEXT NOT NULL,
     auth TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    user_agent TEXT NOT NULL DEFAULT ''
+    user_agent TEXT NOT NULL DEFAULT '',
+    token_id TEXT NOT NULL DEFAULT ''
 );
 `

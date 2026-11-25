@@ -17,6 +17,7 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/agentmodels"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentver"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/push"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 	"github.com/ypsilonmeister/quota-fleet/internal/ui"
@@ -98,7 +99,9 @@ type apiToken struct {
 type authContextKey struct{}
 
 type authPrincipal struct {
-	name     string
+	name string
+	// tokenID is push.TokenID of the presented token, empty for anonymous access.
+	tokenID  string
 	scopes   []string
 	scopeSet map[string]struct{}
 }
@@ -292,7 +295,9 @@ func NewServer(st *store.Store, opts Options) *Server {
 			rootMux.Handle(pattern, s.requireTokenAuth(s.requireScope(scope, handler)))
 		}
 		handle("GET /push/vapid-public-key", config.ScopeRead, s.handleVAPIDPublicKey)
-		handle("POST /push/subscriptions", config.ScopeOperate, s.handleCreatePushSubscription)
+		// Registering also needs read: the token must be able to see what is pushed.
+		handle("POST /push/subscriptions", config.ScopeOperate,
+			s.requireScope(config.ScopeRead, s.handleCreatePushSubscription))
 		handle("DELETE /push/subscriptions", config.ScopeOperate, s.handleDeletePushSubscription)
 	}
 	rootMux.Handle("/", apiHandler)
@@ -349,6 +354,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), authContextKey{}, authPrincipal{
 			name:     matched.name,
+			tokenID:  push.TokenID(matched.token),
 			scopes:   matched.scopes,
 			scopeSet: matched.scopeSet,
 		})
