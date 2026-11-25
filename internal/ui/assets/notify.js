@@ -580,8 +580,8 @@
   // createPushController keeps this browser's Web Push subscription, here and on the
   // server, in step with the notification toggle (docs/16). It never turns notifications
   // off: whatever fails here, the event stream keeps working as before. It reports "off"
-  // only when nothing can arrive any more: there is no subscription, or the server or the
-  // browser confirmed removing it.
+  // only when there is no subscription, or the server or the browser confirmed removing
+  // it. A message the server started sending before then may still arrive.
   function createPushController(options) {
     const setTimer = options.setTimeout || defaultSetTimeout;
     const clearTimer = options.clearTimeout || defaultClearTimeout;

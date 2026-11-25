@@ -44,6 +44,12 @@ func TestPushSubscriptionsUpsertListDelete(t *testing.T) {
 	if got[0] != renewed {
 		t.Errorf("subscription = %+v, want %+v", got[0], renewed)
 	}
+	if one, found, err := st.GetPushSubscription(ctx, renewed.Endpoint); err != nil || !found || one != renewed {
+		t.Errorf("get = %+v, %v, %v", one, found, err)
+	}
+	if one, found, err := st.GetPushSubscription(ctx, "https://push.example/other"); err != nil || found {
+		t.Errorf("get unknown = %+v, %v, %v", one, found, err)
+	}
 
 	// An expiry reported for the replaced keys keeps the renewed subscription.
 	if deleted, err := st.DeleteExpiredPushSubscription(ctx, first); err != nil || deleted {

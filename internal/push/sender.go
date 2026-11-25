@@ -249,7 +249,7 @@ func (s *Sender) deliver(ev store.JobEvent) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-slots }()
-			s.send(ev.JobID, sub, message)
+			s.send(ev.JobID, sub.Endpoint, message)
 		}()
 	}
 	wg.Wait()
@@ -297,14 +297,26 @@ func excerpt(text string, limit int) string {
 	return string(out)
 }
 
-func (s *Sender) send(jobID int64, sub store.PushSubscription, message []byte) {
-	ctx, cancel := context.WithTimeout(s.ctx, s.sendTimeout)
-	defer cancel()
+// send runs once a request slot is free. It reads the subscription again, because it may
+// have been removed or registered anew while it waited. A removal after that read does
+// not stop this message (docs/16).
+func (s *Sender) send(jobID int64, endpoint string, message []byte) {
 	// An endpoint is a capability URL, so only its host is logged.
 	host := "invalid endpoint"
-	if u, err := url.Parse(sub.Endpoint); err == nil {
+	if u, err := url.Parse(endpoint); err == nil {
 		host = u.Host
 	}
+	sub, found, err := s.store.GetPushSubscription(s.ctx, endpoint)
+	if err != nil {
+		// Not sent: it may have been removed.
+		s.logger.Printf("WARNING: web push for job %d to %s: read subscription: %v", jobID, host, err)
+		return
+	}
+	if !found || !s.readTokens[sub.TokenID] {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, s.sendTimeout)
+	defer cancel()
 
 	// webpush-go appends its padding to the slice it is given, so each request gets a copy.
 	resp, err := webpush.SendNotificationWithContext(ctx, bytes.Clone(message), &webpush.Subscription{

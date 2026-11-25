@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math/big"
@@ -557,6 +558,100 @@ func TestSenderClosePushesPendingAndSurvivesEventShutdown(t *testing.T) {
 	}
 	if strings.Contains(f.logs.String(), "fell behind") {
 		t.Errorf("a shutdown was taken for falling behind:\n%s", f.logs.String())
+	}
+}
+
+// A subscription may be removed or replaced while it waits for a free request slot; what
+// is stored when the slot frees decides whether, and with which keys, it is sent.
+func TestSenderRechecksSubscriptionsWaitingForSlot(t *testing.T) {
+	for _, change := range []string{"deleted", "moved to a token without read", "new keys"} {
+		t.Run(change, func(t *testing.T) {
+			requests := make(chan pushRequest, concurrency+1)
+			release := make(chan struct{})
+			// A push service that holds every answer until released.
+			f := newFixture(t, Options{SendTimeout: time.Minute, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					return nil, err
+				}
+				requests <- pushRequest{path: r.URL.Path, body: body}
+				select {
+				case <-release:
+					return &http.Response{StatusCode: http.StatusCreated, Body: http.NoBody}, nil
+				case <-r.Context().Done():
+					return nil, r.Context().Err()
+				}
+			})})
+			open := sync.OnceFunc(func() { close(release) })
+			// Runs before the fixture closes the sender.
+			t.Cleanup(open)
+			ctx := context.Background()
+			waiting := map[string]bool{}
+			for i := range concurrency + 1 {
+				path := fmt.Sprintf("/%02d", i)
+				f.subscribe(t, "https://push.example"+path)
+				waiting[path] = true
+			}
+			id, token := f.claim(t, "j", "job")
+			if _, err := f.st.Complete(ctx, id, token, "ok"); err != nil {
+				t.Fatal(err)
+			}
+			// Every slot is now taken, and one subscription has had no request.
+			for range concurrency {
+				select {
+				case r := <-requests:
+					delete(waiting, r.path)
+				case <-time.After(5 * time.Second):
+					t.Fatal("no push request")
+				}
+			}
+			if len(waiting) != 1 || len(requests) != 0 {
+				t.Fatalf("waiting = %v with %d more requests, want one subscription waiting", waiting, len(requests))
+			}
+			var path string
+			for p := range waiting {
+				path = p
+			}
+			endpoint := "https://push.example" + path
+
+			var renewed browser
+			switch change {
+			case "deleted":
+				if deleted, err := f.st.DeletePushSubscription(ctx, endpoint); err != nil || !deleted {
+					t.Fatalf("delete = %v, %v", deleted, err)
+				}
+			case "moved to a token without read":
+				subs, err := f.st.ListPushSubscriptions(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, sub := range subs {
+					if sub.Endpoint == endpoint {
+						sub.TokenID = TokenID("operate-only-token")
+						if _, err := f.st.UpsertPushSubscription(ctx, sub); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			case "new keys":
+				renewed = f.subscribe(t, endpoint)
+			}
+			open()
+			f.sender.Close()
+
+			if change != "new keys" {
+				if len(requests) != 0 {
+					t.Errorf("new request to %s after the subscription was %s", (<-requests).path, change)
+				}
+				return
+			}
+			if len(requests) != 1 {
+				t.Fatalf("%d requests after release, want 1", len(requests))
+			}
+			if r := <-requests; r.path != path || renewed.decrypt(t, r.body).JobID != id {
+				t.Errorf("request to %s, want job %d to %s", r.path, id, path)
+			}
+		})
 	}
 }
 

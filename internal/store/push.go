@@ -122,12 +122,26 @@ func execDeleted(ctx context.Context, conn *sql.Conn, query string, args ...any)
 	return n > 0, err
 }
 
+const selectPushSubscriptions = `
+	SELECT endpoint, p256dh, auth, created_at, user_agent, token_id FROM push_subscriptions`
+
+// GetPushSubscription returns the subscription stored for endpoint; found is false when
+// there is none.
+func (s *Store) GetPushSubscription(ctx context.Context, endpoint string) (sub PushSubscription, found bool, err error) {
+	sub, err = scanPushSubscription(s.readDB.QueryRowContext(ctx,
+		selectPushSubscriptions+` WHERE endpoint = ?`, endpoint))
+	if errors.Is(err, sql.ErrNoRows) {
+		return PushSubscription{}, false, nil
+	}
+	if err != nil {
+		return PushSubscription{}, false, err
+	}
+	return sub, true, nil
+}
+
 // ListPushSubscriptions returns every stored subscription, oldest first.
 func (s *Store) ListPushSubscriptions(ctx context.Context) ([]PushSubscription, error) {
-	rows, err := s.readDB.QueryContext(ctx, `
-		SELECT endpoint, p256dh, auth, created_at, user_agent, token_id
-		FROM push_subscriptions ORDER BY created_at, endpoint
-	`)
+	rows, err := s.readDB.QueryContext(ctx, selectPushSubscriptions+` ORDER BY created_at, endpoint`)
 	if err != nil {
 		return nil, err
 	}
@@ -135,17 +149,27 @@ func (s *Store) ListPushSubscriptions(ctx context.Context) ([]PushSubscription, 
 
 	var out []PushSubscription
 	for rows.Next() {
-		var (
-			sub       PushSubscription
-			createdAt string
-		)
-		if err := rows.Scan(&sub.Endpoint, &sub.P256dh, &sub.Auth, &createdAt, &sub.UserAgent, &sub.TokenID); err != nil {
+		sub, err := scanPushSubscription(rows)
+		if err != nil {
 			return nil, err
-		}
-		if sub.CreatedAt, err = parseTime(createdAt); err != nil {
-			return nil, fmt.Errorf("parse push subscription created_at: %w", err)
 		}
 		out = append(out, sub)
 	}
 	return out, rows.Err()
+}
+
+// scanPushSubscription reads one row of selectPushSubscriptions.
+func scanPushSubscription(row interface{ Scan(...any) error }) (PushSubscription, error) {
+	var (
+		sub       PushSubscription
+		createdAt string
+	)
+	if err := row.Scan(&sub.Endpoint, &sub.P256dh, &sub.Auth, &createdAt, &sub.UserAgent, &sub.TokenID); err != nil {
+		return PushSubscription{}, err
+	}
+	var err error
+	if sub.CreatedAt, err = parseTime(createdAt); err != nil {
+		return PushSubscription{}, fmt.Errorf("parse push subscription created_at: %w", err)
+	}
+	return sub, nil
 }
