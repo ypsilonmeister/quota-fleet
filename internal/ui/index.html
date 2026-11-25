@@ -23,42 +23,44 @@
     <div class="topbar-inner">
       <a class="brand" href="/ui/" data-nav="true">quota-fleet</a>
       <nav class="nav" aria-label="Main navigation">
-        <a class="nav-link" href="/ui/" data-nav="true" data-route="dashboard">ダッシュボード</a>
-        <a class="nav-link" href="/ui/jobs" data-nav="true" data-route="jobs">ジョブ一覧</a>
-        <a class="nav-link" href="/ui/jobs/new" data-nav="true" data-route="new-job">新規登録</a>
-        <a class="nav-link" href="/ui/gate/held" data-nav="true" data-route="held">保持中</a>
-        <a class="nav-link" href="/ui/gate/decisions" data-nav="true" data-route="decisions">ゲート判定</a>
-        <a class="nav-link" href="/ui/deliveries" data-nav="true" data-route="deliveries">納品</a>
-        <a class="nav-link" href="/ui/agents" data-nav="true" data-route="agents">エージェント版数</a>
+        <a class="nav-link" href="/ui/" data-nav="true" data-route="dashboard" data-i18n="nav.dashboard"></a>
+        <a class="nav-link" href="/ui/jobs" data-nav="true" data-route="jobs" data-i18n="nav.jobs"></a>
+        <a class="nav-link" href="/ui/jobs/new" data-nav="true" data-route="new-job" data-i18n="nav.newJob"></a>
+        <a class="nav-link" href="/ui/gate/held" data-nav="true" data-route="held" data-i18n="nav.held"></a>
+        <a class="nav-link" href="/ui/gate/decisions" data-nav="true" data-route="decisions" data-i18n="nav.decisions"></a>
+        <a class="nav-link" href="/ui/deliveries" data-nav="true" data-route="deliveries" data-i18n="nav.deliveries"></a>
+        <a class="nav-link" href="/ui/agents" data-nav="true" data-route="agents" data-i18n="nav.agents"></a>
       </nav>
       <div class="topbar-actions">
         <span id="meta-badges" class="meta-badges"></span>
-        <div id="direction-switch" class="direction-switch" role="group" aria-label="表示モードの切替">
-          <button type="button" class="direction-btn" data-set-direction="console" aria-pressed="false" aria-label="ダーク（計器盤）">ダーク</button>
-          <button type="button" class="direction-btn" data-set-direction="ledger" aria-pressed="false" aria-label="ライト（台帳）">ライト</button>
+        <div id="locale-switch" class="direction-switch" role="group" data-i18n-aria-label="lang.switchLabel">
+          <button type="button" class="direction-btn" data-set-locale="ja" aria-pressed="false" data-i18n-title="lang.jaName" data-i18n="lang.ja"></button>
+          <button type="button" class="direction-btn" data-set-locale="en" aria-pressed="false" data-i18n-title="lang.enName" data-i18n="lang.en"></button>
         </div>
-        <button id="btn-notify" type="button" class="btn btn-sm btn-ghost" aria-pressed="false" title="ジョブ完了のブラウザ通知">通知</button>
-        <button id="btn-refresh" type="button" class="btn btn-sm">更新</button>
-        <button id="btn-token" type="button" class="btn btn-sm btn-ghost">トークン</button>
+        <div id="direction-switch" class="direction-switch" role="group" data-i18n-aria-label="theme.switchLabel">
+          <button type="button" class="direction-btn" data-set-direction="console" aria-pressed="false" data-i18n-aria-label="theme.darkLabel" data-i18n="theme.dark"></button>
+          <button type="button" class="direction-btn" data-set-direction="ledger" aria-pressed="false" data-i18n-aria-label="theme.lightLabel" data-i18n="theme.light"></button>
+        </div>
+        <button id="btn-notify" type="button" class="btn btn-sm btn-ghost" aria-pressed="false" data-i18n-title="header.notifyTitle" data-i18n="header.notify"></button>
+        <button id="btn-refresh" type="button" class="btn btn-sm" data-i18n="header.refresh"></button>
+        <button id="btn-token" type="button" class="btn btn-sm btn-ghost" data-i18n="header.token"></button>
       </div>
     </div>
   </header>
 
   <section id="auth-gate" class="auth-gate" hidden>
     <div class="card auth-card">
-      <h1>API トークン認証</h1>
-      <p class="muted">
-        API に接続するための Bearer トークンを入力してください。トークンはこのタブの sessionStorage にのみ保持されます。
-      </p>
+      <h1 data-i18n="auth.title"></h1>
+      <p class="muted" data-i18n="auth.description"></p>
       <form id="auth-form" class="form-stack">
         <label class="field">
-          <span class="field-label">Bearer トークン</span>
-          <input id="auth-token-input" type="password" autocomplete="off" placeholder="fleet.yaml の api.token" required>
+          <span class="field-label" data-i18n="auth.tokenLabel"></span>
+          <input id="auth-token-input" type="password" autocomplete="off" data-i18n-placeholder="auth.tokenPlaceholder" required>
         </label>
         <div id="auth-error" class="alert alert-error" hidden></div>
         <div class="btn-row">
-          <button type="submit" class="btn btn-primary">接続</button>
-          <button id="btn-connect-no-auth" type="button" class="btn btn-ghost">トークンなしで接続</button>
+          <button type="submit" class="btn btn-primary" data-i18n="auth.connect"></button>
+          <button id="btn-connect-no-auth" type="button" class="btn btn-ghost" data-i18n="auth.connectNoAuth"></button>
         </div>
       </form>
     </div>
@@ -68,8 +70,12 @@
 
   <main id="app" class="container" aria-live="polite">
     <noscript>
-      <div class="alert alert-error">この UI の利用には JavaScript が必要です。</div>
+      <!-- Without JavaScript nothing can be translated (docs/17). -->
+      <div class="alert alert-error" lang="en">This UI requires JavaScript.</div>
     </noscript>
   </main>
+  <!-- Not deferred: fills in the labels above as soon as they are parsed, before the
+       deferred scripts that depend on it (docs/17). -->
+  <script src="/ui/assets/i18n.js"></script>
 </body>
 </html>

@@ -287,7 +287,7 @@ const input = JSON.parse(fs.readFileSync(0, "utf8"));
 const ORIGIN = "https://fleet.example";
 const VERSION = /const SHELL_VERSION = "([0-9a-f]+)";/.exec(input.source)[1];
 const CACHE = "qf-shell-" + VERSION;
-const ASSETS = ["/ui/assets/style.css", "/ui/assets/direction.js", "/ui/assets/notify.js",
+const ASSETS = ["/ui/assets/style.css", "/ui/assets/direction.js", "/ui/assets/i18n.js", "/ui/assets/notify.js",
   "/ui/assets/app.js", "/ui/manifest.webmanifest", "/ui/assets/icon-192.png",
   "/ui/assets/icon-512.png", "/ui/assets/icon-maskable-512.png", "/ui/assets/apple-touch-icon.png"];
 

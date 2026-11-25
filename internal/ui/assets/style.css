@@ -63,7 +63,7 @@
 }
 
 /* ==========================================================================
-   Direction A: 計器盤 (console)
+   Direction A: instrument panel (console)
    Dark instrument panel — dimmer chrome, quiet hairlines, tabular readouts,
    lamp-dot + distinct shape status indicators.
    ========================================================================== */
@@ -120,7 +120,7 @@ html[data-direction="console"] {
 }
 
 /* ==========================================================================
-   Direction B: 台帳 (ledger)
+   Direction B: ledger (ledger)
    Warm paper ground, system Mincho headings, sumi-ink rules, airy row rhythm,
    stamp/tag status labels legible without color.
    ========================================================================== */
@@ -289,7 +289,8 @@ html[data-direction="ledger"] .brand {
   display: flex;
   gap: 2px;
   flex-wrap: wrap;
-  flex: 1;
+  /* Where the controls do not fit beside it, they move to the next row (docs/17). */
+  flex: 1 1 360px;
   min-width: 0;
 }
 
@@ -1713,6 +1714,7 @@ tbody .chain-root-row:first-child td {
 
   .nav {
     order: 3;
+    flex-basis: 100%;
     width: 100%;
     overflow-x: auto;
     flex-wrap: nowrap;

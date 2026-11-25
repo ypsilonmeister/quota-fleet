@@ -11,7 +11,7 @@ import (
 
 //go:generate go run gen_icons.go
 
-//go:embed index.html assets/style.css assets/direction.js assets/notify.js assets/app.js assets/sw.js
+//go:embed index.html assets/style.css assets/direction.js assets/i18n.js assets/notify.js assets/app.js assets/sw.js
 //go:embed assets/manifest.webmanifest assets/icon-192.png assets/icon-512.png
 //go:embed assets/icon-maskable-512.png assets/apple-touch-icon.png
 var assetsFS embed.FS
@@ -34,6 +34,7 @@ type shellAsset struct {
 var shellAssets = []shellAsset{
 	{"/ui/assets/style.css", "assets/style.css", "text/css; charset=utf-8"},
 	{"/ui/assets/direction.js", "assets/direction.js", "application/javascript; charset=utf-8"},
+	{"/ui/assets/i18n.js", "assets/i18n.js", "application/javascript; charset=utf-8"},
 	{"/ui/assets/notify.js", "assets/notify.js", "application/javascript; charset=utf-8"},
 	{"/ui/assets/app.js", "assets/app.js", "application/javascript; charset=utf-8"},
 	{"/ui/manifest.webmanifest", "assets/manifest.webmanifest", "application/manifest+json"},
@@ -47,6 +48,7 @@ var (
 	indexHTML    []byte
 	styleCSS     []byte
 	directionJS  []byte
+	i18nJS       []byte
 	notifyJS     []byte
 	appJS        []byte
 	swJS         []byte
@@ -57,6 +59,7 @@ func init() {
 	indexHTML = mustRead("index.html")
 	styleCSS = mustRead("assets/style.css")
 	directionJS = mustRead("assets/direction.js")
+	i18nJS = mustRead("assets/i18n.js")
 	notifyJS = mustRead("assets/notify.js")
 	appJS = mustRead("assets/app.js")
 	manifestJSON = mustRead("assets/manifest.webmanifest")
