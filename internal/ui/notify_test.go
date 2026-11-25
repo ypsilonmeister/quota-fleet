@@ -322,7 +322,7 @@ async function main() {
     assert.strictEqual(calls, 2);
   }
 
-  // 2b. Display path: service worker first, new Notification() as the fallback
+  // 2b. Display path: the service worker, or new Notification() only without that API
   const message = { jobID: 5, title: "T", body: "B", tag: "qf-job-5:done" };
   function fakeWorker(opts) {
     const log = { registers: [], shown: [], listeners: {} };
@@ -393,53 +393,63 @@ async function main() {
     assert.deepStrictEqual(answers, ["ok"], "the worker learns that this tab handles the click");
     assert.deepStrictEqual(f.calls, ["open 5", "open 6"]);
   }
-  for (const [name, worker] of [
-    ["no service worker", null],
-    ["register fails", fakeWorker({ registerFails: true })],
-    ["showNotification fails", fakeWorker({ showFails: true })],
-    ["no showNotification", fakeWorker({ registration: {} })]
-  ]) {
+  {
+    // without the service worker API the page shows the notification itself
     const N = fakeNotification("granted");
-    const f = presenterFixture(worker, N);
+    const f = presenterFixture(null, N);
     await f.presenter.show(message);
-    assert.strictEqual(N.created.length, 1, name);
-    assert.strictEqual(N.created[0].title, "T", name);
-    assert.deepStrictEqual(N.created[0].options, { body: "B", tag: "qf-job-5:done" }, name);
-    assert.deepStrictEqual(f.timers.delays(), [], name);
+    assert.strictEqual(N.created.length, 1);
+    assert.strictEqual(N.created[0].title, "T");
+    assert.deepStrictEqual(N.created[0].options, { body: "B", tag: "qf-job-5:done" });
+    assert.deepStrictEqual(f.timers.delays(), []);
 
     let prevented = false;
     N.created[0].onclick({ preventDefault: () => { prevented = true; } });
-    assert.ok(prevented, name);
-    assert.deepStrictEqual(f.calls, ["focus", "open 5"], name);
-    assert.strictEqual(N.created[0].closed, true, name);
+    assert.ok(prevented);
+    assert.deepStrictEqual(f.calls, ["focus", "open 5"]);
+    assert.strictEqual(N.created[0].closed, true);
 
-    await assert.rejects(presenterFixture(worker, illegalConstructor()).presenter.show(message), /Illegal constructor/, name);
+    await assert.rejects(presenterFixture(null, illegalConstructor()).presenter.show(message), /Illegal constructor/);
   }
-  // Android Chrome has the constructor but rejects it: no failure path may call it.
-  for (const [name, worker] of [
-    ["no service worker", null],
-    ["register fails", fakeWorker({ registerFails: true })],
-    ["showNotification fails", fakeWorker({ showFails: true })],
-    ["no showNotification", fakeWorker({ registration: {} })],
-    ["never active", fakeWorker({ neverReady: true })]
+  // Android Chrome has the constructor but rejects it, and with "desktop site" its
+  // User-Agent is that of desktop Linux: no service worker failure may call it.
+  for (const [uaName, userAgent] of [
+    ["mobile", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/142.0.0.0 Mobile Safari/537.36"],
+    ["desktop site", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36"]
   ]) {
+    for (const [failure, opts, error] of [
+      ["register fails", { registerFails: true }, /service worker is not available/],
+      ["never active", { neverReady: true }, /service worker is not available/],
+      ["no showNotification", { registration: {} }, /service worker is not available/],
+      ["showNotification fails", { showFails: true }, /No active registration/]
+    ]) {
+      const name = uaName + ", " + failure;
+      const Ctor = illegalConstructor();
+      const f = presenterFixture(fakeWorker(opts), Ctor);
+      f.state.userAgent = userAgent;
+      const rejected = assert.rejects(f.presenter.show(message), error, name);
+      if (opts.neverReady) { await flush(); await f.timers.fire(10000); }
+      await rejected;
+      assert.strictEqual(Ctor.attempts, 0, name);
+      assert.deepStrictEqual(f.timers.delays(), [], name);
+    }
+  }
+  {
+    // a mobile Android User-Agent rules the constructor out even without the API
     const Ctor = illegalConstructor();
-    const f = presenterFixture(worker, Ctor);
+    const f = presenterFixture(null, Ctor);
     f.state.userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/142.0.0.0 Mobile Safari/537.36";
-    const rejected = assert.rejects(f.presenter.show(message), /page notifications are not supported/, name);
-    if (name === "never active") { await flush(); await f.timers.fire(10000); }
-    await rejected;
-    assert.strictEqual(Ctor.attempts, 0, name);
+    await assert.rejects(f.presenter.show(message), /page notifications are not supported/);
+    assert.strictEqual(Ctor.attempts, 0);
   }
   // Turned off while waiting: nothing is shown, by either path.
-  for (const [name, opts] of [["worker", {}], ["page fallback", { registerFails: true }]]) {
-    const w = fakeWorker(opts);
+  for (const [name, w] of [["worker", fakeWorker({})], ["failed registration", fakeWorker({ registerFails: true })], ["page", null]]) {
     const N = fakeNotification("granted");
     const f = presenterFixture(w, N);
     const shown = f.presenter.show(message);
     f.state.enabled = false;
     assert.strictEqual(await shown, false, name);
-    assert.strictEqual(w.log.shown.length, 0, name);
+    if (w) assert.strictEqual(w.log.shown.length, 0, name);
     assert.strictEqual(N.created.length, 0, name);
   }
   {
@@ -480,12 +490,11 @@ async function main() {
     const w = fakeWorker({ neverReady: true });
     const N = fakeNotification("granted");
     const f = presenterFixture(w, N);
-    const shown = f.presenter.show(message);
+    const rejected = assert.rejects(f.presenter.show(message), /service worker is not available/);
     await flush();
-    assert.strictEqual(N.created.length, 0);
     await f.timers.fire(10000);
-    await shown;
-    assert.strictEqual(N.created.length, 1);
+    await rejected;
+    assert.strictEqual(N.created.length, 0);
     w.container.ready = Promise.resolve({ showNotification: async () => w.log.shown.push("late") });
     await f.presenter.show(message);
     assert.deepStrictEqual(w.log.shown, ["late"]);

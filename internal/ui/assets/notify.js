@@ -182,8 +182,9 @@
   }
 
   // createNotificationPresenter displays notifications through the service worker
-  // registration and falls back to new Notification() where that is not possible, except
-  // on Android.
+  // registration. new Notification() is used only where the browser has no service worker
+  // API: Android Chrome rejects the constructor, and its "desktop site" User-Agent cannot
+  // be told apart from desktop Linux, so a failing worker is not a reason to try it.
   function createNotificationPresenter(options) {
     const setTimer = options.setTimeout || defaultSetTimeout;
     const clearTimer = options.clearTimeout || defaultClearTimeout;
@@ -235,7 +236,7 @@
 
     function showFromPage(message) {
       // Android Chrome exposes the constructor but throws when it is called, and calling
-      // it is the only feature test, so the platform is checked instead.
+      // it is the only feature test, so an Android User-Agent rules it out as well.
       if (/Android/i.test(options.getUserAgent())) {
         throw new Error("page notifications are not supported");
       }
@@ -255,28 +256,31 @@
     }
 
     // show resolves to false if notifications were turned off while it was waiting, and
-    // rejects when neither way can display the notification.
+    // rejects when the notification cannot be displayed.
     async function show(message) {
       const registration = await register();
       if (!options.isEnabled()) {
         return false;
       }
-      if (registration && typeof registration.showNotification === "function") {
-        try {
-          await registration.showNotification(message.title, {
-            body: message.body,
-            tag: message.tag,
-            data: { jobId: message.jobID }
-          });
-          return true;
-        } catch (_err) {
-          // Fall back to the page notification below.
-        }
+      if (!container) {
+        showFromPage(message);
+        return true;
+      }
+      if (!registration || typeof registration.showNotification !== "function") {
+        throw new Error("service worker is not available");
+      }
+      try {
+        await registration.showNotification(message.title, {
+          body: message.body,
+          tag: message.tag,
+          data: { jobId: message.jobID }
+        });
+      } catch (err) {
         if (!options.isEnabled()) {
           return false;
         }
+        throw err;
       }
-      showFromPage(message);
       return true;
     }
 
