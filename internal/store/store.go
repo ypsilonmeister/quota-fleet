@@ -105,6 +105,10 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs.created_by: %w", err)
 	}
+	if err := ensureSelectionColumns(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs selection columns: %w", err)
+	}
 	if err := ensureHeldJobsColumns(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate held_jobs: %w", err)
@@ -353,17 +357,20 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 				request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 				instructions, acceptance_criteria, parent_id,
 				claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-				created_at, updated_at, model, pool, alt_pools, session_id, created_by
+				created_at, updated_at, model, pool, alt_pools, session_id, created_by,
+				selected_agent, selected_model, selected_pool, selection_reason, selection_mode
 			) VALUES (
 				?, ?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?,
 				'', NULL, 0, '', '', NULL,
-				?, ?, ?, ?, ?, ?, ?
+				?, ?, ?, ?, ?, ?, ?,
+				?, ?, ?, ?, ?
 			)
 		`,
 			p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
 			p.Instructions, p.AcceptanceCriteria, parentArg,
 			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy),
+			p.SelectedAgent, p.SelectedModel, p.SelectedPool, p.SelectionReason, p.SelectionMode,
 		)
 		if err != nil {
 			if isUniqueConstraintError(err) {
@@ -1544,7 +1551,8 @@ const jobColumns = `
 	id, request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 	instructions, acceptance_criteria, parent_id,
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-	created_at, updated_at, model, pool, alt_pools, session_id, created_by
+	created_at, updated_at, model, pool, alt_pools, session_id, created_by,
+	selected_agent, selected_model, selected_pool, selection_reason, selection_mode
 `
 
 func queryJobByID(ctx context.Context, q queryRower, jobID int64) (*Job, error) {
@@ -1583,6 +1591,7 @@ func scanJob(s rowScanner) (*Job, error) {
 		&j.Instructions, &j.AcceptanceCriteria, &parentID,
 		&j.ClaimedBy, &claimedAt, &j.Attempts, &j.ResultText, &j.LastError, &deliveredAt,
 		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy,
+		&j.SelectedAgent, &j.SelectedModel, &j.SelectedPool, &j.SelectionReason, &j.SelectionMode,
 	)
 	if err != nil {
 		return nil, err
@@ -1892,6 +1901,16 @@ func ensureWorktreeSpecColumn(ctx context.Context, db *sql.DB) error {
 
 func ensureCreatedByColumn(ctx context.Context, db *sql.DB) error {
 	return ensureJobsColumn(ctx, db, "created_by", `ALTER TABLE jobs ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`)
+}
+
+// ensureSelectionColumns adds the Selector record columns (docs/19) to pre-existing databases.
+func ensureSelectionColumns(ctx context.Context, db *sql.DB) error {
+	for _, col := range []string{"selected_agent", "selected_model", "selected_pool", "selection_reason", "selection_mode"} {
+		if err := ensureJobsColumn(ctx, db, col, `ALTER TABLE jobs ADD COLUMN `+col+` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureJobsColumn(ctx context.Context, db *sql.DB, colName, alterSQL string) error {

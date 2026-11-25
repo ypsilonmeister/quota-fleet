@@ -183,6 +183,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		RequireAuth:     cfg.API.RequireAuth,
 		Logger:          logger,
 		GateMode:        cfg.Quota.EffectiveGateMode(),
+		SelectorMode:    cfg.Selector.EffectiveMode(),
 		EvaluatorMode:   cfg.Evaluator.EffectiveMode(),
 		QuotaUsageFile:  cfg.Quota.UsageFile,
 		QuotaStaleAfter: cfg.Quota.EffectiveStaleAfter(),

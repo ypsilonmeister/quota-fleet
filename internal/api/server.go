@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ypsilonmeister/quota-fleet/internal/selector"
 	"io"
 	"log"
 	"net/http"
@@ -55,7 +56,9 @@ type Options struct {
 	Logger      *log.Logger
 
 	// Quota Gate integration settings (off | dry-run | enforce).
-	GateMode        string
+	GateMode string
+	// SelectorMode is off | record | apply (docs/19). Empty means off.
+	SelectorMode    string
 	EvaluatorMode   string
 	QuotaUsageFile  string
 	QuotaStaleAfter time.Duration
@@ -145,6 +148,7 @@ type Server struct {
 	requireAuth     bool
 	logger          *log.Logger
 	gateMode        string
+	selectorMode    string
 	evaluatorMode   string
 	quotaUsageFile  string
 	quotaStaleAfter time.Duration
@@ -169,6 +173,10 @@ func NewServer(st *store.Store, opts Options) *Server {
 	logger := opts.Logger
 	if logger == nil {
 		logger = log.Default()
+	}
+	selectorMode := strings.TrimSpace(opts.SelectorMode)
+	if selectorMode == "" {
+		selectorMode = config.SelectorModeOff
 	}
 	gateMode := strings.TrimSpace(opts.GateMode)
 	if gateMode == "" {
@@ -235,6 +243,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 		requireAuth:     opts.RequireAuth,
 		logger:          logger,
 		gateMode:        gateMode,
+		selectorMode:    selectorMode,
 		evaluatorMode:   evaluatorMode,
 		quotaUsageFile:  strings.TrimSpace(opts.QuotaUsageFile),
 		quotaStaleAfter: staleAfter,
@@ -391,6 +400,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !selector.ValidRole(strings.TrimSpace(req.Role)) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: role %q is not supported (implement|review|judge|fix|publish|misc)", store.ErrInvalidInput, req.Role))
+		return
+	}
+	if !selector.ValidWeight(strings.TrimSpace(req.Weight)) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: weight %q is not supported (light|standard|heavy)", store.ErrInvalidInput, req.Weight))
+		return
+	}
+
 	resolvedPool := s.resolveRequestPool(req)
 
 	createdBy := ""
@@ -415,6 +433,8 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		SessionID:          req.SessionID,
 		CreatedBy:          createdBy,
 	}
+
+	s.applySelector(&params, req)
 
 	if s.gateMode == config.GateModeEnforce {
 		s.handleCreateJobEnforce(w, r, req, params)
@@ -640,6 +660,79 @@ func (s *Server) writeCreateJobError(w http.ResponseWriter, err error) {
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
+}
+
+// applySelector runs the Selector in front of the Gate (docs/19). Explicit agent/model/pool
+// values are never overwritten; only empty fields are filled, and only in apply mode with
+// the selection (record mode fills them with the documented defaults instead).
+func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobRequest) {
+	if s.selectorMode == config.SelectorModeOff {
+		return
+	}
+	agent := strings.TrimSpace(req.Agent)
+	model := strings.TrimSpace(req.Model)
+	explicitPool := strings.TrimSpace(req.Pool)
+	resolve := func(a, m string) string { return quota.ResolvePoolByAppliesTo(s.pools, a, m) }
+
+	if agent != "" && model != "" {
+		params.SelectedAgent, params.SelectedModel, params.SelectedPool = agent, model, params.Pool
+		params.SelectionMode = selector.ModeExplicit
+		params.SelectionReason = "agent and model explicitly specified; selector not consulted"
+		return
+	}
+
+	snap, snapErr := s.loadSnapshotForSelector()
+	res := selector.Select(selector.Input{
+		Role:        strings.TrimSpace(req.Role),
+		Weight:      strings.TrimSpace(req.Weight),
+		Agent:       agent,
+		Model:       model,
+		Pool:        explicitPool,
+		Usage:       snap,
+		UsageErr:    snapErr,
+		Eval:        quota.EvalOptions{Now: s.nowFn(), StaleAfter: s.quotaStaleAfter, Pools: s.pools},
+		ResolvePool: resolve,
+	})
+	params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Agent, res.Model, res.Pool
+	params.SelectionReason = res.Reason
+
+	switch s.selectorMode {
+	case config.SelectorModeApply:
+		params.SelectionMode = selector.ModeApplied
+		if agent == "" {
+			params.Agent = res.Agent
+		}
+		if model == "" {
+			params.Model = res.Model
+		}
+		if explicitPool == "" && res.Pool != "" {
+			params.Pool = res.Pool
+		}
+	default: // record
+		params.SelectionMode = selector.ModeRecorded
+		def := selector.Defaults(agent, model, explicitPool, resolve)
+		if agent == "" {
+			params.Agent = def.Agent
+		}
+		if model == "" {
+			params.Model = def.Model
+		}
+		if explicitPool == "" {
+			params.Pool = def.Pool
+		}
+		params.SelectionReason += fmt.Sprintf("; record mode executes with defaults %s/%s on pool %s", params.Agent, params.Model, params.Pool)
+	}
+}
+
+// loadSnapshotForSelector reads the usage snapshot through the same path as the Gate.
+func (s *Server) loadSnapshotForSelector() (*quota.Snapshot, error) {
+	if s.snapshotLoader != nil {
+		return s.snapshotLoader()
+	}
+	if s.quotaUsageFile == "" {
+		return nil, errors.New("quota.usage_file is not configured")
+	}
+	return quota.LoadUsageFile(s.quotaUsageFile)
 }
 
 func (s *Server) resolveRequestPool(req CreateJobRequest) string {
@@ -1313,6 +1406,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		Pools:         poolNames,
 		PoolRules:     poolRules,
 		GateMode:      s.gateMode,
+		SelectorMode:  s.selectorMode,
 		EvaluatorMode: s.evaluatorMode,
 		ReviewGate:    s.reviewGateMeta(),
 		PoolSummaries: summaries,
