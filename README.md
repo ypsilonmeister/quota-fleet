@@ -8,10 +8,12 @@ trustworthy enough to merge.
 >
 > Implemented:
 >
-> - Core **Phases 1–4** ([docs/06](docs/06-implementation-design.md)): SQLite
->   job store, HTTP API, Dispatcher/Launcher/Shepherd/Reconciler runtime,
->   SSH/local host adapter, Quota Gate, typed+decision Evaluator, and
->   file/webhook Notifier.
+> - **Core features** ([design: docs/06](docs/06-implementation-design.md)):
+>   SQLite job store, HTTP API, Dispatcher/Launcher/Shepherd/Reconciler
+>   runtime, SSH/local host adapter, Quota Gate (hold/release),
+>   typed+decision Evaluator, and file/webhook Notifier. This is a list of
+>   implemented code, not a claim that the migration exit criteria in docs/06
+>   (such as the Phase 4 production cut-over and quality comparison) are met.
 > - Embedded **web UI** at `/ui/` ([docs/07](docs/07-ui-and-mcp.md)), including
 >   the model pick list and automatic pool derivation
 >   ([docs/11](docs/11-ui-models.md)).
@@ -48,9 +50,14 @@ trustworthy enough to merge.
    Open the UI URL shown in the startup banner (default
    `http://127.0.0.1:8737/ui/`), enter the API token (`api.token` in
    `fleet.yaml`), and create a job from the new-job form. You can also register
-   jobs with the CLI (`quota-fleet job create --title "..."`) or the HTTP API.
+   jobs with the CLI (`./quota-fleet job create --title "..."`) or the HTTP API.
    To generate MCP client config snippets for AI clients, run
-   `quota-fleet mcp config`.
+   `./quota-fleet mcp config`. The stdio snippets invoke `quota-fleet` by name,
+   so to use them as generated, put the binary on the MCP client's `PATH`.
+   Otherwise, pass its absolute path:
+   ```bash
+   ./quota-fleet mcp config --binary "$PWD/quota-fleet"
+   ```
 
 ## Supported OS boundaries (v1)
 
