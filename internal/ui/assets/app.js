@@ -12,6 +12,13 @@
   const DIRECTION_KEY = directionHelper ? directionHelper.DIRECTION_KEY : "qf-direction";
   const detectPreferredDirection = directionHelper.detectPreferredDirection;
   const resolveDirection = directionHelper.resolveDirection;
+  const i18n =
+    (typeof globalThis !== "undefined" && globalThis.__qfI18n) ||
+    (typeof window !== "undefined" && window.__qfI18n) ||
+    (typeof require === "function" ? require("./i18n.js") : null);
+  const t = i18n.t;
+  // L(key, params) is a message that is redrawn when the language changes (docs/17).
+  const L = i18n.lazy;
   const ALL_STATUSES = [
     "draft",
     "queued",
@@ -24,13 +31,13 @@
   const CANCELLABLE_STATUSES = new Set(["draft", "queued", "waiting"]);
   const REQUEUEABLE_STATUSES = new Set(["failed", "cancelled"]);
   const SUMMARY_STATUS_ORDER = [
-    { key: "done", label: "done" },
-    { key: "claimed", label: "実行中" },
-    { key: "queued", label: "queued" },
-    { key: "waiting", label: "waiting" },
-    { key: "failed", label: "失敗" },
-    { key: "cancelled", label: "キャンセル" },
-    { key: "draft", label: "draft" }
+    { key: "done", labelKey: "status.done" },
+    { key: "claimed", labelKey: "status.claimed" },
+    { key: "queued", labelKey: "status.queued" },
+    { key: "waiting", labelKey: "status.waiting" },
+    { key: "failed", labelKey: "status.failed" },
+    { key: "cancelled", labelKey: "status.cancelled" },
+    { key: "draft", labelKey: "status.draft" }
   ];
 
   // ==================== Pure Chain / Tree Helpers ====================
@@ -168,7 +175,7 @@
 
   function formatChainProgressSummary(summary) {
     if (!summary || !summary.total) {
-      return "全0件";
+      return t("chain.summaryEmpty");
     }
     const counts = summary.counts || {};
     const parts = [];
@@ -177,18 +184,21 @@
       knownKeys.add(item.key);
       const n = counts[item.key] || 0;
       if (n > 0) {
-        parts.push(item.label + " " + n + "件");
+        parts.push(t("chain.summaryItem", { label: t(item.labelKey), count: n }));
       }
     }
     for (const key of Object.keys(counts)) {
       if (!knownKeys.has(key) && counts[key] > 0) {
-        parts.push(key + " " + counts[key] + "件");
+        parts.push(t("chain.summaryItem", { label: key, count: counts[key] }));
       }
     }
     if (parts.length === 0) {
-      return "全" + summary.total + "件";
+      return t("chain.summaryTotal", { total: summary.total });
     }
-    return "全" + summary.total + "件中 " + parts.join("・");
+    return t("chain.summaryBreakdown", {
+      total: summary.total,
+      parts: parts.join(t("chain.summarySeparator"))
+    });
   }
 
   function flattenChainTree(rootNode) {
@@ -283,7 +293,8 @@
             parentId: parentID,
             status: st,
             httpStatus: (err && typeof err.status === "number") ? err.status : 0,
-            message: (err && err.message) ? String(err.message) : String(err || "通信エラー")
+            message: (err && err.message) ? String(err.message) : String(err || ""),
+            messageKey: "chain.fetchNetworkError"
           };
           break;
         }
@@ -296,7 +307,8 @@
               ? String(cr.data.error)
               : (cr && !cr.ok
                 ? ("HTTP " + (typeof cr.status === "number" ? cr.status : "?"))
-                : "不正なレスポンス形式")
+                : ""),
+            messageKey: "chain.fetchInvalidResponse"
           };
           break;
         }
@@ -542,17 +554,20 @@
 
   function formatFetchErrorDetail(errItem) {
     if (!errItem) {
-      return "取得エラー";
+      return t("chain.fetchGenericError");
     }
     const httpStatus = Number(errItem.httpStatus || 0);
-    const msg = errItem.message ? String(errItem.message) : "";
+    // messageKey describes a failure that came without a message of its own.
+    const msg = errItem.message
+      ? String(errItem.message)
+      : (errItem.messageKey ? t(errItem.messageKey) : "");
     if (httpStatus > 0) {
       if (msg && msg.indexOf("HTTP " + httpStatus) === 0) {
         return msg;
       }
       return msg ? ("HTTP " + httpStatus + " " + msg) : ("HTTP " + httpStatus);
     }
-    return msg || "取得エラー";
+    return msg || t("chain.fetchGenericError");
   }
 
   function formatChainFetchErrorNotice(chainMeta) {
@@ -563,15 +578,17 @@
     const items = chainMeta.fetchErrors.slice(0, maxItems).map(function (errItem) {
       const parentLabel = (errItem && errItem.parentId !== undefined && errItem.parentId !== null)
         ? ("#" + errItem.parentId)
-        : "不明な親";
-      const statusLabel = (errItem && errItem.status) ? String(errItem.status) : "不明な状態";
+        : t("chain.unknownParent");
+      const statusLabel = (errItem && errItem.status) ? String(errItem.status) : t("chain.unknownStatus");
       return parentLabel + " [" + statusLabel + ": " + formatFetchErrorDetail(errItem) + "]";
     });
     const extra = chainMeta.fetchErrors.length > maxItems
-      ? (" 他 " + (chainMeta.fetchErrors.length - maxItems) + " 件")
+      ? t("chain.errorMore", { count: chainMeta.fetchErrors.length - maxItems })
       : "";
-    return "一部の子ジョブ取得に失敗したため、チェーン構成に欠落がある可能性があります（失敗: " +
-      items.join("、") + extra + "）。取得できた分のみ表示しています。";
+    return t("chain.errorNotice", {
+      items: items.join(t("chain.errorSeparator")),
+      extra: extra
+    });
   }
 
   function formatDirectChildrenFetchErrorNotice(chainMeta, currentJobID) {
@@ -579,14 +596,16 @@
       return null;
     }
     const items = chainMeta.currentJobChildrenErrors.map(function (errItem) {
-      const statusLabel = (errItem && errItem.status) ? String(errItem.status) : "不明な状態";
+      const statusLabel = (errItem && errItem.status) ? String(errItem.status) : t("chain.unknownStatus");
       return statusLabel + " [" + formatFetchErrorDetail(errItem) + "]";
     });
     const targetLabel = (currentJobID !== undefined && currentJobID !== null)
-      ? ("ジョブ #" + currentJobID)
-      : "表示中ジョブ";
-    return targetLabel + " の直下の子ジョブ取得が一部失敗したため、一覧に欠落がある可能性があります（失敗状態: " +
-      items.join("、") + "）。取得できた分のみ表示しています。";
+      ? t("common.jobLabel", { id: currentJobID })
+      : t("chain.currentJob");
+    return t("chain.directErrorNotice", {
+      target: targetLabel,
+      items: items.join(t("chain.errorSeparator"))
+    });
   }
 
   function formatChainTruncationNotice(chainMeta) {
@@ -595,13 +614,13 @@
     }
     const reasons = [];
     if (chainMeta.expandTruncated) {
-      reasons.push("他 " + chainMeta.unexpandedCount + " 件のノード配下の探索を上限で打ち切りました");
+      reasons.push(t("chain.truncatedExpand", { count: chainMeta.unexpandedCount }));
     }
     if (chainMeta.upTruncated) {
-      reasons.push("祖先の探索を上限で打ち切りました");
+      reasons.push(t("chain.truncatedUp"));
     }
     if (chainMeta.pagesTruncated) {
-      reasons.push("一部の子ジョブ一覧がページ取得上限に達しました");
+      reasons.push(t("chain.truncatedPages"));
     }
     const hasErrors = Boolean(
       chainMeta.hasFetchErrors ||
@@ -611,10 +630,13 @@
     );
     const directNote = (chainMeta.currentJobChildrenTruncated || hasErrors)
       ? ""
-      : "表示中ジョブの直下の子ジョブは全件取得済みです。";
-    return "チェーンが大きいため一部省略されています（" +
-      (reasons.length > 0 ? reasons.join("・") : "探索上限に到達") +
-      "）。" + directNote;
+      : t("chain.truncatedDirectComplete");
+    return t("chain.truncatedNotice", {
+      reasons: reasons.length > 0
+        ? reasons.join(t("chain.truncatedSeparator"))
+        : t("chain.truncatedLimit"),
+      note: directNote
+    });
   }
 
   // ==================== Pure Form Helpers (Agent / Host / Model / Pool) ====================
@@ -641,7 +663,7 @@
     if (!a || (Array.isArray(filteredHosts) && filteredHosts.length > 0)) {
       return "";
     }
-    return "選択中の agent (" + a + ") に対応するホストがありません。";
+    return t("form.noMatchingHost", { agent: a });
   }
 
   function getModelsForHostAgent(meta, host, agent) {
@@ -735,9 +757,9 @@
   function formatDerivedPoolLabel(poolName) {
     const p = String(poolName || "").trim();
     if (p) {
-      return "pool: " + p + "（自動）";
+      return t("form.derivedPool", { pool: p });
     }
-    return "pool: なし（自動判定対象外）";
+    return t("form.derivedPoolNone");
   }
 
   if (typeof module !== "undefined" && module.exports) {
@@ -783,7 +805,7 @@
     rendering: 0,
     viewDirty: false,
     flatPages: 1,
-    // The button of the latest unanswered "さらに読み込む", and the number of clicks.
+    // The button of the latest unanswered "load more", and the number of clicks.
     loadMoreButton: null,
     loadMoreSeq: 0
   };
@@ -799,6 +821,7 @@
     btnRefresh: document.getElementById("btn-refresh"),
     btnToken: document.getElementById("btn-token"),
     directionSwitch: document.getElementById("direction-switch"),
+    localeSwitch: document.getElementById("locale-switch"),
     metaBadges: document.getElementById("meta-badges"),
     bannerArea: document.getElementById("banner-area")
   };
@@ -852,7 +875,7 @@
         if (key === "className") {
           node.className = String(val);
         } else if (key === "text") {
-          node.textContent = String(val);
+          i18n.setText(node, val);
         } else if (key === "hidden") {
           node.hidden = Boolean(val);
         } else if (key === "disabled") {
@@ -874,7 +897,7 @@
             node.dataset[dk] = String(val[dk]);
           }
         } else {
-          node.setAttribute(key, String(val));
+          i18n.setAttr(node, key, val);
         }
       }
     }
@@ -886,6 +909,10 @@
         }
         if (typeof child === "string" || typeof child === "number") {
           node.appendChild(document.createTextNode(String(child)));
+        } else if (typeof child === "function") {
+          const textNode = document.createTextNode("");
+          i18n.setText(textNode, child);
+          node.appendChild(textNode);
         } else {
           node.appendChild(child);
         }
@@ -975,16 +1002,37 @@
     dom.bannerArea.replaceChildren(box);
   }
 
+  // i18nError carries its message function, so that the error can be redrawn.
+  function i18nError(message) {
+    const err = new Error(i18n.resolve(message));
+    err.localized = message;
+    return err;
+  }
+
+  function errorText(err) {
+    if (err && err.localized) {
+      return i18n.resolve(err.localized);
+    }
+    return err ? err.message : String(err);
+  }
+
+  // errorAlert is the message "key: <error>" for a caught error.
+  function errorAlert(key, err) {
+    return function () {
+      return t(key, { message: errorText(err) });
+    };
+  }
+
   function showAuthGate(errorMessage) {
     state.authenticated = false;
     dom.app.hidden = true;
     dom.authGate.hidden = false;
     dom.authTokenInput.value = getStoredToken();
     if (errorMessage) {
-      dom.authError.textContent = errorMessage;
+      i18n.setText(dom.authError, errorMessage);
       dom.authError.hidden = false;
     } else {
-      dom.authError.textContent = "";
+      i18n.setText(dom.authError, "");
       dom.authError.hidden = true;
     }
     dom.authTokenInput.focus();
@@ -993,7 +1041,7 @@
   function hideAuthGate() {
     dom.authGate.hidden = true;
     dom.app.hidden = false;
-    dom.authError.textContent = "";
+    i18n.setText(dom.authError, "");
     dom.authError.hidden = true;
   }
 
@@ -1022,9 +1070,9 @@
     }
 
     if (resp.status === 401) {
-      const msg = (data && data.error) ? data.error : "認証が必要です（401 Unauthorized）";
+      const msg = (data && data.error) ? data.error : L("auth.required");
       showAuthGate(msg);
-      const err = new Error(msg);
+      const err = i18nError(msg);
       err.status = 401;
       err.data = data;
       throw err;
@@ -1033,11 +1081,15 @@
     return { ok: resp.ok, status: resp.status, data: data };
   }
 
-  function errorMessageFromResp(res, fallback) {
-    if (res && res.data && res.data.error) {
-      return String(res.data.error);
-    }
-    return fallback + " (HTTP " + (res ? res.status : "?") + ")";
+  // errorMessageFromResp returns the server's error message, or else the message of
+  // fallbackKey with the HTTP status.
+  function errorMessageFromResp(res, fallbackKey, params) {
+    return function () {
+      if (res && res.data && res.data.error) {
+        return String(res.data.error);
+      }
+      return t(fallbackKey, params) + " (HTTP " + (res ? res.status : "?") + ")";
+    };
   }
 
   async function refreshHeaderMeta() {
@@ -1124,7 +1176,7 @@
   function setLoading(title) {
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [el("h1", { text: title })]),
-      el("div", { className: "card empty-state", text: "読み込み中..." })
+      el("div", { className: "card empty-state", text: L("common.loading") })
     );
   }
 
@@ -1171,9 +1223,9 @@
         default:
           dom.app.replaceChildren(
             el("div", { className: "card" }, [
-              el("h1", { text: "ページが見つかりません" }),
+              el("h1", { text: L("page.notFound") }),
               el("p", { className: "muted", text: route.path }),
-              navLink("/ui/", "ダッシュボードに戻る", "btn btn-primary")
+              navLink("/ui/", L("page.backToDashboard"), "btn btn-primary")
             ])
           );
       }
@@ -1183,7 +1235,7 @@
         return;
       }
       dom.app.replaceChildren(
-        el("div", { className: "alert alert-error", text: "エラー: " + (err ? err.message : String(err)) })
+        el("div", { className: "alert alert-error", text: errorAlert("common.error", err) })
       );
     } finally {
       state.rendering -= 1;
@@ -1236,7 +1288,7 @@
   // view is set only for a background refresh (see refreshListView).
   async function renderDashboard(view) {
     if (!view) {
-      setLoading("ダッシュボード");
+      setLoading(L("dashboard.title"));
     }
     const [statusRes, metaRes, claimedRes, heldRes, delivRes] = await Promise.all([
       apiFetch("/status"),
@@ -1247,7 +1299,7 @@
     ]);
 
     if (!statusRes.ok) {
-      throw new Error(errorMessageFromResp(statusRes, "ステータス取得に失敗しました"));
+      throw i18nError(errorMessageFromResp(statusRes, "common.statusFetchFailed"));
     }
     state.status = statusRes.data;
     if (metaRes.ok && metaRes.data) {
@@ -1268,20 +1320,20 @@
     });
     statCards.push(
       el("div", { className: "stat-card" }, [
-        el("div", { className: "stat-label", text: "total" }),
+        el("div", { className: "stat-label", text: L("dashboard.total") }),
         el("div", { className: "stat-value", text: String(statusRes.data.total || 0) })
       ])
     );
 
     const sections = [
       el("div", { className: "page-header" }, [
-        el("h1", { text: "ダッシュボード" }),
+        el("h1", { text: L("dashboard.title") }),
         el("div", { className: "btn-row" }, [
-          navLink("/ui/jobs/new", "+ 新規ジョブ登録", "btn btn-primary")
+          navLink("/ui/jobs/new", L("common.newJobButton"), "btn btn-primary")
         ])
       ]),
       el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "状態別件数" }),
+        el("h2", { className: "section-title", text: L("dashboard.statusCounts") }),
         el("div", { className: "stat-grid" }, statCards)
       ])
     ];
@@ -1290,17 +1342,17 @@
       const poolCards = state.meta.pool_summaries.map(function (ps) {
         const lines = [];
         if (ps.unmeasured) {
-          lines.push(el("div", { className: "small muted", text: "unmeasured (バイパス)" }));
+          lines.push(el("div", { className: "small muted", text: L("dashboard.unmeasured") }));
         } else {
           if (ps.weekly_remaining_percent !== undefined && ps.weekly_remaining_percent !== null) {
-            lines.push(el("div", { className: "small", text: "週次残量: " + ps.weekly_remaining_percent + "%" }));
+            lines.push(el("div", { className: "small", text: L("dashboard.weeklyRemaining", { percent: ps.weekly_remaining_percent }) }));
           }
           if (ps.short_remaining_percent !== undefined && ps.short_remaining_percent !== null) {
-            lines.push(el("div", { className: "small", text: "短期残量: " + ps.short_remaining_percent + "%" }));
+            lines.push(el("div", { className: "small", text: L("dashboard.shortRemaining", { percent: ps.short_remaining_percent }) }));
           }
           if (ps.measured_at) {
             lines.push(el("div", { className: "small muted" }, [
-              "測定: ",
+              L("dashboard.measuredAt"),
               el("span", { className: "mono small", text: formatTime(ps.measured_at) })
             ]));
           }
@@ -1318,7 +1370,7 @@
       });
       sections.push(
         el("section", { className: "section" }, [
-          el("h2", { className: "section-title", text: "プール残量サマリ" }),
+          el("h2", { className: "section-title", text: L("dashboard.poolSummary") }),
           el("div", { className: "pool-grid" }, poolCards)
         ])
       );
@@ -1327,15 +1379,15 @@
     const claimedJobs = (claimedRes.ok && claimedRes.data && claimedRes.data.jobs) || [];
     sections.push(
       el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "実行中ジョブ (" + claimedJobs.length + ")" }),
-        buildJobsTable(claimedJobs, "実行中のジョブはありません。")
+        el("h2", { className: "section-title", text: L("dashboard.runningJobs", { count: claimedJobs.length }) }),
+        buildJobsTable(claimedJobs, L("dashboard.noRunningJobs"))
       ])
     );
 
     const heldItems = (heldRes.ok && heldRes.data && heldRes.data.held) || [];
     sections.push(
       el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "保持中ジョブ (" + heldItems.length + ")" }),
+        el("h2", { className: "section-title", text: L("dashboard.heldJobs", { count: heldItems.length }) }),
         buildHeldSummaryTable(heldItems)
       ])
     );
@@ -1343,7 +1395,7 @@
     const deliveries = (delivRes.ok && delivRes.data && delivRes.data.jobs) || [];
     sections.push(
       el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "直近の納品 (" + deliveries.length + ")" }),
+        el("h2", { className: "section-title", text: L("dashboard.recentDeliveries", { count: deliveries.length }) }),
         buildDeliveriesTable(deliveries, null)
       ])
     );
@@ -1356,10 +1408,10 @@
 
   function buildHeldSummaryTable(items) {
     if (!items || items.length === 0) {
-      return el("div", { className: "card empty-state", text: "保持中のジョブはありません。" });
+      return el("div", { className: "card empty-state", text: L("dashboard.noHeldJobs") });
     }
     const rows = items.map(function (h) {
-      const title = (h.payload && h.payload.title) ? h.payload.title : "(タイトルなし)";
+      const title = (h.payload && h.payload.title) ? h.payload.title : L("common.noTitle");
       return el("tr", null, [
         el("td", { className: "mono" }, [navLink("/ui/gate/held", h.id)]),
         el("td", { text: title }),
@@ -1372,11 +1424,11 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "Held ID" }),
-            el("th", { text: "タイトル" }),
-            el("th", { text: "プール" }),
-            el("th", { text: "保持理由" }),
-            el("th", { text: "作成時刻" })
+            el("th", { text: L("field.heldID") }),
+            el("th", { text: L("column.title") }),
+            el("th", { text: L("column.pool") }),
+            el("th", { text: L("column.holdReason") }),
+            el("th", { text: L("column.createdAt") })
           ])
         ]),
         el("tbody", null, rows)
@@ -1386,7 +1438,7 @@
 
   function buildJobsTable(jobs, emptyText) {
     if (!jobs || jobs.length === 0) {
-      return el("div", { className: "card empty-state", text: emptyText || "ジョブはありません。" });
+      return el("div", { className: "card empty-state", text: emptyText || L("jobs.empty") });
     }
     const rows = jobs.map(function (j) {
       const agentHost = (j.agent || "-") + " / " + (j.host || "-");
@@ -1395,7 +1447,7 @@
         : el("span", { className: "muted", text: "-" });
       return el("tr", null, [
         el("td", { className: "mono" }, [navLink("/ui/jobs/" + j.id, "#" + j.id)]),
-        el("td", null, [navLink("/ui/jobs/" + j.id, j.title || "(無題)")]),
+        el("td", null, [navLink("/ui/jobs/" + j.id, j.title || L("common.untitled"))]),
         el("td", null, [statusBadge(j.status)]),
         el("td", { className: "mono", text: agentHost }),
         el("td", { className: "mono small muted", text: formatTime(j.created_at) }),
@@ -1406,12 +1458,12 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "ID" }),
-            el("th", { text: "タイトル" }),
-            el("th", { text: "状態" }),
-            el("th", { text: "agent / host" }),
-            el("th", { text: "作成時刻" }),
-            el("th", { text: "親ジョブ" })
+            el("th", { text: L("field.id") }),
+            el("th", { text: L("column.title") }),
+            el("th", { text: L("column.status") }),
+            el("th", { text: L("field.agentHost") }),
+            el("th", { text: L("column.createdAt") }),
+            el("th", { text: L("column.parentJob") })
           ])
         ]),
         el("tbody", null, rows)
@@ -1434,7 +1486,7 @@
 
   function buildChainJobsTable(forest, emptyText) {
     if (!forest || forest.length === 0) {
-      return el("div", { className: "card empty-state", text: emptyText || "該当するジョブはありません。" });
+      return el("div", { className: "card empty-state", text: emptyText || L("jobs.noMatch") });
     }
     const rows = [];
     for (const rootNode of forest) {
@@ -1444,14 +1496,14 @@
         const agentHost = (j.agent || "-") + " / " + (j.host || "-");
         const lineChildren = [
           navLink("/ui/jobs/" + j.id, "#" + j.id, "mono"),
-          navLink("/ui/jobs/" + j.id, j.title || "(無題)")
+          navLink("/ui/jobs/" + j.id, j.title || L("common.untitled"))
         ];
         if (item.isOrphanRoot && j.parent_id) {
           lineChildren.push(
             el("span", { className: "chain-orphan-note" }, [
-              "(親 ",
+              L("chain.orphanBefore"),
               navLink("/ui/jobs/" + j.parent_id, "#" + j.parent_id, "mono"),
-              " 未取得)"
+              L("chain.orphanAfter")
             ])
           );
         }
@@ -1463,7 +1515,7 @@
           nodeMainChildren.push(
             el("div", {
               className: "chain-summary",
-              text: formatChainProgressSummary(item.summary)
+              text: function () { return formatChainProgressSummary(item.summary); }
             })
           );
         }
@@ -1487,10 +1539,10 @@
       el("table", { className: "chain-table" }, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { scope: "col", text: "チェーン / ジョブ" }),
-            el("th", { scope: "col", text: "状態" }),
-            el("th", { scope: "col", text: "agent / host" }),
-            el("th", { scope: "col", text: "作成時刻" })
+            el("th", { scope: "col", text: L("chain.tableHeading") }),
+            el("th", { scope: "col", text: L("column.status") }),
+            el("th", { scope: "col", text: L("field.agentHost") }),
+            el("th", { scope: "col", text: L("column.createdAt") })
           ])
         ]),
         el("tbody", null, rows)
@@ -1514,7 +1566,7 @@
     const filterQ = (searchParams && searchParams.get("q")) || "";
 
     if (!view) {
-      setLoading("ジョブ一覧");
+      setLoading(L("jobs.title"));
     }
 
     function buildJobsURL(view, st, ag, ho, q) {
@@ -1565,11 +1617,11 @@
       const listResults = results.slice(2);
 
       if (!statusRes.ok) {
-        throw new Error(errorMessageFromResp(statusRes, "ステータス取得に失敗しました"));
+        throw i18nError(errorMessageFromResp(statusRes, "common.statusFetchFailed"));
       }
       for (const item of listResults) {
         if (!item.res.ok) {
-          throw new Error(errorMessageFromResp(item.res, "ジョブ一覧 (" + item.status + ") の取得に失敗しました"));
+          throw i18nError(errorMessageFromResp(item.res, "jobs.statusListFetchFailed", { status: item.status }));
         }
         const jobs = (item.res.data && Array.isArray(item.res.data.jobs)) ? item.res.data.jobs : [];
         loadedJobs = loadedJobs.concat(jobs);
@@ -1596,10 +1648,10 @@
       const jobsRes = results[2];
 
       if (!statusRes.ok) {
-        throw new Error(errorMessageFromResp(statusRes, "ステータス取得に失敗しました"));
+        throw i18nError(errorMessageFromResp(statusRes, "common.statusFetchFailed"));
       }
       if (!jobsRes.ok) {
-        throw new Error(errorMessageFromResp(jobsRes, "ジョブ一覧の取得に失敗しました"));
+        throw i18nError(errorMessageFromResp(jobsRes, "jobs.listFetchFailed"));
       }
       loadedJobs = (jobsRes.data && jobsRes.data.jobs) ? jobsRes.data.jobs.slice() : [];
       nextCursor = jobsRes.data ? jobsRes.data.next_cursor : 0;
@@ -1611,7 +1663,7 @@
         pageParams.set("cursor", String(nextCursor));
         const pageRes = await apiFetch("/jobs?" + pageParams.toString());
         if (!pageRes.ok) {
-          throw new Error(errorMessageFromResp(pageRes, "ジョブ一覧の取得に失敗しました"));
+          throw i18nError(errorMessageFromResp(pageRes, "jobs.listFetchFailed"));
         }
         loadedJobs = loadedJobs.concat((pageRes.data && pageRes.data.jobs) || []);
         nextCursor = pageRes.data ? pageRes.data.next_cursor : 0;
@@ -1635,12 +1687,12 @@
       }
     }
 
-    const viewToggle = el("div", { className: "view-toggle", role: "group", "aria-label": "表示切替" }, [
+    const viewToggle = el("div", { className: "view-toggle", role: "group", "aria-label": L("jobs.viewSwitchLabel") }, [
       el("button", {
         type: "button",
         className: "view-toggle-btn" + (activeView === "flat" ? " active" : ""),
         "aria-pressed": activeView === "flat" ? "true" : "false",
-        text: "フラット表示",
+        text: L("jobs.viewFlat"),
         onClick: function () {
           selectView("flat", activeStatus === "all" ? "queued" : activeStatus);
         }
@@ -1649,7 +1701,7 @@
         type: "button",
         className: "view-toggle-btn" + (activeView === "chain" ? " active" : ""),
         "aria-pressed": activeView === "chain" ? "true" : "false",
-        text: "チェーン表示",
+        text: L("jobs.viewChain"),
         onClick: function () {
           selectView("chain", "all");
         }
@@ -1666,7 +1718,7 @@
             navigate(buildJobsURL("chain", "all", filterAgent, filterHost, filterQ));
           }
         }, [
-          el("span", { text: "すべて" }),
+          el("span", { text: L("common.all") }),
           el("span", { className: "tab-count", text: String(totalCount) })
         ])
       );
@@ -1687,7 +1739,7 @@
     }
     const tabs = el("div", { className: "tabs" }, tabItems);
 
-    const agentOpts = [el("option", { value: "", text: "すべて" })];
+    const agentOpts = [el("option", { value: "", text: L("common.all") })];
     const agents = (state.meta && Array.isArray(state.meta.agents)) ? state.meta.agents : [];
     for (const a of agents) {
       agentOpts.push(el("option", { value: a, text: a, selected: a === filterAgent }));
@@ -1696,7 +1748,7 @@
       agentOpts.push(el("option", { value: filterAgent, text: filterAgent, selected: true }));
     }
 
-    const hostOpts = [el("option", { value: "", text: "すべて" })];
+    const hostOpts = [el("option", { value: "", text: L("common.all") })];
     const hosts = (state.meta && Array.isArray(state.meta.hosts)) ? state.meta.hosts : [];
     for (const h of hosts) {
       hostOpts.push(el("option", { value: h, text: h, selected: h === filterHost }));
@@ -1711,7 +1763,7 @@
       type: "text",
       name: "q",
       value: filterQ,
-      placeholder: "タイトル部分一致..."
+      placeholder: L("jobs.searchPlaceholder")
     });
 
     const filterForm = el("form", {
@@ -1722,23 +1774,23 @@
       }
     }, [
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "Agent" }),
+        el("span", { className: "field-label", text: L("field.agent") }),
         agentSelect
       ]),
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "Host" }),
+        el("span", { className: "field-label", text: L("field.host") }),
         hostSelect
       ]),
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "タイトル検索" }),
+        el("span", { className: "field-label", text: L("jobs.searchLabel") }),
         qInput
       ]),
       el("div", { className: "btn-row" }, [
-        el("button", { type: "submit", className: "btn btn-primary", text: "絞り込み" }),
+        el("button", { type: "submit", className: "btn btn-primary", text: L("common.filter") }),
         el("button", {
           type: "button",
           className: "btn btn-ghost",
-          text: "クリア",
+          text: L("common.clear"),
           onClick: function () {
             navigate(buildJobsURL(activeView, activeStatus, "", "", ""));
           }
@@ -1749,7 +1801,7 @@
     const truncationNotice = (activeView === "chain" && truncatedStatuses.length > 0)
       ? el("div", {
           className: "alert alert-info small",
-          text: "一部の状態 (" + truncatedStatuses.join(", ") + ") は最新 100 件まで取得してチェーンを構築しています。"
+          text: L("jobs.chainTruncated", { statuses: truncatedStatuses.join(", ") })
         })
       : null;
 
@@ -1761,9 +1813,9 @@
         : fullForest.filter(function (rootNode) {
             return treeContainsStatus(rootNode, activeStatus);
           });
-      tableNode = buildChainJobsTable(visibleForest, "該当するチェーンはありません。");
+      tableNode = buildChainJobsTable(visibleForest, L("jobs.noMatchingChain"));
     } else {
-      tableNode = buildJobsTable(loadedJobs, "該当するジョブはありません。");
+      tableNode = buildJobsTable(loadedJobs, L("jobs.noMatch"));
     }
 
     const tableContainer = el("div", null, [tableNode]);
@@ -1777,10 +1829,10 @@
       const btn = el("button", {
         type: "button",
         className: "btn",
-        text: "さらに読み込む",
+        text: L("jobs.loadMore"),
         onClick: async function () {
           btn.disabled = true;
-          btn.textContent = "読み込み中...";
+          i18n.setText(btn, L("common.loading"));
           state.loadMoreSeq += 1;
           state.loadMoreButton = btn;
           try {
@@ -1792,7 +1844,7 @@
               return;
             }
             if (!moreRes.ok) {
-              showBanner("error", errorMessageFromResp(moreRes, "追加取得に失敗しました"));
+              showBanner("error", errorMessageFromResp(moreRes, "jobs.loadMoreFailed"));
               return;
             }
             const moreJobs = (moreRes.data && moreRes.data.jobs) || [];
@@ -1800,11 +1852,11 @@
             nextCursor = moreRes.data ? moreRes.data.next_cursor : 0;
             hasMore = Boolean(moreRes.data && moreRes.data.has_more);
             state.flatPages += 1;
-            tableContainer.replaceChildren(buildJobsTable(loadedJobs, "該当するジョブはありません。"));
+            tableContainer.replaceChildren(buildJobsTable(loadedJobs, L("jobs.noMatch")));
             updateLoadMore();
           } catch (err) {
             if (!err || err.status !== 401) {
-              showBanner("error", "追加取得エラー: " + (err ? err.message : String(err)));
+              showBanner("error", errorAlert("jobs.loadMoreError", err));
             }
           } finally {
             if (state.loadMoreButton === btn) {
@@ -1819,10 +1871,10 @@
 
     const pageNodes = [
       el("div", { className: "page-header" }, [
-        el("h1", { text: "ジョブ一覧" }),
+        el("h1", { text: L("jobs.title") }),
         el("div", { className: "btn-row" }, [
           viewToggle,
-          navLink("/ui/jobs/new", "+ 新規ジョブ登録", "btn btn-primary")
+          navLink("/ui/jobs/new", L("common.newJobButton"), "btn btn-primary")
         ])
       ]),
       tabs,
@@ -1858,8 +1910,8 @@
 
     if (!primaryRoot) {
       return el("section", { className: "section card" }, [
-        el("h2", { className: "section-title", text: "チェーン構成" }),
-        el("div", { className: "empty-state", text: "チェーン情報を取得できませんでした。" })
+        el("h2", { className: "section-title", text: L("chain.sectionTitle") }),
+        el("div", { className: "empty-state", text: L("chain.unavailable") })
       ]);
     }
 
@@ -1877,7 +1929,7 @@
       const linkAttrs = {
         href: "/ui/jobs/" + j.id,
         dataset: { nav: "true" },
-        text: "#" + j.id + " " + (j.title || "(無題)")
+        text: function () { return "#" + j.id + " " + (j.title || t("common.untitled")); }
       };
       if (isCurrent) {
         linkAttrs["aria-current"] = "page";
@@ -1888,14 +1940,14 @@
         statusBadge(j.status)
       ];
       if (isCurrent) {
-        nodeParts.push(el("span", { className: "mini-tree-current-tag", text: "現在表示中" }));
+        nodeParts.push(el("span", { className: "mini-tree-current-tag", text: L("chain.currentTag") }));
       }
       if (node.isOrphanRoot && j.parent_id) {
         nodeParts.push(
           el("span", { className: "chain-orphan-note" }, [
-            "(親 ",
+            L("chain.orphanBefore"),
             navLink("/ui/jobs/" + j.parent_id, "#" + j.parent_id, "mono"),
-            " 未取得)"
+            L("chain.orphanAfter")
           ])
         );
       }
@@ -1918,20 +1970,20 @@
 
     const sectionChildren = [
       el("div", { className: "mini-tree-header" }, [
-        el("h2", { className: "section-title", text: "チェーン構成" }),
-        el("span", { className: "chain-summary", text: formatChainProgressSummary(summary) })
+        el("h2", { className: "section-title", text: L("chain.sectionTitle") }),
+        el("span", { className: "chain-summary", text: function () { return formatChainProgressSummary(summary); } })
       ])
     ];
 
-    const fetchErrorNotice = formatChainFetchErrorNotice(chainMeta);
-    if (fetchErrorNotice) {
+    const fetchErrorNotice = function () { return formatChainFetchErrorNotice(chainMeta); };
+    if (fetchErrorNotice()) {
       sectionChildren.push(
         el("div", { className: "alert alert-error small", role: "alert", text: fetchErrorNotice })
       );
     }
 
-    const truncationNotice = formatChainTruncationNotice(chainMeta);
-    if (truncationNotice) {
+    const truncationNotice = function () { return formatChainTruncationNotice(chainMeta); };
+    if (truncationNotice()) {
       sectionChildren.push(
         el("div", { className: "alert alert-info small", text: truncationNotice })
       );
@@ -1949,17 +2001,17 @@
     const jobID = Number(rawID);
     if (!Number.isInteger(jobID) || jobID <= 0) {
       dom.app.replaceChildren(
-        el("div", { className: "alert alert-error", text: "不正なジョブ ID です: " + rawID }),
-        navLink("/ui/jobs", "ジョブ一覧に戻る", "btn")
+        el("div", { className: "alert alert-error", text: L("detail.invalidID", { id: rawID }) }),
+        navLink("/ui/jobs", L("detail.backToJobs"), "btn")
       );
       return;
     }
 
-    setLoading("ジョブ #" + jobID);
+    setLoading(L("common.jobLabel", { id: jobID }));
 
     const jobRes = await apiFetch("/jobs/" + jobID);
     if (!jobRes.ok) {
-      throw new Error(errorMessageFromResp(jobRes, "ジョブ #" + jobID + " の取得に失敗しました"));
+      throw i18nError(errorMessageFromResp(jobRes, "detail.fetchFailed", { id: jobID }));
     }
     const job = jobRes.data;
 
@@ -1986,7 +2038,7 @@
     }
 
     const parentNode = job.parent_id
-      ? navLink("/ui/jobs/" + job.parent_id, "ジョブ #" + job.parent_id, "mono")
+      ? navLink("/ui/jobs/" + job.parent_id, L("common.jobLabel", { id: job.parent_id }), "mono")
       : "-";
 
     const wtText = job.worktree_spec
@@ -1998,24 +2050,24 @@
       : "-";
 
     const metaGrid = el("div", { className: "kv-grid" }, [
-      kv("状態", statusBadge(job.status)),
-      kv("Request ID", el("span", { className: "mono", text: job.request_id || "-" })),
-      kv("Agent", job.agent),
-      kv("Host", job.host),
-      kv("Workdir", el("span", { className: "mono", text: job.workdir || "-" })),
-      kv("Model", job.model),
-      kv("Pool", job.pool),
-      kv("Alt Pools", (Array.isArray(job.alt_pools) && job.alt_pools.length > 0) ? job.alt_pools.join(", ") : "-"),
-      kv("親ジョブ", parentNode),
-      kv("Target Ref", el("span", { className: "mono", text: job.target_ref || "-" })),
-      kv("Worktree Spec", el("span", { className: "mono", text: wtText })),
-      kv("Attempts", String(job.attempts || 0)),
-      kv("Claimed By", el("span", { className: "mono", text: job.claimed_by || "-" })),
-      kv("Claimed At", el("span", { className: "mono", text: formatTime(job.claimed_at) })),
-      kv("Created At", el("span", { className: "mono", text: formatTime(job.created_at) })),
-      kv("Updated At", el("span", { className: "mono", text: formatTime(job.updated_at) })),
-      kv("Delivered At", el("span", { className: "mono", text: formatTime(job.delivered_at) })),
-      kv("Session ID", el("span", { className: "mono", text: job.session_id || "-" }))
+      kv(L("column.status"), statusBadge(job.status)),
+      kv(L("field.requestID"), el("span", { className: "mono", text: job.request_id || "-" })),
+      kv(L("field.agent"), job.agent),
+      kv(L("field.host"), job.host),
+      kv(L("field.workdir"), el("span", { className: "mono", text: job.workdir || "-" })),
+      kv(L("field.model"), job.model),
+      kv(L("field.pool"), job.pool),
+      kv(L("field.altPools"), (Array.isArray(job.alt_pools) && job.alt_pools.length > 0) ? job.alt_pools.join(", ") : "-"),
+      kv(L("column.parentJob"), parentNode),
+      kv(L("field.targetRef"), el("span", { className: "mono", text: job.target_ref || "-" })),
+      kv(L("field.worktreeSpec"), el("span", { className: "mono", text: wtText })),
+      kv(L("field.attempts"), String(job.attempts || 0)),
+      kv(L("field.claimedBy"), el("span", { className: "mono", text: job.claimed_by || "-" })),
+      kv(L("field.claimedAt"), el("span", { className: "mono", text: formatTime(job.claimed_at) })),
+      kv(L("field.createdAt"), el("span", { className: "mono", text: formatTime(job.created_at) })),
+      kv(L("field.updatedAt"), el("span", { className: "mono", text: formatTime(job.updated_at) })),
+      kv(L("field.deliveredAt"), el("span", { className: "mono", text: formatTime(job.delivered_at) })),
+      kv(L("field.sessionID"), el("span", { className: "mono", text: job.session_id || "-" }))
     ]);
 
     // Allowed actions strictly per state:
@@ -2025,14 +2077,14 @@
     if (CANCELLABLE_STATUSES.has(job.status)) {
       const reasonInput = el("input", {
         type: "text",
-        placeholder: "キャンセル理由（任意）"
+        placeholder: L("detail.cancelReasonPlaceholder")
       });
       const cancelBtn = el("button", {
         type: "button",
         className: "btn btn-danger",
-        text: "キャンセル",
+        text: L("common.cancel"),
         onClick: async function () {
-          if (!window.confirm("ジョブ #" + job.id + " をキャンセルしますか？")) {
+          if (!window.confirm(t("detail.cancelConfirm", { id: job.id }))) {
             return;
           }
           cancelBtn.disabled = true;
@@ -2043,17 +2095,20 @@
               body: JSON.stringify(body)
             });
             if (!res.ok) {
-              showBanner("error", errorMessageFromResp(res, "キャンセルに失敗しました"));
+              showBanner("error", errorMessageFromResp(res, "common.cancelFailed"));
               cancelBtn.disabled = false;
               return;
             }
             const cascaded = (res.data && Array.isArray(res.data.cancelled_child_ids)) ? res.data.cancelled_child_ids : [];
-            const extra = cascaded.length > 0 ? "（子ジョブ " + cascaded.map(function (c) { return "#" + c; }).join(", ") + " もキャンセル）" : "";
-            showBanner("success", "ジョブ #" + job.id + " をキャンセルしました。" + extra);
+            showBanner("success", function () {
+              const ids = cascaded.map(function (c) { return "#" + c; }).join(", ");
+              const extra = cascaded.length > 0 ? t("detail.cascaded", { ids: ids }) : "";
+              return t("detail.cancelled", { id: job.id, extra: extra });
+            });
             await renderJobDetail(String(job.id));
           } catch (err) {
             if (!err || err.status !== 401) {
-              showBanner("error", "キャンセルエラー: " + (err ? err.message : String(err)));
+              showBanner("error", errorAlert("common.cancelError", err));
             }
           }
         }
@@ -2067,21 +2122,21 @@
       const requeueBtn = el("button", {
         type: "button",
         className: "btn btn-primary",
-        text: "Requeue（再投入）",
+        text: L("detail.requeue"),
         onClick: async function () {
           requeueBtn.disabled = true;
           try {
             const res = await apiFetch("/jobs/" + job.id + "/requeue", { method: "POST" });
             if (!res.ok) {
-              showBanner("error", errorMessageFromResp(res, "Requeue に失敗しました"));
+              showBanner("error", errorMessageFromResp(res, "detail.requeueFailed"));
               requeueBtn.disabled = false;
               return;
             }
-            showBanner("success", "ジョブ #" + job.id + " を queued に戻しました。");
+            showBanner("success", L("detail.requeued", { id: job.id }));
             await renderJobDetail(String(job.id));
           } catch (err) {
             if (!err || err.status !== 401) {
-              showBanner("error", "Requeue エラー: " + (err ? err.message : String(err)));
+              showBanner("error", errorAlert("detail.requeueError", err));
             }
           }
         }
@@ -2096,14 +2151,14 @@
 
     const deliverySummary = (function () {
       if (job.status !== "done" && job.status !== "failed") {
-        return el("div", { className: "card empty-state", text: "このジョブはまだ完了／失敗していないため納品対象外です。" });
+        return el("div", { className: "card empty-state", text: L("detail.notDeliverable") });
       }
       const badge = job.delivered_at ? statusBadge("delivered") : statusBadge("undelivered");
       return el("div", { className: "card" }, [
         el("div", { className: "kv-grid" }, [
-          kv("納品状態", badge),
-          kv("納品時刻", el("span", { className: "mono", text: formatTime(job.delivered_at) })),
-          kv("ジョブ状態", statusBadge(job.status))
+          kv(L("detail.deliveryState"), badge),
+          kv(L("detail.deliveredAt"), el("span", { className: "mono", text: formatTime(job.delivered_at) })),
+          kv(L("detail.jobState"), statusBadge(job.status))
         ])
       ]);
     })();
@@ -2111,54 +2166,62 @@
     const miniChainSection = buildMiniChainSection(chainJobs, job.id, chainResult);
     const directChildrenErrorNotice = formatDirectChildrenFetchErrorNotice(chainResult, job.id);
     const childrenSectionHeading = directChildrenErrorNotice
-      ? ("子ジョブ一覧 (" + children.length + "件取得・一部取得失敗)")
-      : ("子ジョブ一覧 (" + children.length + ")");
+      ? L("detail.childrenPartial", { count: children.length })
+      : L("detail.children", { count: children.length });
     const childrenEmptyText = directChildrenErrorNotice
-      ? "取得できた子ジョブはありません（一部取得に失敗しているため、未表示の子ジョブがある可能性があります）。"
-      : "子ジョブはありません。";
+      ? L("detail.noChildrenFetched")
+      : L("detail.noChildren");
     const childrenSectionNodes = [
       el("h2", { className: "section-title", text: childrenSectionHeading })
     ];
     if (directChildrenErrorNotice) {
       childrenSectionNodes.push(
-        el("div", { className: "alert alert-error small", role: "alert", text: directChildrenErrorNotice })
+        el("div", {
+          className: "alert alert-error small",
+          role: "alert",
+          text: function () { return formatDirectChildrenFetchErrorNotice(chainResult, job.id); }
+        })
       );
     }
     childrenSectionNodes.push(buildJobsTable(children, childrenEmptyText));
 
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [
-        el("h1", { text: "ジョブ #" + job.id + ": " + (job.title || "(無題)") }),
+        el("h1", {
+          text: function () {
+            return t("detail.heading", { id: job.id, title: job.title || t("common.untitled") });
+          }
+        }),
         el("div", { className: "btn-row" }, [
-          navLink("/ui/jobs?view=chain", "チェーン一覧", "btn"),
-          navLink("/ui/jobs?status=" + encodeURIComponent(job.status), "一覧に戻る", "btn")
+          navLink("/ui/jobs?view=chain", L("detail.chainList"), "btn"),
+          navLink("/ui/jobs?status=" + encodeURIComponent(job.status), L("detail.backToList"), "btn")
         ])
       ]),
       overviewCard,
       miniChainSection,
       el("section", { className: "section card" }, [
-        el("h2", { className: "section-title", text: "指示文 (instructions)" }),
-        el("pre", { text: job.instructions || "(なし)" })
+        el("h2", { className: "section-title", text: L("detail.instructions") }),
+        el("pre", { text: job.instructions || L("common.emptyText") })
       ]),
       el("section", { className: "section card" }, [
-        el("h2", { className: "section-title", text: "受け入れ条件 (acceptance_criteria)" }),
-        el("pre", { text: job.acceptance_criteria || "(なし)" })
+        el("h2", { className: "section-title", text: L("detail.acceptance") }),
+        el("pre", { text: job.acceptance_criteria || L("common.emptyText") })
       ]),
       el("section", { className: "section card" }, [
-        el("h2", { className: "section-title", text: "結果 (result_text)" }),
-        el("pre", { text: job.result_text || "(なし)" })
+        el("h2", { className: "section-title", text: L("detail.result") }),
+        el("pre", { text: job.result_text || L("common.emptyText") })
       ]),
       el("section", { className: "section card" }, [
-        el("h2", { className: "section-title", text: "エラー (last_error)" }),
-        el("pre", { text: job.last_error || "(なし)" })
+        el("h2", { className: "section-title", text: L("detail.lastError") }),
+        el("pre", { text: job.last_error || L("common.emptyText") })
       ]),
       el("section", { className: "section" }, childrenSectionNodes),
       el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "ゲート判定履歴 (" + decisions.length + ")" }),
+        el("h2", { className: "section-title", text: L("detail.gateHistory", { count: decisions.length }) }),
         buildGateDecisionsTable(decisions)
       ]),
       el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "納品記録" }),
+        el("h2", { className: "section-title", text: L("detail.deliveryRecord") }),
         deliverySummary
       ])
     );
@@ -2166,7 +2229,7 @@
 
   // ==================== 4. New Job Form (/ui/jobs/new) ====================
   async function renderNewJobForm() {
-    setLoading("新規ジョブ登録");
+    setLoading(L("newJob.title"));
 
     const parentStatuses = ["queued", "claimed", "waiting", "draft", "done"];
     const [metaRes, ...parentResults] = await Promise.all([
@@ -2177,7 +2240,7 @@
     ]);
 
     if (!metaRes.ok) {
-      throw new Error(errorMessageFromResp(metaRes, "メタ情報の取得に失敗しました"));
+      throw i18nError(errorMessageFromResp(metaRes, "newJob.metaFetchFailed"));
     }
     state.meta = metaRes.data;
     renderMetaBadges();
@@ -2210,7 +2273,7 @@
     const regenBtn = el("button", {
       type: "button",
       className: "btn btn-sm",
-      text: "再生成",
+      text: L("newJob.regenerate"),
       onClick: function () {
         requestIDInput.value = generateRequestID();
       }
@@ -2219,12 +2282,12 @@
     const titleInput = el("input", {
       type: "text",
       name: "title",
-      placeholder: "ジョブのタイトル（必須）",
+      placeholder: L("newJob.titlePlaceholder"),
       required: true
     });
 
     const agentSelect = el("select", { name: "agent" }, [
-      el("option", { value: "", text: "-- 選択 --" }),
+      el("option", { value: "", text: L("common.selectOption") }),
       ...agents.map(function (a, idx) {
         return el("option", { value: a, text: a, selected: idx === 0 });
       })
@@ -2247,7 +2310,7 @@
     const modelInput = el("input", {
       type: "text",
       name: "model",
-      placeholder: "任意（例: claude-sonnet-4-5）"
+      placeholder: L("newJob.modelPlaceholder")
     });
     const modelControlWrap = el("div", { className: "model-control" }, [modelSelect, modelInput]);
 
@@ -2266,14 +2329,14 @@
 
     function updateDerivedPoolDisplay() {
       const derived = derivePoolForSelection(state.meta, agentSelect.value, getSelectedModelValue());
-      poolDisplay.textContent = formatDerivedPoolLabel(derived);
+      i18n.setText(poolDisplay, function () { return formatDerivedPoolLabel(derived); });
     }
 
     function updateModelControl() {
       const catalog = getModelsForHostAgent(state.meta, hostSelect.value, agentSelect.value);
       const prevVal = getSelectedModelValue();
       if (catalog.length > 0) {
-        const opts = [el("option", { value: "", text: "（指定なし / デフォルト）" })];
+        const opts = [el("option", { value: "", text: L("newJob.modelDefault") })];
         let matchedPrev = false;
         for (const m of catalog) {
           const isSelected = prevVal !== "" && m.id === prevVal;
@@ -2306,13 +2369,15 @@
       const notice = formatNoMatchingHostNotice(selectedAgent, filteredHosts);
       const prevHost = hostSelect.value;
       if (notice) {
-        hostSelect.replaceChildren(el("option", { value: "", text: "（対応ホストなし）" }));
+        hostSelect.replaceChildren(el("option", { value: "", text: L("newJob.noHostOption") }));
         hostSelect.value = "";
         hostSelect.disabled = true;
-        hostNotice.textContent = notice;
+        i18n.setText(hostNotice, function () {
+          return formatNoMatchingHostNotice(selectedAgent, filteredHosts);
+        });
         hostNotice.hidden = false;
       } else {
-        const opts = [el("option", { value: "", text: "-- 選択 --" })];
+        const opts = [el("option", { value: "", text: L("common.selectOption") })];
         let hasPrev = false;
         for (let i = 0; i < filteredHosts.length; i += 1) {
           const h = filteredHosts[i];
@@ -2330,7 +2395,7 @@
         } else {
           hostSelect.value = "";
         }
-        hostNotice.textContent = "";
+        i18n.setText(hostNotice, "");
         hostNotice.hidden = true;
       }
       updateModelControl();
@@ -2350,15 +2415,17 @@
             altPoolCheckboxes.push(cb);
             return el("label", { className: "field-inline" }, [cb, el("span", { text: p })]);
           })
-        : [el("span", { className: "muted small", text: "利用可能なプール候補がありません" })]
+        : [el("span", { className: "muted small", text: L("newJob.noPools") })]
     );
 
     const parentSelect = el("select", { name: "parent_id" }, [
-      el("option", { value: "", text: "（なし）" }),
+      el("option", { value: "", text: L("common.noneOption") }),
       ...parentCandidates.map(function (j) {
         return el("option", {
           value: String(j.id),
-          text: "#" + j.id + " [" + j.status + "] " + (j.title || "(無題)")
+          text: function () {
+            return "#" + j.id + " [" + j.status + "] " + (j.title || t("common.untitled"));
+          }
         });
       })
     ]);
@@ -2367,18 +2434,18 @@
 
     const instructionsInput = el("textarea", {
       name: "instructions",
-      placeholder: "エージェントへの指示文"
+      placeholder: L("newJob.instructionsPlaceholder")
     });
 
     const acceptanceInput = el("textarea", {
       name: "acceptance_criteria",
-      placeholder: "受け入れ条件（任意）"
+      placeholder: L("newJob.acceptancePlaceholder")
     });
 
     const targetRefInput = el("input", {
       type: "text",
       name: "target_ref",
-      placeholder: "任意（例: origin/main や PR URL）"
+      placeholder: L("newJob.targetRefPlaceholder")
     });
     const repoPathInput = el("input", {
       type: "text",
@@ -2397,7 +2464,7 @@
     });
 
     const resultArea = el("div", { className: "section" });
-    const submitBtn = el("button", { type: "submit", className: "btn btn-primary", text: "ジョブを登録" });
+    const submitBtn = el("button", { type: "submit", className: "btn btn-primary", text: L("newJob.submit") });
 
     const form = el("form", {
       className: "card form-stack",
@@ -2409,7 +2476,7 @@
         const title = titleInput.value.trim();
         if (!reqID || !title) {
           resultArea.replaceChildren(
-            el("div", { className: "alert alert-error", text: "request_id と title は必須です。" })
+            el("div", { className: "alert alert-error", text: L("newJob.required") })
           );
           return;
         }
@@ -2457,7 +2524,7 @@
         }
 
         submitBtn.disabled = true;
-        submitBtn.textContent = "送信中...";
+        i18n.setText(submitBtn, L("newJob.submitting"));
         try {
           const res = await apiFetch("/jobs", {
             method: "POST",
@@ -2466,16 +2533,18 @@
 
           if (res.status === 202) {
             const heldID = (res.data && res.data.held_id) || (res.data && res.data.held && res.data.held.id) || "-";
-            const reason = (res.data && res.data.held && res.data.held.reason) || "クォータゲートにより保持されました";
+            const reason = (res.data && res.data.held && res.data.held.reason) || L("newJob.heldDefaultReason");
             const snap = (res.data && res.data.held && res.data.held.snapshot_summary) || "";
             resultArea.replaceChildren(
               el("div", { className: "alert alert-warn" }, [
-                el("strong", { text: "ゲート保持 (HTTP 202 Accepted)" }),
+                el("strong", { text: L("newJob.heldHeading") }),
                 el("div", { className: "mono", text: "held_id: " + heldID }),
-                el("div", { text: "理由: " + reason }),
-                snap ? el("div", { className: "small muted", text: "スナップショット: " + snap }) : null,
+                el("div", {
+                  text: function () { return t("newJob.heldReason", { reason: i18n.resolve(reason) }); }
+                }),
+                snap ? el("div", { className: "small muted", text: L("newJob.heldSnapshot", { snapshot: snap }) }) : null,
                 el("div", { className: "btn-row" }, [
-                  navLink("/ui/gate/held", "保持中ジョブ画面で確認する", "btn btn-sm")
+                  navLink("/ui/gate/held", L("newJob.checkHeld"), "btn btn-sm")
                 ])
               ])
             );
@@ -2483,21 +2552,21 @@
             const job = res.data && res.data.job;
             const created = Boolean(res.data && res.data.created);
             const heading = created
-              ? "ジョブを作成しました (HTTP 201 Created)"
-              : "既存のジョブを返しました（冪等再送 / HTTP 200 OK）";
+              ? L("newJob.created")
+              : L("newJob.existing");
             resultArea.replaceChildren(
               el("div", { className: "alert alert-success" }, [
                 el("strong", { text: heading }),
                 job
-                  ? el("div", { text: "ID: #" + job.id + " / タイトル: " + job.title + " / 状態: " + job.status })
+                  ? el("div", { text: L("newJob.createdSummary", { id: job.id, title: job.title, status: job.status }) })
                   : null,
                 job
                   ? el("div", { className: "btn-row" }, [
-                      navLink("/ui/jobs/" + job.id, "ジョブ #" + job.id + " の詳細を開く", "btn btn-primary btn-sm"),
+                      navLink("/ui/jobs/" + job.id, L("newJob.openDetail", { id: job.id }), "btn btn-primary btn-sm"),
                       el("button", {
                         type: "button",
                         className: "btn btn-sm",
-                        text: "新しい request_id を発行して続けて登録",
+                        text: L("newJob.again"),
                         onClick: function () {
                           requestIDInput.value = generateRequestID();
                           resultArea.replaceChildren();
@@ -2509,76 +2578,76 @@
             );
           } else {
             resultArea.replaceChildren(
-              el("div", { className: "alert alert-error", text: errorMessageFromResp(res, "登録に失敗しました") })
+              el("div", { className: "alert alert-error", text: errorMessageFromResp(res, "newJob.failed") })
             );
           }
         } catch (err) {
           if (!err || err.status !== 401) {
             resultArea.replaceChildren(
-              el("div", { className: "alert alert-error", text: "送信エラー: " + (err ? err.message : String(err)) })
+              el("div", { className: "alert alert-error", text: errorAlert("newJob.submitError", err) })
             );
           }
         } finally {
           submitBtn.disabled = false;
-          submitBtn.textContent = "ジョブを登録";
+          i18n.setText(submitBtn, L("newJob.submit"));
         }
       }
     }, [
       el("div", { className: "field" }, [
-        el("span", { className: "field-label", text: "request_id（自動生成・冪等キー）" }),
+        el("span", { className: "field-label", text: L("newJob.requestIDLabel") }),
         el("div", { className: "input-row" }, [requestIDInput, regenBtn])
       ]),
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "タイトル (title) *" }),
+        el("span", { className: "field-label", text: L("newJob.titleLabel") }),
         titleInput
       ]),
       el("div", { className: "form-grid" }, [
         el("label", { className: "field" }, [
-          el("span", { className: "field-label", text: "Agent" }),
+          el("span", { className: "field-label", text: L("field.agent") }),
           agentSelect
         ]),
         el("label", { className: "field" }, [
-          el("span", { className: "field-label", text: "Host" }),
+          el("span", { className: "field-label", text: L("field.host") }),
           hostSelect,
           hostNotice
         ]),
         el("div", { className: "field" }, [
-          el("span", { className: "field-label", text: "Model" }),
+          el("span", { className: "field-label", text: L("field.model") }),
           modelControlWrap
         ]),
         el("div", { className: "field" }, [
-          el("span", { className: "field-label", text: "Pool（自動判定）" }),
+          el("span", { className: "field-label", text: L("newJob.poolLabel") }),
           poolDisplay
         ])
       ]),
       el("div", { className: "form-grid" }, [
         el("label", { className: "field" }, [
-          el("span", { className: "field-label", text: "Workdir" }),
+          el("span", { className: "field-label", text: L("field.workdir") }),
           workdirInput
         ]),
         el("label", { className: "field" }, [
-          el("span", { className: "field-label", text: "親ジョブ (parent_id)" }),
+          el("span", { className: "field-label", text: L("newJob.parentLabel") }),
           parentSelect
         ])
       ]),
       el("div", { className: "field" }, [
-        el("span", { className: "field-label", text: "代替プール (alt_pools)" }),
+        el("span", { className: "field-label", text: L("newJob.altPoolsLabel") }),
         altPoolsGroup
       ]),
       el("label", { className: "field-inline" }, [
         draftCheckbox,
-        el("span", { text: "ドラフトとして登録する (draft)" })
+        el("span", { text: L("newJob.draftLabel") })
       ]),
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "指示文 (instructions)" }),
+        el("span", { className: "field-label", text: L("detail.instructions") }),
         instructionsInput
       ]),
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "受け入れ条件 (acceptance_criteria)" }),
+        el("span", { className: "field-label", text: L("detail.acceptance") }),
         acceptanceInput
       ]),
       el("details", { className: "advanced-box" }, [
-        el("summary", { text: "詳細設定（worktree_spec / target_ref）" }),
+        el("summary", { text: L("newJob.advanced") }),
         el("div", { className: "form-stack" }, [
           el("label", { className: "field" }, [
             el("span", { className: "field-label", text: "target_ref" }),
@@ -2602,13 +2671,13 @@
       ]),
       el("div", { className: "btn-row" }, [
         submitBtn,
-        navLink("/ui/jobs", "キャンセル", "btn btn-ghost")
+        navLink("/ui/jobs", L("common.cancel"), "btn btn-ghost")
       ])
     ]);
 
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [
-        el("h1", { text: "新規ジョブ登録" })
+        el("h1", { text: L("newJob.title") })
       ]),
       resultArea,
       form
@@ -2621,10 +2690,10 @@
     const reqStatus = (searchParams && searchParams.get("status")) || "held";
     const activeStatus = validStatuses.includes(reqStatus) ? reqStatus : "held";
 
-    setLoading("保持中ジョブ");
+    setLoading(L("held.title"));
     const res = await apiFetch("/gate/held?status=" + encodeURIComponent(activeStatus) + "&limit=100");
     if (!res.ok) {
-      throw new Error(errorMessageFromResp(res, "保持中ジョブの取得に失敗しました"));
+      throw i18nError(errorMessageFromResp(res, "held.fetchFailed"));
     }
     const items = (res.data && res.data.held) || [];
 
@@ -2643,10 +2712,10 @@
 
     let contentNode;
     if (items.length === 0) {
-      contentNode = el("div", { className: "card empty-state", text: "該当する保持ジョブはありません。" });
+      contentNode = el("div", { className: "card empty-state", text: L("held.noMatch") });
     } else {
       const rows = items.map(function (h) {
-        const title = (h.payload && h.payload.title) ? h.payload.title : "(タイトルなし)";
+        const title = (h.payload && h.payload.title) ? h.payload.title : L("common.noTitle");
         const agentHost = ((h.payload && h.payload.agent) || "-") + " / " + ((h.payload && h.payload.host) || "-");
         const poolsText = (h.pool || "-") + (Array.isArray(h.alt_pools) && h.alt_pools.length > 0 ? " (alt: " + h.alt_pools.join(", ") + ")" : "");
 
@@ -2655,10 +2724,10 @@
           const releaseBtn = el("button", {
             type: "button",
             className: "btn btn-primary btn-sm",
-            text: "解放試行",
+            text: L("held.release"),
             onClick: async function () {
               releaseBtn.disabled = true;
-              releaseBtn.textContent = "評価中...";
+              i18n.setText(releaseBtn, L("held.releasing"));
               try {
                 const relRes = await apiFetch("/gate/held/" + encodeURIComponent(h.id) + "/release", {
                   method: "POST"
@@ -2667,31 +2736,34 @@
                   const jid = relRes.data.job_id;
                   showBanner(
                     "success",
-                    "保持ジョブ " + h.id + " を解放しました（ジョブ #" + jid + " を作成）。",
-                    navLink("/ui/jobs/" + jid, "ジョブ #" + jid + " を開く", "btn btn-sm")
+                    L("held.released", { id: h.id, jobID: jid }),
+                    navLink("/ui/jobs/" + jid, L("common.openJob", { id: jid }), "btn btn-sm")
                   );
                   await renderHeldJobs(searchParams);
                 } else if (relRes.status === 409) {
-                  const reason = (relRes.data && (relRes.data.reason || relRes.data.error)) || "条件未回復のため見送り";
+                  const reason = (relRes.data && (relRes.data.reason || relRes.data.error)) || L("held.skippedDefaultReason");
                   outcomeArea.replaceChildren(
-                    el("div", { className: "alert alert-warn", text: "解放見送り (" + h.id + "): " + reason })
+                    el("div", {
+                      className: "alert alert-warn",
+                      text: function () { return t("held.skipped", { id: h.id, reason: i18n.resolve(reason) }); }
+                    })
                   );
                   releaseBtn.disabled = false;
-                  releaseBtn.textContent = "解放試行";
+                  i18n.setText(releaseBtn, L("held.release"));
                 } else {
                   outcomeArea.replaceChildren(
-                    el("div", { className: "alert alert-error", text: errorMessageFromResp(relRes, "解放試行に失敗しました") })
+                    el("div", { className: "alert alert-error", text: errorMessageFromResp(relRes, "held.releaseFailed") })
                   );
                   releaseBtn.disabled = false;
-                  releaseBtn.textContent = "解放試行";
+                  i18n.setText(releaseBtn, L("held.release"));
                 }
               } catch (err) {
                 if (!err || err.status !== 401) {
                   outcomeArea.replaceChildren(
-                    el("div", { className: "alert alert-error", text: "解放試行エラー: " + (err ? err.message : String(err)) })
+                    el("div", { className: "alert alert-error", text: errorAlert("held.releaseError", err) })
                   );
                   releaseBtn.disabled = false;
-                  releaseBtn.textContent = "解放試行";
+                  i18n.setText(releaseBtn, L("held.release"));
                 }
               }
             }
@@ -2700,9 +2772,9 @@
           const cancelBtn = el("button", {
             type: "button",
             className: "btn btn-danger btn-sm",
-            text: "キャンセル",
+            text: L("common.cancel"),
             onClick: async function () {
-              if (!window.confirm("保持ジョブ " + h.id + " をキャンセルしますか？")) {
+              if (!window.confirm(t("held.cancelConfirm", { id: h.id }))) {
                 return;
               }
               cancelBtn.disabled = true;
@@ -2712,17 +2784,17 @@
                 });
                 if (!delRes.ok) {
                   outcomeArea.replaceChildren(
-                    el("div", { className: "alert alert-error", text: errorMessageFromResp(delRes, "キャンセルに失敗しました") })
+                    el("div", { className: "alert alert-error", text: errorMessageFromResp(delRes, "common.cancelFailed") })
                   );
                   cancelBtn.disabled = false;
                   return;
                 }
-                showBanner("success", "保持ジョブ " + h.id + " をキャンセルしました。");
+                showBanner("success", L("held.cancelled", { id: h.id }));
                 await renderHeldJobs(searchParams);
               } catch (err) {
                 if (!err || err.status !== 401) {
                   outcomeArea.replaceChildren(
-                    el("div", { className: "alert alert-error", text: "キャンセルエラー: " + (err ? err.message : String(err)) })
+                    el("div", { className: "alert alert-error", text: errorAlert("common.cancelError", err) })
                   );
                   cancelBtn.disabled = false;
                 }
@@ -2732,7 +2804,7 @@
 
           actionCellChildren.push(el("div", { className: "btn-row" }, [releaseBtn, cancelBtn]));
         } else if (h.released_job_id) {
-          actionCellChildren.push(navLink("/ui/jobs/" + h.released_job_id, "ジョブ #" + h.released_job_id, "mono"));
+          actionCellChildren.push(navLink("/ui/jobs/" + h.released_job_id, L("common.jobLabel", { id: h.released_job_id }), "mono"));
         } else {
           actionCellChildren.push(el("span", { className: "muted", text: "-" }));
         }
@@ -2756,14 +2828,14 @@
         el("table", null, [
           el("thead", null, [
             el("tr", null, [
-              el("th", { text: "Held ID" }),
-              el("th", { text: "状態" }),
-              el("th", { text: "タイトル / agent・host" }),
-              el("th", { text: "プール" }),
-              el("th", { text: "保持理由" }),
-              el("th", { text: "判定スナップショット" }),
-              el("th", { text: "作成時刻" }),
-              el("th", { text: "操作" })
+              el("th", { text: L("field.heldID") }),
+              el("th", { text: L("column.status") }),
+              el("th", { text: L("held.titleAgentHost") }),
+              el("th", { text: L("column.pool") }),
+              el("th", { text: L("column.holdReason") }),
+              el("th", { text: L("held.snapshot") }),
+              el("th", { text: L("column.createdAt") }),
+              el("th", { text: L("held.actions") })
             ])
           ]),
           el("tbody", null, rows)
@@ -2773,7 +2845,7 @@
 
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [
-        el("h1", { text: "保持中ジョブ" })
+        el("h1", { text: L("held.title") })
       ]),
       tabs,
       outcomeArea,
@@ -2786,7 +2858,7 @@
     const jobIDFilter = (searchParams && searchParams.get("job_id")) || "";
     const heldIDFilter = (searchParams && searchParams.get("held_id")) || "";
 
-    setLoading("ゲート判定履歴");
+    setLoading(L("decisions.title"));
     const params = new URLSearchParams();
     params.set("limit", "100");
     if (jobIDFilter) params.set("job_id", jobIDFilter);
@@ -2794,11 +2866,11 @@
 
     const res = await apiFetch("/gate/decisions?" + params.toString());
     if (!res.ok) {
-      throw new Error(errorMessageFromResp(res, "ゲート判定履歴の取得に失敗しました"));
+      throw i18nError(errorMessageFromResp(res, "decisions.fetchFailed"));
     }
     const decisions = (res.data && res.data.decisions) || [];
 
-    const jobInput = el("input", { type: "number", name: "job_id", value: jobIDFilter, placeholder: "例: 42", min: "1" });
+    const jobInput = el("input", { type: "number", name: "job_id", value: jobIDFilter, placeholder: L("decisions.jobIDPlaceholder"), min: "1" });
     const heldInput = el("input", { type: "text", name: "held_id", value: heldIDFilter, placeholder: "held_id" });
 
     const filterForm = el("form", {
@@ -2813,19 +2885,19 @@
       }
     }, [
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "Job ID" }),
+        el("span", { className: "field-label", text: L("field.jobID") }),
         jobInput
       ]),
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "Held ID" }),
+        el("span", { className: "field-label", text: L("field.heldID") }),
         heldInput
       ]),
       el("div", { className: "btn-row" }, [
-        el("button", { type: "submit", className: "btn btn-primary", text: "絞り込み" }),
+        el("button", { type: "submit", className: "btn btn-primary", text: L("common.filter") }),
         el("button", {
           type: "button",
           className: "btn btn-ghost",
-          text: "クリア",
+          text: L("common.clear"),
           onClick: function () {
             navigate("/ui/gate/decisions");
           }
@@ -2835,7 +2907,7 @@
 
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [
-        el("h1", { text: "ゲート判定履歴" })
+        el("h1", { text: L("decisions.title") })
       ]),
       filterForm,
       buildGateDecisionsTable(decisions)
@@ -2844,14 +2916,14 @@
 
   function buildGateDecisionsTable(decisions) {
     if (!decisions || decisions.length === 0) {
-      return el("div", { className: "card empty-state", text: "ゲート判定履歴はありません。" });
+      return el("div", { className: "card empty-state", text: L("decisions.empty") });
     }
     const rows = decisions.map(function (d) {
       let targetNode;
       if (d.job_id) {
-        targetNode = navLink("/ui/jobs/" + d.job_id, "Job #" + d.job_id, "mono");
+        targetNode = navLink("/ui/jobs/" + d.job_id, L("decisions.targetJob", { id: d.job_id }), "mono");
       } else if (d.held_id) {
-        targetNode = navLink("/ui/gate/held", "Held " + d.held_id, "mono");
+        targetNode = navLink("/ui/gate/held", L("decisions.targetHeld", { id: d.held_id }), "mono");
       } else {
         targetNode = el("span", { className: "muted", text: "-" });
       }
@@ -2872,16 +2944,16 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "ID" }),
-            el("th", { text: "判定" }),
-            el("th", { text: "モード" }),
-            el("th", { text: "対象" }),
-            el("th", { text: "要求プール" }),
-            el("th", { text: "選択プール" }),
-            el("th", { text: "ブロック / バイパス" }),
-            el("th", { text: "理由" }),
-            el("th", { text: "測定時刻" }),
-            el("th", { text: "判定時刻" })
+            el("th", { text: L("field.id") }),
+            el("th", { text: L("decisions.decision") }),
+            el("th", { text: L("decisions.mode") }),
+            el("th", { text: L("decisions.target") }),
+            el("th", { text: L("decisions.requestedPool") }),
+            el("th", { text: L("decisions.selectedPool") }),
+            el("th", { text: L("decisions.blockedBy") }),
+            el("th", { text: L("decisions.reason") }),
+            el("th", { text: L("decisions.measuredAt") }),
+            el("th", { text: L("decisions.decidedAt") })
           ])
         ]),
         el("tbody", null, rows)
@@ -2892,19 +2964,19 @@
   // ==================== 7. Deliveries (/ui/deliveries) ====================
   async function renderDeliveries(searchParams, view) {
     const validStatuses = [
-      { key: "undelivered", label: "未納品" },
-      { key: "delivered", label: "納品済み" },
-      { key: "all", label: "すべて" }
+      { key: "undelivered", label: L("deliveries.undelivered") },
+      { key: "delivered", label: L("deliveries.delivered") },
+      { key: "all", label: L("common.all") }
     ];
     const reqStatus = (searchParams && searchParams.get("status")) || "undelivered";
     const activeStatus = validStatuses.some(function (s) { return s.key === reqStatus; }) ? reqStatus : "undelivered";
 
     if (!view) {
-      setLoading("納品");
+      setLoading(L("deliveries.title"));
     }
     const res = await apiFetch("/deliveries?status=" + encodeURIComponent(activeStatus) + "&limit=100");
     if (!res.ok) {
-      throw new Error(errorMessageFromResp(res, "納品一覧の取得に失敗しました"));
+      throw i18nError(errorMessageFromResp(res, "deliveries.fetchFailed"));
     }
     const jobs = (res.data && res.data.jobs) || [];
 
@@ -2924,7 +2996,7 @@
     }
     dom.app.replaceChildren(
       el("div", { className: "page-header" }, [
-        el("h1", { text: "納品" })
+        el("h1", { text: L("deliveries.title") })
       ]),
       tabs,
       buildDeliveriesTable(jobs, function () {
@@ -2936,7 +3008,7 @@
 
   function buildDeliveriesTable(jobs, onDelivered) {
     if (!jobs || jobs.length === 0) {
-      return el("div", { className: "card empty-state", text: "該当する納品対象ジョブはありません。" });
+      return el("div", { className: "card empty-state", text: L("deliveries.empty") });
     }
     const rows = jobs.map(function (j) {
       const deliveredBadge = j.delivered_at ? statusBadge("delivered") : statusBadge("undelivered");
@@ -2946,21 +3018,21 @@
         const markBtn = el("button", {
           type: "button",
           className: "btn btn-sm",
-          text: "納品済みにする",
+          text: L("deliveries.mark"),
           onClick: async function () {
             markBtn.disabled = true;
             try {
               const res = await apiFetch("/jobs/" + j.id + "/deliver", { method: "POST" });
               if (!res.ok) {
-                showBanner("error", errorMessageFromResp(res, "納品済みの記録に失敗しました"));
+                showBanner("error", errorMessageFromResp(res, "deliveries.markFailed"));
                 markBtn.disabled = false;
                 return;
               }
-              showBanner("success", "ジョブ #" + j.id + " を納品済みにしました。");
+              showBanner("success", L("deliveries.marked", { id: j.id }));
               onDelivered();
             } catch (err) {
               if (!err || err.status !== 401) {
-                showBanner("error", "納品更新エラー: " + (err ? err.message : String(err)));
+                showBanner("error", errorAlert("deliveries.markError", err));
                 markBtn.disabled = false;
               }
             }
@@ -2973,7 +3045,7 @@
 
       return el("tr", null, [
         el("td", { className: "mono" }, [navLink("/ui/jobs/" + j.id, "#" + j.id)]),
-        el("td", null, [navLink("/ui/jobs/" + j.id, j.title || "(無題)")]),
+        el("td", null, [navLink("/ui/jobs/" + j.id, j.title || L("common.untitled"))]),
         el("td", null, [statusBadge(j.status)]),
         el("td", null, [deliveredBadge]),
         el("td", { className: "mono small", text: (j.agent || "-") + " / " + (j.host || "-") }),
@@ -2987,14 +3059,14 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "ID" }),
-            el("th", { text: "タイトル" }),
-            el("th", { text: "状態" }),
-            el("th", { text: "納品" }),
-            el("th", { text: "agent / host" }),
-            el("th", { text: "結果 / エラー抜粋" }),
-            el("th", { text: "更新時刻" }),
-            el("th", { text: "納品操作 / 時刻" })
+            el("th", { text: L("field.id") }),
+            el("th", { text: L("column.title") }),
+            el("th", { text: L("column.status") }),
+            el("th", { text: L("deliveries.columnDelivery") }),
+            el("th", { text: L("field.agentHost") }),
+            el("th", { text: L("deliveries.columnExcerpt") }),
+            el("th", { text: L("deliveries.columnUpdatedAt") }),
+            el("th", { text: L("deliveries.columnAction") })
           ])
         ]),
         el("tbody", null, rows)
@@ -3004,13 +3076,13 @@
 
   // ==================== 8. Agent Versions (/ui/agents) ====================
   async function renderAgentVersions() {
-    setLoading("エージェント版数");
+    setLoading(L("agents.title"));
     const [agentsRes, eventsRes] = await Promise.all([
       apiFetch("/agents"),
       apiFetch("/agents/events?limit=50")
     ]);
     if (!agentsRes.ok) {
-      throw new Error(errorMessageFromResp(agentsRes, "エージェント版数の取得に失敗しました"));
+      throw i18nError(errorMessageFromResp(agentsRes, "agents.fetchFailed"));
     }
     const matrix = agentsRes.data || {};
     const events = (eventsRes.ok && eventsRes.data && Array.isArray(eventsRes.data.events))
@@ -3020,29 +3092,29 @@
     const checkBtn = el("button", {
       type: "button",
       className: "btn btn-primary btn-sm",
-      text: "今すぐ確認",
+      text: L("agents.checkNow"),
       onClick: async function () {
         checkBtn.disabled = true;
-        checkBtn.textContent = "確認中...";
+        i18n.setText(checkBtn, L("agents.checking"));
         try {
           const res = await apiFetch("/agents/check", { method: "POST" });
           if (!res.ok) {
-            showBanner("error", errorMessageFromResp(res, "プローブ実行に失敗しました"));
+            showBanner("error", errorMessageFromResp(res, "agents.probeFailed"));
             checkBtn.disabled = false;
-            checkBtn.textContent = "今すぐ確認";
+            i18n.setText(checkBtn, L("agents.checkNow"));
             return;
           }
           const newEvents = (res.data && Array.isArray(res.data.events)) ? res.data.events : [];
           showBanner(
             res.data && res.data.has_drift ? "warn" : "success",
-            "プローブが完了しました（新規イベント: " + newEvents.length + "件）。"
+            L("agents.probeDone", { count: newEvents.length })
           );
           await renderAgentVersions();
         } catch (err) {
           if (!err || err.status !== 401) {
-            showBanner("error", "プローブエラー: " + (err ? err.message : String(err)));
+            showBanner("error", errorAlert("agents.probeError", err));
             checkBtn.disabled = false;
-            checkBtn.textContent = "今すぐ確認";
+            i18n.setText(checkBtn, L("agents.checkNow"));
           }
         }
       }
@@ -3050,7 +3122,7 @@
 
     const sections = [
       el("div", { className: "page-header" }, [
-        el("h1", { text: "エージェント版数" }),
+        el("h1", { text: L("agents.title") }),
         el("div", { className: "btn-row" }, [checkBtn])
       ])
     ];
@@ -3067,17 +3139,19 @@
           }
         }
       }
-      let alertMsg = "ドリフトを検出しています: " + driftNames;
-      if (manualHosts.length > 0) {
-        alertMsg += "（自動更新不可・手作業が必要: " + manualHosts.join(", ") + "）";
-      }
+      const alertMsg = function () {
+        const manual = manualHosts.length > 0
+          ? t("agents.driftManual", { hosts: manualHosts.join(", ") })
+          : "";
+        return t("agents.driftAlert", { agents: driftNames }) + manual;
+      };
       sections.push(el("div", { className: "alert alert-warn agent-drift-alert", text: alertMsg }));
     }
 
     if (summaries.length > 0) {
       sections.push(
         el("section", { className: "section" }, [
-          el("h2", { className: "section-title", text: "ドリフト要約" }),
+          el("h2", { className: "section-title", text: L("agents.driftSummary") }),
           buildAgentSummaryCards(summaries)
         ])
       );
@@ -3085,18 +3159,19 @@
 
     sections.push(
       el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "ホスト × エージェント 版マトリクス" }),
+        el("h2", { className: "section-title", text: L("agents.matrix") }),
         buildAgentMatrixTable(matrix)
       ])
     );
 
     if (matrix.limitation_note) {
-      sections.push(el("p", { className: "muted small", text: matrix.limitation_note }));
+      // The server sends this note in Japanese only, so the UI shows its own copy.
+      sections.push(el("p", { className: "muted small", text: L("agents.limitationNote") }));
     }
 
     sections.push(
       el("section", { className: "section" }, [
-        el("h2", { className: "section-title", text: "変化イベント履歴（直近50件）" }),
+        el("h2", { className: "section-title", text: L("agents.events") }),
         buildAgentEventsTable(events)
       ])
     );
@@ -3114,30 +3189,30 @@
         })
       ];
       if (!s.comparable && Array.isArray(s.versions) && s.versions.length > 0) {
-        badges.push(el("span", { className: "badge badge-warn", text: "比較不能" }));
+        badges.push(el("span", { className: "badge badge-warn", text: L("agents.notComparable") }));
       }
 
       const details = [];
       if (s.max_version) {
-        details.push(el("div", { className: "small mono", text: "最大版: " + s.max_version }));
+        details.push(el("div", { className: "small mono", text: L("agents.maxVersion", { version: s.max_version }) }));
       }
       if (Array.isArray(s.lagging_hosts) && s.lagging_hosts.length > 0) {
-        details.push(el("div", { className: "small", text: "遅れ: " + s.lagging_hosts.join(", ") }));
+        details.push(el("div", { className: "small", text: L("agents.laggingHosts", { hosts: s.lagging_hosts.join(", ") }) }));
       }
       if (Array.isArray(s.manual_update_hosts) && s.manual_update_hosts.length > 0) {
         details.push(el("div", {
           className: "small agent-manual-note",
-          text: "要手作業: " + s.manual_update_hosts.join(", ")
+          text: L("agents.manualHosts", { hosts: s.manual_update_hosts.join(", ") })
         }));
       }
       if (Array.isArray(s.pinned_hosts) && s.pinned_hosts.length > 0) {
         details.push(el("div", { className: "small muted", text: "pinned: " + s.pinned_hosts.join(", ") }));
       }
       if (Array.isArray(s.failed_hosts) && s.failed_hosts.length > 0) {
-        details.push(el("div", { className: "small agent-error-note", text: "失敗: " + s.failed_hosts.join(", ") }));
+        details.push(el("div", { className: "small agent-error-note", text: L("agents.failedHosts", { hosts: s.failed_hosts.join(", ") }) }));
       }
       if (details.length === 0) {
-        details.push(el("div", { className: "small muted", text: "未取得または差異なし" }));
+        details.push(el("div", { className: "small muted", text: L("agents.noDetails") }));
       }
 
       return el("div", { className: cardClass }, [
@@ -3157,7 +3232,7 @@
     const entries = Array.isArray(matrix.entries) ? matrix.entries : [];
 
     if (hosts.length === 0 || agents.length === 0) {
-      return el("div", { className: "card empty-state", text: "ホストまたはエージェントが設定されていません。" });
+      return el("div", { className: "card empty-state", text: L("agents.notConfigured") });
     }
 
     const cellMap = new Map();
@@ -3167,7 +3242,7 @@
       }
     }
 
-    const headerCells = [el("th", { text: "ホスト" })];
+    const headerCells = [el("th", { text: L("column.host") })];
     for (const a of agents) {
       headerCells.push(el("th", { className: "mono", text: a }));
     }
@@ -3191,12 +3266,12 @@
 
   function buildAgentMatrixCell(c) {
     if (!c || !c.status) {
-      const notes = [el("span", { className: "muted", text: "未確認" })];
+      const notes = [el("span", { className: "muted", text: L("agents.unchecked") })];
       if (c && c.pinned) {
         notes.push(el("span", { className: "badge badge-pinned", text: "pinned: " + c.pin }));
       }
       if (c && c.manual_update) {
-        notes.push(el("span", { className: "badge badge-manual", text: "要手作業" }));
+        notes.push(el("span", { className: "badge badge-manual", text: L("agents.manualBadge") }));
       }
       return el("td", { className: "agent-cell" }, [el("div", { className: "agent-cell-main" }, notes)]);
     }
@@ -3221,17 +3296,17 @@
     }
 
     if (c.pinned) {
-      const pinText = c.pin_mismatch ? ("pinned: " + c.pin + " (不一致)") : ("pinned: " + c.pin);
+      const pinText = c.pin_mismatch ? L("agents.pinMismatch", { pin: c.pin }) : ("pinned: " + c.pin);
       topNodes.push(el("span", { className: "badge badge-pinned", text: pinText }));
     }
     if (c.behind) {
-      topNodes.push(el("span", { className: "badge badge-behind", text: "遅れ" }));
+      topNodes.push(el("span", { className: "badge badge-behind", text: L("agents.behind") }));
     }
     if (c.status === "ok" && !c.comparable) {
-      topNodes.push(el("span", { className: "badge badge-warn", text: "比較不能" }));
+      topNodes.push(el("span", { className: "badge badge-warn", text: L("agents.notComparable") }));
     }
     if (c.manual_update) {
-      topNodes.push(el("span", { className: "badge badge-manual", text: "要手作業" }));
+      topNodes.push(el("span", { className: "badge badge-manual", text: L("agents.manualBadge") }));
     }
 
     const cellChildren = [el("div", { className: "agent-cell-main" }, topNodes)];
@@ -3249,7 +3324,7 @@
 
   function buildAgentEventsTable(events) {
     if (!events || events.length === 0) {
-      return el("div", { className: "card empty-state", text: "記録されたエージェント版数イベントはありません。" });
+      return el("div", { className: "card empty-state", text: L("agents.noEvents") });
     }
     const rows = events.map(function (ev) {
       let changeText = "-";
@@ -3259,7 +3334,7 @@
       const detailNodes = [el("span", { text: ev.detail || "-" })];
       if (ev.manual_update) {
         detailNodes.push(document.createTextNode(" "));
-        detailNodes.push(el("span", { className: "badge badge-manual", text: "要手作業" }));
+        detailNodes.push(el("span", { className: "badge badge-manual", text: L("agents.manualBadge") }));
       }
       return el("tr", null, [
         el("td", { className: "mono small", text: "#" + ev.id }),
@@ -3275,13 +3350,13 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "ID" }),
-            el("th", { text: "時刻" }),
-            el("th", { text: "種別" }),
-            el("th", { text: "エージェント" }),
-            el("th", { text: "ホスト" }),
-            el("th", { text: "変化" }),
-            el("th", { text: "詳細" })
+            el("th", { text: L("field.id") }),
+            el("th", { text: L("agents.columnTime") }),
+            el("th", { text: L("agents.columnType") }),
+            el("th", { text: L("agents.columnAgent") }),
+            el("th", { text: L("column.host") }),
+            el("th", { text: L("agents.columnChange") }),
+            el("th", { text: L("agents.columnDetail") })
           ])
         ]),
         el("tbody", null, rows)
@@ -3332,21 +3407,22 @@
       getNotification: getNotificationCtor,
       show: notificationPresenter.show,
       onError: function () {
-        showBanner("error", "このブラウザでは通知を表示できませんでした。");
+        showBanner("error", L("notify.showFailed"));
       }
     }),
     onListChanged: function () { listRefresher.request(); },
     onChange: function (view) {
       dom.btnNotify.setAttribute("aria-pressed", view.enabled ? "true" : "false");
       dom.btnNotify.classList.toggle("notify-problem", Boolean(view.problem));
-      dom.btnNotify.title = view.problem ||
-        ("ジョブ完了のブラウザ通知: " + (view.enabled ? "オン" : "オフ"));
+      i18n.setAttr(dom.btnNotify, "title", view.problemKey
+        ? L(view.problemKey)
+        : L(view.enabled ? "notify.toggleOn" : "notify.toggleOff"));
     },
-    onMessage: function (message) { showBanner("error", message); },
-    onUnauthorized: function (message) {
+    onMessage: function (_message, key) { showBanner("error", L(key)); },
+    onUnauthorized: function (_message, key) {
       // Do not wipe a token the user is already typing.
       if (dom.authGate.hidden) {
-        showAuthGate(message);
+        showAuthGate(L(key));
       }
     }
   });
@@ -3367,7 +3443,7 @@
     try {
       const res = await apiFetch("/status");
       if (!res.ok) {
-        dom.authError.textContent = errorMessageFromResp(res, "接続に失敗しました");
+        i18n.setText(dom.authError, errorMessageFromResp(res, "auth.connectFailed"));
         dom.authError.hidden = false;
         return;
       }
@@ -3381,7 +3457,7 @@
         sessionStorage.removeItem(AUTH_MODE_KEY);
         return;
       }
-      dom.authError.textContent = "接続エラー: " + (err ? err.message : String(err));
+      i18n.setText(dom.authError, errorAlert("auth.connectError", err));
       dom.authError.hidden = false;
     }
   }
@@ -3390,7 +3466,7 @@
     ev.preventDefault();
     const token = dom.authTokenInput.value.trim();
     if (!token) {
-      dom.authError.textContent = "トークンを入力してください。";
+      i18n.setText(dom.authError, L("auth.tokenMissing"));
       dom.authError.hidden = false;
       return;
     }
@@ -3432,7 +3508,20 @@
     });
   }
 
+  if (dom.localeSwitch) {
+    dom.localeSwitch.addEventListener("click", function (ev) {
+      const btn = ev.target && ev.target.closest ? ev.target.closest("[data-set-locale]") : null;
+      if (!btn) {
+        return;
+      }
+      i18n.setLocale(btn.getAttribute("data-set-locale"), true);
+    });
+  }
+
   window.addEventListener("storage", function (ev) {
+    if (ev && ev.key === i18n.LOCALE_KEY) {
+      i18n.setLocale(ev.newValue, false);
+    }
     if (ev && ev.key === DIRECTION_KEY) {
       applyDirection(ev.newValue, false);
     }

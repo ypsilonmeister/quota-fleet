@@ -11,7 +11,7 @@ import (
 
 //go:generate go run gen_icons.go
 
-//go:embed index.html assets/style.css assets/direction.js assets/notify.js assets/app.js assets/sw.js
+//go:embed index.html assets/style.css assets/direction.js assets/i18n.js assets/notify.js assets/app.js assets/sw.js
 //go:embed assets/manifest.webmanifest assets/icon-192.png assets/icon-512.png
 //go:embed assets/icon-maskable-512.png assets/apple-touch-icon.png
 var assetsFS embed.FS
@@ -24,29 +24,43 @@ const shellVersionPlaceholder = "__QF_SHELL_VERSION__"
 
 // shellAsset is a static file of the app shell served under /ui/.
 type shellAsset struct {
-	path        string
-	file        string
+	path string
+	// files are the embedded files served under path, joined in this order.
+	files       []string
 	contentType string
+}
+
+// body returns what is served for the asset. The separator keeps one script from
+// running into the next.
+func (a shellAsset) body() []byte {
+	parts := make([][]byte, len(a.files))
+	for i, file := range a.files {
+		parts[i] = mustRead(file)
+	}
+	return bytes.Join(parts, []byte(";\n"))
 }
 
 // shellAssets lists the static files of the app shell besides index.html. sw.js
 // precaches the same paths (SHELL_ASSETS), which a test keeps in step.
 var shellAssets = []shellAsset{
-	{"/ui/assets/style.css", "assets/style.css", "text/css; charset=utf-8"},
-	{"/ui/assets/direction.js", "assets/direction.js", "application/javascript; charset=utf-8"},
-	{"/ui/assets/notify.js", "assets/notify.js", "application/javascript; charset=utf-8"},
-	{"/ui/assets/app.js", "assets/app.js", "application/javascript; charset=utf-8"},
-	{"/ui/manifest.webmanifest", "assets/manifest.webmanifest", "application/manifest+json"},
-	{"/ui/assets/icon-192.png", "assets/icon-192.png", "image/png"},
-	{"/ui/assets/icon-512.png", "assets/icon-512.png", "image/png"},
-	{"/ui/assets/icon-maskable-512.png", "assets/icon-maskable-512.png", "image/png"},
-	{"/ui/assets/apple-touch-icon.png", "assets/apple-touch-icon.png", "image/png"},
+	{"/ui/assets/style.css", []string{"assets/style.css"}, "text/css; charset=utf-8"},
+	{"/ui/assets/direction.js", []string{"assets/direction.js"}, "application/javascript; charset=utf-8"},
+	{"/ui/assets/notify.js", []string{"assets/notify.js"}, "application/javascript; charset=utf-8"},
+	// The label dictionary travels with the application, so that a page cannot end up
+	// with one but not the other (docs/17).
+	{"/ui/assets/app.js", []string{"assets/i18n.js", "assets/app.js"}, "application/javascript; charset=utf-8"},
+	{"/ui/manifest.webmanifest", []string{"assets/manifest.webmanifest"}, "application/manifest+json"},
+	{"/ui/assets/icon-192.png", []string{"assets/icon-192.png"}, "image/png"},
+	{"/ui/assets/icon-512.png", []string{"assets/icon-512.png"}, "image/png"},
+	{"/ui/assets/icon-maskable-512.png", []string{"assets/icon-maskable-512.png"}, "image/png"},
+	{"/ui/assets/apple-touch-icon.png", []string{"assets/apple-touch-icon.png"}, "image/png"},
 }
 
 var (
 	indexHTML    []byte
 	styleCSS     []byte
 	directionJS  []byte
+	i18nJS       []byte
 	notifyJS     []byte
 	appJS        []byte
 	swJS         []byte
@@ -57,6 +71,7 @@ func init() {
 	indexHTML = mustRead("index.html")
 	styleCSS = mustRead("assets/style.css")
 	directionJS = mustRead("assets/direction.js")
+	i18nJS = mustRead("assets/i18n.js")
 	notifyJS = mustRead("assets/notify.js")
 	appJS = mustRead("assets/app.js")
 	manifestJSON = mustRead("assets/manifest.webmanifest")
@@ -90,7 +105,7 @@ func shellVersion(swSource []byte) string {
 	add("sw.js", swSource)
 	add("index.html", mustRead("index.html"))
 	for _, asset := range shellAssets {
-		add(asset.path, mustRead(asset.file))
+		add(asset.path, asset.body())
 	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
@@ -136,7 +151,7 @@ func NewHandler() http.Handler {
 	})
 
 	for _, asset := range shellAssets {
-		body := mustRead(asset.file)
+		body := asset.body()
 		mux.HandleFunc("GET "+asset.path, func(w http.ResponseWriter, r *http.Request) {
 			setCommonHeaders(w)
 			w.Header().Set("Content-Type", asset.contentType)

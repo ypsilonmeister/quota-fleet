@@ -3,19 +3,26 @@
 (function (root) {
   "use strict";
 
+  // In the page the dictionary arrives with app.js, after this file has run, so it is
+  // looked up each time a message is needed (docs/17).
+  const i18n = {
+    t: function (key, params) {
+      return ((root && root.__qfI18n) || require("./i18n.js")).t(key, params);
+    }
+  };
   const NOTIFY_KEY = "qf-job-notify";
-  const TERMINAL_TEXT = {
-    done: { headline: "完了しました", state: "done（完了）" },
-    failed: { headline: "失敗しました", state: "failed（失敗）" },
-    cancelled: { headline: "キャンセルされました", state: "cancelled（キャンセル）" }
+  // Message keys, looked up when shown so that they follow the current locale (docs/17).
+  const TERMINAL_KEYS = {
+    done: { title: "notify.titleDone", state: "notify.stateDone" },
+    failed: { title: "notify.titleFailed", state: "notify.stateFailed" },
+    cancelled: { title: "notify.titleCancelled", state: "notify.stateCancelled" }
   };
-  const FATAL_MESSAGES = {
-    401: "通知ストリームの認証に失敗しました（401）。",
-    403: "通知ストリームには read スコープのトークンが必要です（403）。",
-    404: "サーバー側でジョブ通知が無効です（fleet.yaml の api.job_events）。"
+  const FATAL_KEYS = {
+    401: "notify.fatalUnauthorized",
+    403: "notify.fatalForbidden",
+    404: "notify.fatalDisabled"
   };
-  const NO_TOKEN_MESSAGE =
-    "通知には read スコープの API トークンが必要です。トークンなしの接続では利用できません。";
+  const NO_TOKEN_KEY = "notify.noToken";
   const MIN_RETRY_MS = 1000;
   const MAX_RETRY_MS = 30000;
   // The server sends a heartbeat every 25s; silence this long means a dead connection.
@@ -120,7 +127,7 @@
         if (gen !== generation) {
           return;
         }
-        if (FATAL_MESSAGES[resp.status]) {
+        if (FATAL_KEYS[resp.status]) {
           generation += 1;
           options.onFatal(resp.status);
           return;
@@ -325,7 +332,7 @@
       if (!event || !Number.isInteger(event.job_id) || event.job_id <= 0) {
         return null;
       }
-      if (!Object.prototype.hasOwnProperty.call(TERMINAL_TEXT, event.status) ||
+      if (!Object.prototype.hasOwnProperty.call(TERMINAL_KEYS, event.status) ||
           event.prev_status === event.status) {
         return null;
       }
@@ -337,14 +344,17 @@
       if (notified.has(key)) {
         return null;
       }
-      const text = TERMINAL_TEXT[event.status];
+      const keys = TERMINAL_KEYS[event.status];
       // Remembered before showing so that a repeat arriving meanwhile is suppressed.
       notified.add(key);
       return new Promise(function (resolve) {
         resolve(options.show({
           jobID: event.job_id,
-          title: "ジョブ #" + event.job_id + " が" + text.headline,
-          body: (event.title || "(無題)") + "\n状態: " + text.state,
+          title: i18n.t(keys.title, { id: event.job_id }),
+          body: i18n.t("notify.body", {
+            title: event.title || i18n.t("common.untitled"),
+            state: i18n.t(keys.state)
+          }),
           // Tabs sharing an origin replace each other's notification instead of stacking.
           tag: "qf-job-" + key
         }));
@@ -386,20 +396,30 @@
   function createNotifyController(options) {
     let wanted = readPreference(options.storage);
     let stream = null;
-    let problem = "";
+    let problemKey = "";
 
-    function unsupportedReason() {
+    // report sends the toggle state, with the problem both as text and as its key.
+    function report() {
+      options.onChange({
+        enabled: isEnabled(),
+        problem: problemKey ? i18n.t(problemKey) : "",
+        problemKey: problemKey
+      });
+    }
+
+    // unsupportedKey returns the message key of why notifications cannot work, or "".
+    function unsupportedKey() {
       if (!options.isSecureContext()) {
-        return "ブラウザ通知は HTTPS または localhost で開いた場合のみ利用できます。";
+        return "notify.insecureContext";
       }
       if (!options.getNotification()) {
-        return "このブラウザは通知に対応していません。";
+        return "notify.unsupported";
       }
       return "";
     }
 
     function isEnabled() {
-      return wanted && unsupportedReason() === "" &&
+      return wanted && unsupportedKey() === "" &&
         options.getNotification().permission === "granted";
     }
 
@@ -429,13 +449,17 @@
       // A server without tokens serves the UI anonymously but rejects the stream. Asking
       // for a token there would keep the user from the rest of the UI.
       const noToken = status === 401 && !options.hasToken();
-      problem = noToken ? NO_TOKEN_MESSAGE : FATAL_MESSAGES[status];
-      options.onChange({ enabled: isEnabled(), problem: problem });
+      problemKey = noToken ? NO_TOKEN_KEY : FATAL_KEYS[status];
+      report();
       if (status === 401 && !noToken) {
-        options.onUnauthorized(problem);
+        options.onUnauthorized(i18n.t(problemKey), problemKey);
       } else {
-        options.onMessage(problem);
+        message(problemKey);
       }
+    }
+
+    function message(key) {
+      options.onMessage(i18n.t(key), key);
     }
 
     function sync() {
@@ -443,7 +467,7 @@
         // Ready the display path before the first event needs it.
         options.prepare();
       }
-      const run = isEnabled() && problem === "" && options.hasCredentials();
+      const run = isEnabled() && problemKey === "" && options.hasCredentials();
       if (!run) {
         stop();
       } else if (!stream) {
@@ -455,12 +479,12 @@
         });
         stream.start();
       }
-      options.onChange({ enabled: isEnabled(), problem: problem });
+      report();
     }
 
     function restart() {
       stop();
-      problem = "";
+      problemKey = "";
       sync();
     }
 
@@ -476,9 +500,9 @@
         setWanted(false);
         return;
       }
-      const reason = unsupportedReason();
+      const reason = unsupportedKey();
       if (reason) {
-        options.onMessage(reason);
+        message(reason);
         return;
       }
       const NotificationCtor = options.getNotification();
@@ -487,7 +511,7 @@
         permission = await NotificationCtor.requestPermission();
       }
       if (permission !== "granted") {
-        options.onMessage("ブラウザで通知が許可されていないため有効にできません。ブラウザのサイト設定を確認してください。");
+        message("notify.denied");
         sync();
         return;
       }

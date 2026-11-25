@@ -25,6 +25,9 @@ trustworthy enough to merge.
 >   `api.job_events: true`, then turn them on in the UI).
 > - **Installable web UI** (PWA) with an offline copy of the app shell
 >   ([docs/15](docs/15-pwa.md); needs HTTPS or localhost).
+> - **Japanese and English** web UI, following the browser language until you
+>   choose one ([docs/17](docs/17-i18n.md)). CLI output, API errors and the docs
+>   are not translated.
 >
 > Not yet implemented:
 >
@@ -140,6 +143,7 @@ the missing control plane around them.
 - `docs/13-mcp-http.md` — MCP over Streamable HTTP
 - `docs/14-job-notifications.md` — job completion browser notifications (SSE)
 - `docs/15-pwa.md` — installable web UI (manifest, icons, app shell cache)
+- `docs/17-i18n.md` — web UI internationalization (dictionary, how to add strings)
 
 ## License
 
