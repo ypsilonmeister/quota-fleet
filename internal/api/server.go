@@ -18,6 +18,7 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/agentmodels"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentver"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/push"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 	"github.com/ypsilonmeister/quota-fleet/internal/ui"
@@ -76,6 +77,9 @@ type Options struct {
 	MCPHandler func(backend http.Handler) http.Handler
 	// JobEvents registers GET /events, the job status SSE stream (docs/14).
 	JobEvents bool
+	// WebPushPublicKey, when non-empty, registers the /push endpoints and is the VAPID
+	// public key they hand out (docs/16). The private key is never given to the server.
+	WebPushPublicKey string
 	// EventsHeartbeat overrides the SSE heartbeat interval in tests when positive.
 	EventsHeartbeat time.Duration
 	// GateReleaser handles POST /gate/held/{id}/release via immediate quota re-evaluation.
@@ -104,7 +108,9 @@ type apiToken struct {
 type authContextKey struct{}
 
 type authPrincipal struct {
-	name     string
+	name string
+	// tokenID is push.TokenID of the presented token, empty for anonymous access.
+	tokenID  string
 	scopes   []string
 	scopeSet map[string]struct{}
 }
@@ -141,27 +147,28 @@ type Server struct {
 	reviewGateEnabled bool
 	reviewJudge       ReviewJudge
 
-	store           *store.Store
-	instanceID      string
-	maxClaimed      int
-	tokens          []apiToken
-	requireAuth     bool
-	logger          *log.Logger
-	gateMode        string
-	selectorMode    string
-	evaluatorMode   string
-	quotaUsageFile  string
-	quotaStaleAfter time.Duration
-	pools           map[string]config.PoolConfig
-	hosts           []string
-	agents          []string
-	cfg             *config.Config
-	gateReleaser    GateReleaser
-	agentChecker    AgentChecker
-	nowFn           func() time.Time
-	snapshotLoader  func() (*quota.Snapshot, error)
-	eventsHeartbeat time.Duration
-	handler         http.Handler
+	store            *store.Store
+	instanceID       string
+	maxClaimed       int
+	tokens           []apiToken
+	requireAuth      bool
+	logger           *log.Logger
+	gateMode         string
+	selectorMode     string
+	evaluatorMode    string
+	quotaUsageFile   string
+	quotaStaleAfter  time.Duration
+	pools            map[string]config.PoolConfig
+	hosts            []string
+	agents           []string
+	cfg              *config.Config
+	gateReleaser     GateReleaser
+	agentChecker     AgentChecker
+	nowFn            func() time.Time
+	snapshotLoader   func() (*quota.Snapshot, error)
+	eventsHeartbeat  time.Duration
+	webPushPublicKey string
+	handler          http.Handler
 }
 
 // NewServer constructs an HTTP API server backed by st.
@@ -236,26 +243,27 @@ func NewServer(st *store.Store, opts Options) *Server {
 		reviewGateEnabled: opts.ReviewGateEnabled,
 		reviewJudge:       opts.ReviewJudge,
 
-		store:           st,
-		instanceID:      opts.InstanceID,
-		maxClaimed:      maxClaimed,
-		tokens:          tokens,
-		requireAuth:     opts.RequireAuth,
-		logger:          logger,
-		gateMode:        gateMode,
-		selectorMode:    selectorMode,
-		evaluatorMode:   evaluatorMode,
-		quotaUsageFile:  strings.TrimSpace(opts.QuotaUsageFile),
-		quotaStaleAfter: staleAfter,
-		pools:           opts.Pools,
-		hosts:           normalizeSortedNames(hostNames),
-		agents:          normalizeSortedNames(agentNames),
-		cfg:             opts.Config,
-		gateReleaser:    opts.GateReleaser,
-		agentChecker:    opts.AgentChecker,
-		nowFn:           nowFn,
-		snapshotLoader:  opts.SnapshotLoader,
-		eventsHeartbeat: eventsHeartbeat,
+		store:            st,
+		instanceID:       opts.InstanceID,
+		maxClaimed:       maxClaimed,
+		tokens:           tokens,
+		requireAuth:      opts.RequireAuth,
+		logger:           logger,
+		gateMode:         gateMode,
+		selectorMode:     selectorMode,
+		evaluatorMode:    evaluatorMode,
+		quotaUsageFile:   strings.TrimSpace(opts.QuotaUsageFile),
+		quotaStaleAfter:  staleAfter,
+		pools:            opts.Pools,
+		hosts:            normalizeSortedNames(hostNames),
+		agents:           normalizeSortedNames(agentNames),
+		cfg:              opts.Config,
+		gateReleaser:     opts.GateReleaser,
+		agentChecker:     opts.AgentChecker,
+		nowFn:            nowFn,
+		snapshotLoader:   opts.SnapshotLoader,
+		eventsHeartbeat:  eventsHeartbeat,
+		webPushPublicKey: opts.WebPushPublicKey,
 	}
 
 	if len(s.tokens) == 0 && !s.requireAuth {
@@ -306,6 +314,17 @@ func NewServer(st *store.Store, opts Options) *Server {
 		// docs/14: /events always needs a bearer token. Unlike the JSON API it has no
 		// anonymous fallback.
 		rootMux.Handle("GET /events", s.requireTokenAuth(s.requireScope(config.ScopeRead, s.handleJobEvents)))
+	}
+	if s.webPushPublicKey != "" {
+		// docs/16: like /events, no anonymous access. A subscriber receives job results.
+		handle := func(pattern, scope string, handler http.HandlerFunc) {
+			rootMux.Handle(pattern, s.requireTokenAuth(s.requireScope(scope, handler)))
+		}
+		handle("GET /push/vapid-public-key", config.ScopeRead, s.handleVAPIDPublicKey)
+		// Registering also needs read: the token must be able to see what is pushed.
+		handle("POST /push/subscriptions", config.ScopeOperate,
+			s.requireScope(config.ScopeRead, s.handleCreatePushSubscription))
+		handle("DELETE /push/subscriptions", config.ScopeOperate, s.handleDeletePushSubscription)
 	}
 	rootMux.Handle("/", apiHandler)
 
@@ -361,6 +380,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), authContextKey{}, authPrincipal{
 			name:     matched.name,
+			tokenID:  push.TokenID(matched.token),
 			scopes:   matched.scopes,
 			scopeSet: matched.scopeSet,
 		})

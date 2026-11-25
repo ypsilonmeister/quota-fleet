@@ -86,10 +86,15 @@ const ORIGIN = "https://fleet.example";
 // Notification behavior only; the app shell cache is covered by pwa_test.go.
 function load(windows) {
   const listeners = {};
-  const log = { opened: [], queries: [], skipped: 0, claimed: 0, timers: [] };
+  const log = { opened: [], queries: [], skipped: 0, claimed: 0, timers: [], shown: [] };
   const self = {
     location: { origin: ORIGIN },
-    registration: { active: null },
+    registration: {
+      active: null,
+      showNotification: async (title, options) => {
+        log.shown.push(JSON.parse(JSON.stringify({ title, options })));
+      }
+    },
     addEventListener: (type, fn) => { listeners[type] = fn; },
     skipWaiting: () => { log.skipped++; },
     clients: {
@@ -116,7 +121,18 @@ function load(windows) {
     await waited;
     return waited !== null;
   };
-  return { listeners, log, click };
+  // push delivers a message body; null stands for a push without data.
+  const push = async body => {
+    let waited = null;
+    listeners.push({
+      data: body === null ? null : { json: () => JSON.parse(body) },
+      waitUntil: p => { waited = p; }
+    });
+    assert.ok(waited, "push must call waitUntil");
+    await waited;
+    return log.shown[log.shown.length - 1];
+  };
+  return { listeners, log, click, push };
 }
 
 function client(path, extra) {
@@ -138,7 +154,7 @@ function client(path, extra) {
 async function main() {
   {
     const w = load([]);
-    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["activate", "fetch", "install", "message", "notificationclick"]);
+    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["activate", "fetch", "install", "message", "notificationclick", "push"]);
     let installing = null;
     w.listeners.install({ waitUntil: p => { installing = p; } });
     await installing;
@@ -205,6 +221,44 @@ async function main() {
     await w.click({ jobId: 3 });
     assert.deepStrictEqual(gone.messages, []);
     assert.deepStrictEqual(w.log.opened, [ORIGIN + "/ui/jobs/3"], "unfocusable tab: open one");
+  }
+
+  // Web Push (docs/16): the message becomes a notification with the tag a tab would use,
+  // and clicking it takes the same route as a page notification.
+  {
+    const w = load([]);
+    const shown = await w.push(JSON.stringify({
+      title: "ジョブ #7 完了: build", body: "ok", job_id: 7, url: "/ui/jobs/7", status: "done"
+    }));
+    assert.deepStrictEqual(shown, {
+      title: "ジョブ #7 完了: build",
+      options: { body: "ok", data: { jobId: 7 }, tag: "qf-job-7:done" }
+    });
+    await w.click(shown.options.data);
+    assert.deepStrictEqual(w.log.opened, [ORIGIN + "/ui/jobs/7"]);
+
+    // The url member is never followed: only the job id chooses the page.
+    const foreign = await w.push(JSON.stringify({
+      title: "t", body: "b", job_id: 8, url: "//other.example/", status: "failed"
+    }));
+    await w.click(foreign.options.data);
+    assert.strictEqual(w.log.opened[1], ORIGIN + "/ui/jobs/8");
+
+    // Every push shows something, whatever arrives.
+    const generic = { title: "quota-fleet: job notification", options: { body: "" } };
+    for (const body of [null, "not json", "null", "[]", "42", "{}", "{\"job_id\":\"7\"}", "{\"job_id\":-1}"]) {
+      const before = w.log.shown.length;
+      assert.deepStrictEqual(await w.push(body), generic, String(body));
+      assert.strictEqual(w.log.shown.length, before + 1);
+    }
+    // The tag matches the one createJobNotifier gives the same transition.
+    const n = require("./assets/notify.js");
+    let page = null;
+    await n.createJobNotifier({
+      getNotification: () => ({ permission: "granted" }),
+      show: async m => { page = m; return true; }
+    })({ job_id: 7, status: "done", prev_status: "claimed", title: "build" });
+    assert.strictEqual(page.tag, shown.options.tag);
   }
 
   console.log("ALL_UI_SW_TESTS_PASSED");

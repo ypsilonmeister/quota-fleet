@@ -501,6 +501,38 @@ type JobStatusEventDTO struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+// VAPIDPublicKeyResponse is returned by GET /push/vapid-public-key.
+type VAPIDPublicKeyResponse struct {
+	PublicKey string `json:"public_key"`
+}
+
+// PushSubscriptionRequest is the body of POST /push/subscriptions, in the shape of the
+// browser's PushSubscription.toJSON(). Other members are ignored.
+type PushSubscriptionRequest struct {
+	Endpoint string `json:"endpoint"`
+	Keys     struct {
+		P256dh string `json:"p256dh"`
+		Auth   string `json:"auth"`
+	} `json:"keys"`
+}
+
+// PushSubscriptionResponse is returned by POST /push/subscriptions.
+type PushSubscriptionResponse struct {
+	// Created is false when the endpoint was already registered.
+	Created bool `json:"created"`
+}
+
+// DeletePushSubscriptionRequest is the body of DELETE /push/subscriptions.
+type DeletePushSubscriptionRequest struct {
+	Endpoint string `json:"endpoint"`
+}
+
+// DeletePushSubscriptionResponse is returned by DELETE /push/subscriptions.
+type DeletePushSubscriptionResponse struct {
+	// Deleted is false when the endpoint was not registered.
+	Deleted bool `json:"deleted"`
+}
+
 // AgentsResponse is returned by GET /agents with the latest version matrix and drift summaries.
 type AgentsResponse struct {
 	agentver.Matrix

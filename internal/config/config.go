@@ -18,6 +18,8 @@ import (
 const (
 	// DefaultAPIListen is the default listen address for quota-fleet serve.
 	DefaultAPIListen = "127.0.0.1:8737"
+	// DefaultWebPushSubject is a placeholder contact; operators should set their own (docs/16).
+	DefaultWebPushSubject = "https://example.com/quota-fleet"
 	// DefaultRuntimeAdapter is the default adapter ("mock").
 	DefaultRuntimeAdapter = "mock"
 	// RuntimeAdapterSSH selects the real SSH/local host adapter.
@@ -485,6 +487,31 @@ type APIConfig struct {
 	MCPAllowedOriginHosts []string `yaml:"mcp_allowed_origin_hosts"`
 	// JobEvents enables the job status SSE endpoint at GET /events (docs/14). Default false.
 	JobEvents bool `yaml:"job_events"`
+	// WebPush enables Web Push on job completion and the /push endpoints (docs/16). Default false.
+	WebPush bool `yaml:"web_push"`
+	// WebPushSubject is the contact given to push services in the VAPID token: an https: or
+	// mailto: URL. Empty means DefaultWebPushSubject.
+	WebPushSubject string `yaml:"web_push_subject"`
+}
+
+// EffectiveWebPushSubject returns the configured VAPID subject or DefaultWebPushSubject.
+func (a APIConfig) EffectiveWebPushSubject() string {
+	if v := strings.TrimSpace(a.WebPushSubject); v != "" {
+		return v
+	}
+	return DefaultWebPushSubject
+}
+
+func validWebPushSubject(raw string) bool {
+	if strings.ContainsAny(raw, " \t\r\n<>") {
+		return false
+	}
+	if address, ok := strings.CutPrefix(raw, "mailto:"); ok {
+		local, domain, found := strings.Cut(address, "@")
+		return found && local != "" && domain != ""
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && u.Hostname() != ""
 }
 
 // HasAuthTokens reports whether any legacy or named API token is configured.
@@ -787,6 +814,10 @@ func (c *Config) Validate() error {
 			(strings.Contains(host, ":") && net.ParseIP(host) == nil) {
 			errs = append(errs, fmt.Errorf("api.mcp_allowed_origin_hosts[%d] %q must be a bare host name or IP address (no scheme, port or wildcard)", i, host))
 		}
+	}
+
+	if v := strings.TrimSpace(c.API.WebPushSubject); v != "" && !validWebPushSubject(v) {
+		errs = append(errs, fmt.Errorf("api.web_push_subject %q must be an https: URL or a mailto: address", c.API.WebPushSubject))
 	}
 
 	if len(c.API.Tokens) > 0 {

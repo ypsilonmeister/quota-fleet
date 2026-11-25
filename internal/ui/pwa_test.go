@@ -413,7 +413,8 @@ async function main() {
   // API, event stream, MCP, non-GET and foreign requests are never intercepted,
   // whether the network is up or not.
   const api = ["/jobs", "/jobs?status=queued", "/jobs/1", "/status", "/meta", "/deliveries",
-    "/gate/held", "/gate/decisions", "/agents", "/agents/events", "/events", "/mcp", "/mcp/", "/", "/ui"];
+    "/gate/held", "/gate/decisions", "/agents", "/agents/events", "/events", "/mcp", "/mcp/", "/", "/ui",
+    "/push/vapid-public-key", "/push/subscriptions"];
   for (const offline of [false, true]) {
     const x = load({ offline, caches: [CACHE] });
     // Even a matching cache entry must not be used.

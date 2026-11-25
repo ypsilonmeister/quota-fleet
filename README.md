@@ -28,13 +28,15 @@ trustworthy enough to merge.
 > - **Japanese and English** web UI, following the browser language until you
 >   choose one ([docs/17](docs/17-i18n.md)). CLI output, API errors and the docs
 >   are not translated.
+> - **Web Push** when a job is done or failed, also with no UI tab open
+>   ([docs/16](docs/16-web-push.md); needs HTTPS or localhost, enable with
+>   `api.web_push: true`, then turn notifications on in the UI). On iOS and
+>   iPadOS it only works in the web app added to the Home Screen (16.4+).
 >
 > Not yet implemented:
 >
 > - Automatic agent/model/pool selection (the Selector,
 >   [docs/10](docs/10-selector.md)) is planned; only the design exists.
-> - Web Push (notifications while no UI tab is open) is not implemented
->   (a non-goal of docs/14).
 
 ## Quickstart
 
@@ -143,6 +145,7 @@ the missing control plane around them.
 - `docs/13-mcp-http.md` — MCP over Streamable HTTP
 - `docs/14-job-notifications.md` — job completion browser notifications (SSE)
 - `docs/15-pwa.md` — installable web UI (manifest, icons, app shell cache)
+- `docs/16-web-push.md` — Web Push on job completion (VAPID keys, setup, iOS limits)
 - `docs/17-i18n.md` — web UI internationalization (dictionary, how to add strings)
 
 ## License

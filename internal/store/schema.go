@@ -182,4 +182,19 @@ CREATE TABLE IF NOT EXISTS agent_models (
     updated_at TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (host, agent)
 );
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint TEXT PRIMARY KEY,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    user_agent TEXT NOT NULL DEFAULT '',
+    token_id TEXT NOT NULL DEFAULT ''
+);
+
+-- Endpoints removed through the API, which are never registered again (docs/16).
+CREATE TABLE IF NOT EXISTS push_deleted_endpoints (
+    endpoint_hash TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL
+);
 `

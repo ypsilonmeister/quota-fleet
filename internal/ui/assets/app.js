@@ -3391,6 +3391,67 @@
     openJob: function (jobID) { navigate("/ui/jobs/" + jobID); }
   });
 
+  // The latest view of the notification toggle (docs/14); the Web Push view is added to
+  // it when the button is drawn (docs/16).
+  let notifyView = { enabled: false, problemKey: "" };
+
+  // notifyLabelKey names the state of the toggle together with the Web Push state.
+  function notifyLabelKey(enabled, state) {
+    if (!enabled) {
+      // Notifications are off here, but pushes may still arrive.
+      if (state === "removing") {
+        return "push.labelRemoving";
+      }
+      return state === "unconfirmed" ? "push.labelUnconfirmed" : "header.notify";
+    }
+    if (state === "active") {
+      return "push.labelActive";
+    }
+    if (state === "pending") {
+      return "push.labelPending";
+    }
+    if (state === "unsupported" || state === "server-off") {
+      return "push.labelTabOnly";
+    }
+    // Otherwise an earlier registration may still deliver.
+    return state === "off" ? "header.notify" : "push.labelUnchecked";
+  }
+
+  function renderNotifyButton() {
+    const view = notifyView;
+    const push = pushController.view();
+    const removal = !view.enabled &&
+      (push.state === "removing" || push.state === "unconfirmed");
+    i18n.setText(dom.btnNotify, L(notifyLabelKey(view.enabled, push.state)));
+    dom.btnNotify.setAttribute("aria-pressed", view.enabled ? "true" : "false");
+    // An active subscription still delivers when only the event stream has a problem.
+    dom.btnNotify.classList.toggle("notify-problem",
+      Boolean(view.problemKey) && push.state !== "active");
+    i18n.setAttr(dom.btnNotify, "title", function () {
+      return [
+        t(view.problemKey || (view.enabled ? "notify.toggleOn" : "notify.toggleOff")),
+        view.enabled || removal ? t(push.messageKey) : "",
+        t("push.iosNote")
+      ].filter(Boolean).join("\n");
+    });
+  }
+
+  const pushController = notifyHelper.createPushController({
+    isSupported: function () {
+      return window.isSecureContext !== false && Boolean(navigator.serviceWorker) &&
+        typeof window.PushManager === "function";
+    },
+    getRegistration: notificationPresenter.register,
+    findRegistration: function () {
+      return navigator.serviceWorker.getRegistration("/ui/");
+    },
+    // Not apiFetch: a token without the operate scope must not open the auth gate.
+    fetch: function (url, opts) { return window.fetch(url, opts); },
+    getToken: getStoredToken,
+    isEnabled: function () { return notifyController.isEnabled(); },
+    onChange: function () { renderNotifyButton(); }
+  });
+
   const notifyController = notifyHelper.createNotifyController({
     storage: {
       getItem: function (key) { return localStorage.getItem(key); },
@@ -3416,12 +3477,13 @@
       }
     }),
     onListChanged: function () { listRefresher.request(); },
+    isIOS: function () {
+      return notifyHelper.isIOS(navigator.userAgent, navigator.maxTouchPoints);
+    },
     onChange: function (view) {
-      dom.btnNotify.setAttribute("aria-pressed", view.enabled ? "true" : "false");
-      dom.btnNotify.classList.toggle("notify-problem", Boolean(view.problem));
-      i18n.setAttr(dom.btnNotify, "title", view.problemKey
-        ? L(view.problemKey)
-        : L(view.enabled ? "notify.toggleOn" : "notify.toggleOff"));
+      notifyView = view;
+      renderNotifyButton();
+      void pushController.sync();
     },
     onMessage: function (_message, key) { showBanner("error", L(key)); },
     onUnauthorized: function (_message, key) {
@@ -3482,9 +3544,44 @@
     void tryConnect("", true);
   });
 
+  // After turning notifications on, say whether they also arrive with the page closed;
+  // after turning them off, say if pushes may still arrive.
+  async function toggleNotifications() {
+    const wasEnabled = notifyController.isEnabled();
+    const before = pushController.view().state;
+    // Until a removal is confirmed, the button retries it instead of turning on.
+    if (!wasEnabled && (before === "removing" || before === "unconfirmed")) {
+      const retried = await pushController.sync();
+      if (retried.state === "unconfirmed") {
+        showBanner("error", L(retried.messageKey));
+      } else if (retried.state === "off") {
+        showBanner("success", L("push.removed"));
+      }
+      return;
+    }
+    await notifyController.toggle();
+    if (wasEnabled) {
+      const removed = await pushController.settled();
+      if (removed.state === "unconfirmed") {
+        showBanner("error", L(removed.messageKey));
+      }
+      return;
+    }
+    if (!notifyController.isEnabled()) {
+      return;
+    }
+    const view = await pushController.settled();
+    // A problem of the event stream has its own banner, which stays.
+    if (view.state !== "off" && !notifyView.problemKey && notifyController.isEnabled()) {
+      showBanner(view.state === "active" ? "success" : "info", function () {
+        return t("push.banner", { message: t(view.messageKey), note: t("push.iosNote") });
+      });
+    }
+  }
+
   dom.btnNotify.addEventListener("click", function () {
     clearBanner();
-    void notifyController.toggle();
+    void toggleNotifications();
   });
 
   ["input", "change"].forEach(function (type) {

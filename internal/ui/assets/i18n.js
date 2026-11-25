@@ -32,7 +32,7 @@
       "theme.light": "ライト",
       "theme.lightLabel": "ライト（台帳）",
 
-      "header.notifyTitle": "ジョブ完了のブラウザ通知",
+      "header.notifyTitle": "ジョブ完了のブラウザ通知（iOS / iPadOS の Web Push はホーム画面に追加した PWA のみ、iOS 16.4 以降）",
       "header.notify": "通知",
       "header.refresh": "更新",
       "header.token": "トークン",
@@ -327,10 +327,32 @@
       "notify.noToken": "通知には read スコープの API トークンが必要です。トークンなしの接続では利用できません。",
       "notify.insecureContext": "ブラウザ通知は HTTPS または localhost で開いた場合のみ利用できます。",
       "notify.unsupported": "このブラウザは通知に対応していません。",
+      "notify.unsupportedIOS": "このブラウザは通知に対応していません。iOS / iPadOS では、ホーム画面に追加した PWA（iOS 16.4 以降）でのみ Web Push が届きます。",
       "notify.denied": "ブラウザで通知が許可されていないため有効にできません。ブラウザのサイト設定を確認してください。",
       "notify.showFailed": "このブラウザでは通知を表示できませんでした。",
       "notify.toggleOn": "ジョブ完了のブラウザ通知: オン",
-      "notify.toggleOff": "ジョブ完了のブラウザ通知: オフ"
+      "notify.toggleOff": "ジョブ完了のブラウザ通知: オフ",
+
+      "push.off": "Web Push: オフ",
+      "push.removing": "Web Push: 登録を解除しています。",
+      "push.unconfirmed": "Web Push: 解除を確認できませんでした。通知が届き続ける可能性があります。通知ボタンを押すと解除を再試行します。",
+      "push.removed": "Web Push: 解除しました。",
+      "push.pending": "Web Push: 登録を確認しています。",
+      "push.active": "Web Push: 登録済みです。画面を閉じていても完了・失敗の通知が届きます。",
+      "push.unsupported": "Web Push: この環境では使えません。通知はこの画面を開いている間だけ届きます。",
+      "push.noToken": "Web Push: 登録の確認には API トークンが必要です。",
+      "push.serverOff": "Web Push: サーバー側で無効です（fleet.yaml の api.web_push）。通知はこの画面を開いている間だけ届きます。",
+      "push.unauthorized": "Web Push: 認証に失敗したため登録を確認できません（401）。",
+      "push.forbidden": "Web Push: 登録には read と operate スコープのトークンが必要です（403）。このトークンでは新しく登録できません。",
+      "push.error": "Web Push: 登録を確認できませんでした。画面を閉じている間は届かない可能性があります。",
+      "push.iosNote": "iOS / iPadOS では、ホーム画面に追加した PWA（iOS 16.4 以降）でのみ Web Push が届きます。",
+      "push.banner": "{message} {note}",
+      "push.labelActive": "通知: Push",
+      "push.labelPending": "通知: 確認中",
+      "push.labelTabOnly": "通知: タブのみ",
+      "push.labelUnchecked": "通知: Push 未確認",
+      "push.labelRemoving": "通知: 解除中",
+      "push.labelUnconfirmed": "通知: 解除未確認"
     },
 
     // Counts are written as "label: n" so that no plural forms are needed.
@@ -355,7 +377,7 @@
       "theme.light": "Light",
       "theme.lightLabel": "Light (ledger)",
 
-      "header.notifyTitle": "Browser notifications for finished jobs",
+      "header.notifyTitle": "Browser notifications for finished jobs (on iOS / iPadOS, Web Push only works in the PWA added to the Home Screen, iOS 16.4 or later)",
       "header.notify": "Notify",
       "header.refresh": "Refresh",
       "header.token": "Token",
@@ -649,10 +671,32 @@
       "notify.noToken": "Notifications require an API token with the read scope. They are not available without a token.",
       "notify.insecureContext": "Browser notifications are available only over HTTPS or on localhost.",
       "notify.unsupported": "This browser does not support notifications.",
+      "notify.unsupportedIOS": "This browser does not support notifications. On iOS / iPadOS, Web Push only arrives in the PWA added to the Home Screen (iOS 16.4 or later).",
       "notify.denied": "Notifications cannot be turned on because the browser does not allow them. Check the site settings in your browser.",
       "notify.showFailed": "This browser could not show the notification.",
       "notify.toggleOn": "Browser notifications for finished jobs: on",
-      "notify.toggleOff": "Browser notifications for finished jobs: off"
+      "notify.toggleOff": "Browser notifications for finished jobs: off",
+
+      "push.off": "Web Push: off",
+      "push.removing": "Web Push: removing the registration.",
+      "push.unconfirmed": "Web Push: the removal could not be confirmed. Notifications may keep arriving. Press the notification button to try again.",
+      "push.removed": "Web Push: removed.",
+      "push.pending": "Web Push: checking the registration.",
+      "push.active": "Web Push: registered. Notifications for done and failed jobs arrive even with this page closed.",
+      "push.unsupported": "Web Push: not available here. Notifications only arrive while this page is open.",
+      "push.noToken": "Web Push: an API token is needed to check the registration.",
+      "push.serverOff": "Web Push: disabled on the server (api.web_push in fleet.yaml). Notifications only arrive while this page is open.",
+      "push.unauthorized": "Web Push: the registration cannot be checked because authentication failed (401).",
+      "push.forbidden": "Web Push: registering requires a token with the read and operate scopes (403). This token cannot make a new registration.",
+      "push.error": "Web Push: the registration could not be checked. Notifications may not arrive while this page is closed.",
+      "push.iosNote": "On iOS / iPadOS, Web Push only arrives in the PWA added to the Home Screen (iOS 16.4 or later).",
+      "push.banner": "{message} {note}",
+      "push.labelActive": "Notify: Push",
+      "push.labelPending": "Notify: checking",
+      "push.labelTabOnly": "Notify: tab only",
+      "push.labelUnchecked": "Notify: Push unconfirmed",
+      "push.labelRemoving": "Notify: removing",
+      "push.labelUnconfirmed": "Notify: not confirmed off"
     }
   };
 

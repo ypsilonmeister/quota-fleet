@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -21,9 +22,13 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
 	"github.com/ypsilonmeister/quota-fleet/internal/mcpserver"
+	"github.com/ypsilonmeister/quota-fleet/internal/push"
 	"github.com/ypsilonmeister/quota-fleet/internal/runtime"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
+
+// webPushTransport is replaced by tests to reach a fake push service.
+var webPushTransport http.RoundTripper
 
 func runServe(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -127,6 +132,30 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		jobNotifier = runtime.NewMultiNotifier(fileNotifier, webhookNotifier)
 	}
 
+	var webPushPublicKey string
+	if cfg.API.WebPush {
+		keyPath := filepath.Join(stateDir, push.KeyFileName)
+		keys, created, err := push.LoadOrCreateVAPIDKeys(keyPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "serve failed: web push: %v\n", err)
+			return 1
+		}
+		if created {
+			logger.Printf("web push: generated a VAPID key pair in %s", keyPath)
+		}
+		webPushPublicKey = keys.PublicKey
+		// Started before the runtime so that no transition is missed. Its deferred Close
+		// runs after rt.Stop and before st.Close.
+		sender := push.Start(st, push.Options{
+			Keys:         keys,
+			Subject:      cfg.API.EffectiveWebPushSubject(),
+			ReadTokenIDs: webPushReadTokenIDs(cfg.API),
+			Logger:       logger,
+			Transport:    webPushTransport,
+		})
+		defer sender.Close()
+	}
+
 	rt, err := runtime.New(runtime.Options{
 		Store:               st,
 		Adapter:             execAdapter,
@@ -174,25 +203,26 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		ReviewGateEnabled: cfg.ReviewGate.Enabled,
 		ReviewJudge:       decisionClient,
 
-		MCPHandler:      mcpHandler,
-		JobEvents:       cfg.API.JobEvents,
-		InstanceID:      cfg.InstanceID,
-		MaxClaimed:      cfg.Limits.MaxClaimed,
-		Token:           cfg.API.Token,
-		Tokens:          cfg.API.Tokens,
-		RequireAuth:     cfg.API.RequireAuth,
-		Logger:          logger,
-		GateMode:        cfg.Quota.EffectiveGateMode(),
-		SelectorMode:    cfg.Selector.EffectiveMode(),
-		EvaluatorMode:   cfg.Evaluator.EffectiveMode(),
-		QuotaUsageFile:  cfg.Quota.UsageFile,
-		QuotaStaleAfter: cfg.Quota.EffectiveStaleAfter(),
-		Pools:           cfg.Pools,
-		Hosts:           sortedMapKeys(cfg.Hosts),
-		Agents:          cfg.AllAgents(),
-		Config:          cfg,
-		GateReleaser:    gateReleaserAdapter{checker: rt.GateChecker},
-		AgentChecker:    rt.AgentChecker,
+		MCPHandler:       mcpHandler,
+		JobEvents:        cfg.API.JobEvents,
+		WebPushPublicKey: webPushPublicKey,
+		InstanceID:       cfg.InstanceID,
+		MaxClaimed:       cfg.Limits.MaxClaimed,
+		Token:            cfg.API.Token,
+		Tokens:           cfg.API.Tokens,
+		RequireAuth:      cfg.API.RequireAuth,
+		Logger:           logger,
+		GateMode:         cfg.Quota.EffectiveGateMode(),
+		SelectorMode:     cfg.Selector.EffectiveMode(),
+		EvaluatorMode:    cfg.Evaluator.EffectiveMode(),
+		QuotaUsageFile:   cfg.Quota.UsageFile,
+		QuotaStaleAfter:  cfg.Quota.EffectiveStaleAfter(),
+		Pools:            cfg.Pools,
+		Hosts:            sortedMapKeys(cfg.Hosts),
+		Agents:           cfg.AllAgents(),
+		Config:           cfg,
+		GateReleaser:     gateReleaserAdapter{checker: rt.GateChecker},
+		AgentChecker:     rt.AgentChecker,
 	})
 
 	httpSrv := &http.Server{
@@ -224,6 +254,21 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		}
 		return 0
 	}
+}
+
+// webPushReadTokenIDs identifies the configured tokens whose subscriptions may receive
+// job notifications: those the API accepts with the read scope.
+func webPushReadTokenIDs(cfg config.APIConfig) []string {
+	var ids []string
+	if cfg.Token != "" {
+		ids = append(ids, push.TokenID(cfg.Token))
+	}
+	for _, t := range cfg.Tokens {
+		if t.Token != "" && slices.Contains(t.Scopes, config.ScopeRead) {
+			ids = append(ids, push.TokenID(t.Token))
+		}
+	}
+	return ids
 }
 
 func formatPlannedUIURL(listen string) string {
@@ -294,6 +339,12 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 	fmt.Fprintf(w, "  agents_check: %s\n", agentsCheckSummary)
 	fmt.Fprintf(w, "  models_check: %s\n", modelsCheckSummary)
 	fmt.Fprintf(w, "  ui_url:    %s\n", formatPlannedUIURL(listen))
+	if cfg.API.WebPush {
+		fmt.Fprintf(w, "  web_push:  enabled\n")
+		if !cfg.API.HasAuthTokens() {
+			fmt.Fprintf(w, "  WARNING:   api.web_push needs api.token or api.tokens; /push requests are rejected without one\n")
+		}
+	}
 
 	keyConfigured := cfg.Evaluator.ResolveAPIKey(nil) != ""
 	warn := func(warnMsg string) {
