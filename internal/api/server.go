@@ -434,10 +434,12 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:          createdBy,
 	}
 
-	s.applySelector(&params, req)
+	// One usage snapshot per request, shared by the Selector and the Gate.
+	usage := &requestUsage{load: s.loadSnapshotForSelector}
+	s.applySelector(&params, req, usage)
 
 	if s.gateMode == config.GateModeEnforce {
-		s.handleCreateJobEnforce(w, r, req, params)
+		s.handleCreateJobEnforce(w, r, req, params, usage)
 		return
 	}
 
@@ -448,7 +450,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if created && s.gateMode == config.GateModeDryRun {
-		s.recordDryRunGateDecision(r.Context(), job, params.Pool, req.AltPools)
+		s.recordDryRunGateDecision(r.Context(), job, params.Pool, req.AltPools, usage)
 	}
 
 	status := http.StatusOK
@@ -461,7 +463,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, req CreateJobRequest, params store.CreateJobParams) {
+func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, req CreateJobRequest, params store.CreateJobParams, usage *requestUsage) {
 	ctx := r.Context()
 
 	reqID := strings.TrimSpace(req.RequestID)
@@ -544,7 +546,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	eval, evalErr := s.evaluateGate(reqPool, req.AltPools)
+	eval, evalErr := s.evaluateGate(reqPool, req.AltPools, usage)
 	if evalErr != nil {
 		s.logger.Printf("WARNING: quota gate enforce evaluation for request_id=%s failed to load snapshot: %v", reqID, evalErr)
 	}
@@ -666,7 +668,7 @@ func (s *Server) writeCreateJobError(w http.ResponseWriter, err error) {
 // applySelector runs the Selector in front of the Gate (docs/19). Explicit agent/model/pool
 // values are never overwritten; only empty fields are filled, and only in apply mode with
 // the selection (record mode fills them with the documented defaults instead).
-func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobRequest) {
+func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobRequest, usage *requestUsage) {
 	if s.selectorMode == config.SelectorModeOff {
 		return
 	}
@@ -688,8 +690,9 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 		return
 	}
 
+	reqAgent, reqModel := agent, model // what the client sent; record mode executes with these + defaults
 	var parentNote string
-	if s.selectorMode == config.SelectorModeApply && strings.TrimSpace(req.Role) == selector.RoleFix && req.ParentID != nil && agent == "" && model == "" {
+	if strings.TrimSpace(req.Role) == selector.RoleFix && req.ParentID != nil && agent == "" && model == "" {
 		// docs/10 §4: fix runs on the same implementer as the parent job.
 		if parent, err := s.store.GetJob(context.Background(), *req.ParentID); err == nil && parent.Agent != "" {
 			agent, model = parent.Agent, parent.Model
@@ -697,7 +700,7 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 		}
 	}
 
-	snap, snapErr := s.loadSnapshotForSelector()
+	snap, snapErr := usage.get()
 	res := selector.Select(selector.Input{
 		Role:        strings.TrimSpace(req.Role),
 		Weight:      strings.TrimSpace(req.Weight),
@@ -726,11 +729,11 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 		}
 	default: // record
 		params.SelectionMode = selector.ModeRecorded
-		def := selector.Defaults(agent, model, explicitPool, resolve)
-		if agent == "" {
+		def := selector.Defaults(reqAgent, reqModel, explicitPool, resolve)
+		if reqAgent == "" {
 			params.Agent = def.Agent
 		}
-		if model == "" {
+		if reqModel == "" {
 			params.Model = def.Model
 		}
 		if explicitPool == "" {
@@ -759,7 +762,24 @@ func (s *Server) resolveRequestPool(req CreateJobRequest) string {
 	return reqPool
 }
 
-func (s *Server) evaluateGate(primaryPool string, altPools []string) (quota.GateEvaluation, error) {
+// requestUsage loads the usage snapshot at most once per request so the Selector and the
+// Gate judge the same data.
+type requestUsage struct {
+	load func() (*quota.Snapshot, error)
+	done bool
+	snap *quota.Snapshot
+	err  error
+}
+
+func (u *requestUsage) get() (*quota.Snapshot, error) {
+	if !u.done {
+		u.snap, u.err = u.load()
+		u.done = true
+	}
+	return u.snap, u.err
+}
+
+func (s *Server) evaluateGate(primaryPool string, altPools []string, usage *requestUsage) (quota.GateEvaluation, error) {
 	opts := quota.EvalOptions{
 		Now:        s.nowFn(),
 		StaleAfter: s.quotaStaleAfter,
@@ -771,27 +791,24 @@ func (s *Server) evaluateGate(primaryPool string, altPools []string) (quota.Gate
 			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
 		}
 	}
-	if s.snapshotLoader != nil {
-		snap, err := s.snapshotLoader()
-		if err != nil {
-			eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
-			if !eval.Bypassed {
-				eval.Decision = quota.DecisionUnknown
-				eval.Reason = fmt.Sprintf("%s: %v", quota.ReasonSnapshotError, err)
-			}
-			return eval, err
+	snap, err := usage.get()
+	if err != nil {
+		eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
+		if !eval.Bypassed {
+			eval.Decision = quota.DecisionUnknown
+			eval.Reason = fmt.Sprintf("%s: %v", quota.ReasonSnapshotError, err)
 		}
-		return quota.EvaluateGate(primaryPool, altPools, snap, opts), nil
+		return eval, err
 	}
-	return quota.EvaluateFromFile(s.quotaUsageFile, primaryPool, altPools, opts)
+	return quota.EvaluateGate(primaryPool, altPools, snap, opts), nil
 }
 
-func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, reqPool string, altPools []string) {
+func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, reqPool string, altPools []string, usage *requestUsage) {
 	if reqPool == "" && len(altPools) == 0 {
 		return
 	}
 
-	eval, evalErr := s.evaluateGate(reqPool, altPools)
+	eval, evalErr := s.evaluateGate(reqPool, altPools, usage)
 	if evalErr != nil {
 		s.logger.Printf("WARNING: quota gate dry-run evaluation for job #%d failed to load snapshot: %v", job.ID, evalErr)
 	}

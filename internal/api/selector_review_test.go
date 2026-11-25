@@ -133,3 +133,80 @@ func TestSelectorReasonMissingVsUnmeasured(t *testing.T) {
 		t.Errorf("unmeasured reason wrong: %s", job.SelectionReason)
 	}
 }
+
+// Round 2, item 6: Selector and Gate share one usage snapshot per request.
+func TestSelectorGateShareOneSnapshot(t *testing.T) {
+	now := time.Now()
+	calls := 0
+	_, _, ts := newTestServer(t, Options{
+		InstanceID: "sel-share", SelectorMode: config.SelectorModeApply, GateMode: config.GateModeEnforce,
+		QuotaStaleAfter: 45 * time.Minute,
+		Pools: map[string]config.PoolConfig{
+			"claude":     {AppliesTo: []config.PoolTarget{{Agent: "claude"}}},
+			"codex":      {AppliesTo: []config.PoolTarget{{Agent: "codex"}}},
+			"agy-gemini": {AppliesTo: []config.PoolTarget{{Agent: "agy", ModelFamily: "gemini"}}},
+		},
+		Now: func() time.Time { return now },
+		SnapshotLoader: func() (*quota.Snapshot, error) {
+			calls++
+			if calls == 1 {
+				return healthySnap(now), nil
+			}
+			return healthySnap(now, "codex"), nil // would exhaust codex on a second read
+		},
+	})
+	status, job, body := postJob(t, ts.URL, CreateJobRequest{RequestID: "share", Title: "t"})
+	if calls != 1 {
+		t.Errorf("snapshot loaded %d times in one request, want 1", calls)
+	}
+	if status != http.StatusCreated || job.Pool != "codex" || !strings.Contains(job.SelectionReason, "codex: healthy") {
+		t.Errorf("status=%d pool=%s reason=%s body=%s", status, job.Pool, job.SelectionReason, body)
+	}
+}
+
+// Round 2, item 4: record proposes the same fix target as apply; judge is not routed to a model.
+func TestSelectorRecordFixFollowsParentProposal(t *testing.T) {
+	now := time.Now()
+	url := selectorServer(t, config.SelectorModeRecord, healthySnap(now), now)
+	_, parent, _ := postJob(t, url, CreateJobRequest{RequestID: "p", Title: "t", Agent: "codex", Model: "gpt-6.2-sol"})
+	status, job, body := postJob(t, url, CreateJobRequest{RequestID: "f", Title: "t", ParentID: &parent.ID, Role: "fix", Weight: "heavy"})
+	if status != http.StatusCreated {
+		t.Fatalf("%d %s", status, body)
+	}
+	if job.SelectedAgent != "codex" || job.SelectedModel != "gpt-6.2-sol" {
+		t.Errorf("record proposal = %s/%s, want parent's codex/gpt-6.2-sol", job.SelectedAgent, job.SelectedModel)
+	}
+	if job.Agent != "codex" || job.Model != "gpt-6.2-sol" {
+		t.Errorf("record executes with defaults, got %s/%s", job.Agent, job.Model)
+	}
+}
+
+func TestSelectorJudgeNotRoutedToAgy(t *testing.T) {
+	now := time.Now()
+	for _, mode := range []string{config.SelectorModeRecord, config.SelectorModeApply} {
+		url := selectorServer(t, mode, healthySnap(now), now)
+		_, job, _ := postJob(t, url, CreateJobRequest{RequestID: "j-" + mode, Title: "t", Role: "judge"})
+		if job.SelectedAgent == "agy" || job.Agent == "agy" {
+			t.Errorf("%s: judge must not select agy Neon: %s/%s", mode, job.SelectedAgent, job.Agent)
+		}
+		if !strings.Contains(job.SelectionReason, "Gemini Decision") {
+			t.Errorf("%s: reason should explain judge: %s", mode, job.SelectionReason)
+		}
+	}
+}
+
+// Round 2, item 5: an adopted unmeasured pool is never recorded as excluded.
+func TestSelectorAdoptedUnmeasuredNotExcluded(t *testing.T) {
+	now := time.Now()
+	url := selectorGateServer(t, config.SelectorModeApply, config.GateModeEnforce, healthySnap(now), now, map[string]config.PoolConfig{
+		"agy-gemini": {Unmeasured: true, AppliesTo: []config.PoolTarget{{Agent: "agy", ModelFamily: "gemini"}}},
+	})
+	_, job, _ := postJob(t, url, CreateJobRequest{RequestID: "unm2", Title: "t", Role: "review", Weight: "light"})
+	if job.Pool != "agy-gemini" {
+		t.Fatalf("pool = %s", job.Pool)
+	}
+	r := job.SelectionReason
+	if strings.Contains(r, "excluded") || !strings.Contains(r, "adopted although unmeasured") {
+		t.Errorf("reason contradicts selection: %s", r)
+	}
+}

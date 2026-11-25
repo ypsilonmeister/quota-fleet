@@ -69,10 +69,12 @@ var table = map[string]map[string][]Candidate{
 		WeightHeavy:    {claudeOpus, codexAstra, agyNeonXHigh},
 	},
 	RoleJudge: {
-		// docs/10: judge is the Gemini Decision evaluator; as a job it runs on agy Neon.
-		WeightLight:    {agyNeonMedium},
-		WeightStandard: {agyNeonMedium},
-		WeightHeavy:    {agyNeonXHigh},
+		// docs/10 §4: judge is the Gemini Decision evaluator, which is not a job and has
+		// no agent/model. A judge job is not routed to a model of its own: it uses the
+		// default candidate (see Select, which says so in the reason).
+		WeightLight:    {codexSol},
+		WeightStandard: {codexSol},
+		WeightHeavy:    {codexSol},
 	},
 }
 
@@ -155,6 +157,9 @@ func (in Input) compatible(c Candidate) bool {
 // keeps the explicit values and only fills the empty ones.
 func Select(in Input) Result {
 	head := fmt.Sprintf("role=%s weight=%s", orDefault(in.Role, RoleImplement+"(default)"), orDefault(in.Weight, WeightStandard+"(default)"))
+	if in.Role == RoleJudge {
+		head += " (docs/10: judge is the Gemini Decision evaluator, not a job; no model is selected for it, default candidate used)"
+	}
 
 	var cands []Candidate
 	for _, c := range Candidates(in.Role, in.Weight) {
@@ -182,12 +187,16 @@ func Select(in Input) Result {
 
 	var (
 		notes     []string
+		excluded  = map[int]string{} // index in notes -> note without the exclusion suffix
+		noteOf    = make([]int, len(cands))
 		firstLive *Candidate // first candidate that is not exhausted/unmeasured (usage may be unknown)
 		healthy   *Candidate
 		missing   bool
 		stale     bool
 		allUnmeas = true
 		anyUnmeas bool
+
+		exhaustedIdx = -1
 	)
 	for i := range cands {
 		c := cands[i]
@@ -205,11 +214,18 @@ func Select(in Input) Result {
 				firstLive = &cands[i]
 			}
 		case quota.PoolExhausted:
-			notes = append(notes, fmt.Sprintf("%s: exhausted(%s), excluded", c.Pool, ev.BlockedBy))
+			noteOf[i] = len(notes)
+			excluded[len(notes)] = fmt.Sprintf("%s: exhausted(%s)", c.Pool, ev.BlockedBy)
+			notes = append(notes, excluded[len(notes)]+", excluded")
+			if exhaustedIdx < 0 {
+				exhaustedIdx = i
+			}
 		case quota.PoolUnmeasured:
 			anyUnmeas = true
 			// docs/10: pools without a measurement are never chosen automatically.
-			notes = append(notes, fmt.Sprintf("%s: unmeasured (pools.%s.unmeasured), excluded", c.Pool, c.Pool))
+			noteOf[i] = len(notes)
+			excluded[len(notes)] = fmt.Sprintf("%s: unmeasured (pools.%s.unmeasured)", c.Pool, c.Pool)
+			notes = append(notes, excluded[len(notes)]+", excluded")
 		default:
 			why := ev.Reason
 			if in.UsageErr != nil {
@@ -243,19 +259,30 @@ func Select(in Input) Result {
 			Reason:    fmt.Sprintf("%s; FALLBACK to deterministic default order (%s): chose %s/%s on pool %s; %s", head, kind, firstLive.Agent, firstLive.Model, firstLive.Pool, strings.Join(notes, ", ")),
 		}
 	}
-	// No pool is usable (all exhausted, or all unmeasured). Keep the first table candidate;
-	// the Gate (which now sees this pool) decides whether to hold.
-	c := cands[0]
+	// No pool is selectable (all exhausted, or all unmeasured / a mix). The candidate that
+	// is kept is NOT recorded as excluded: its note says it was adopted and why.
+	// Exhausted candidates are preferred (the Gate holds them, docs/10 §1); unmeasured pools
+	// are adopted only when nothing else exists (the Gate bypasses them).
+	ki := 0
+	adopt := "adopted as last resort, nothing selectable"
+	if exhaustedIdx >= 0 {
+		ki = exhaustedIdx
+		adopt = "kept for the Gate to judge (it holds exhausted pools)"
+	} else {
+		adopt = "adopted although unmeasured, no measured candidate exists (the Gate bypasses unmeasured pools)"
+	}
+	c := cands[ki]
+	notes[noteOf[ki]] = excluded[noteOf[ki]] + ", " + adopt
 	why := "all candidate pools exhausted"
 	if allUnmeas {
-		why = "all candidate pools unmeasured (excluded from automatic selection)"
+		why = "all candidate pools unmeasured"
 	} else if anyUnmeas {
 		why = "all candidate pools exhausted or unmeasured"
 	}
 	return Result{
 		Candidate: in.complete(c),
 		Fallback:  true,
-		Reason:    fmt.Sprintf("%s; %s, kept first table candidate %s/%s on pool %s for the Gate to judge; %s", head, why, c.Agent, c.Model, c.Pool, strings.Join(notes, ", ")),
+		Reason:    fmt.Sprintf("%s; %s, chose %s/%s on pool %s; %s", head, why, c.Agent, c.Model, c.Pool, strings.Join(notes, ", ")),
 	}
 }
 

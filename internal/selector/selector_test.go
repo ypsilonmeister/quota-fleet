@@ -33,7 +33,7 @@ func TestSelectFollowsTableWhenHealthy(t *testing.T) {
 		{RoleImplement, WeightHeavy, "claude", "claude-opus-5-5"},
 		{RoleReview, WeightLight, "agy", "gemini-4-neon-medium"},
 		{RoleFix, WeightStandard, "codex", "gpt-6.2-sol"},
-		{RoleJudge, WeightHeavy, "agy", "gemini-4-neon-xhigh"},
+		{RoleJudge, WeightHeavy, "codex", "gpt-6.2-sol"}, // docs/10: Gemini Decision is not a job; default candidate
 		{RoleMisc, WeightLight, "agy", "gemini-4-neon-medium"},
 	}
 	for _, c := range cases {
