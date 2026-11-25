@@ -3,6 +3,8 @@
 
   const TOKEN_KEY = "quota_fleet_token";
   const AUTH_MODE_KEY = "quota_fleet_auth_mode";
+  const JOBS_VIEW_KEY = "qf-jobs-view";
+  const JOBS_VIEWS = new Set(["chain", "flat"]);
   const directionHelper =
     (typeof globalThis !== "undefined" && globalThis.__qfDirection) ||
     (typeof window !== "undefined" && window.__qfDirection) ||
@@ -834,6 +836,34 @@
 
   applyDirection(readStoredDirection(), false);
 
+  // The jobs list view the user picked with the toggle (docs/07).
+  function readStoredJobsView() {
+    try {
+      return localStorage.getItem(JOBS_VIEW_KEY);
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function storeJobsView(jobsView) {
+    try {
+      localStorage.setItem(JOBS_VIEW_KEY, jobsView);
+    } catch (_err) {
+      // Storage may be unavailable; the URL still carries the view.
+    }
+  }
+
+  // resolveJobsView returns the first valid one of: the URL's view parameter, the view
+  // this history entry was already shown in, the stored choice. The default is chain.
+  function resolveJobsView(searchParams) {
+    const candidates = [
+      searchParams && searchParams.get("view"),
+      history.state && history.state.jobsView,
+      readStoredJobsView()
+    ];
+    return candidates.find(function (v) { return JOBS_VIEWS.has(v); }) || "chain";
+  }
+
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
     if (attrs) {
@@ -1522,8 +1552,11 @@
 
   // ==================== 2. Jobs List (/ui/jobs) ====================
   async function renderJobsList(searchParams, view) {
-    const requestedView = (searchParams && searchParams.get("view")) || "flat";
-    const activeView = requestedView === "chain" ? "chain" : "flat";
+    const activeView = resolveJobsView(searchParams);
+    if (!view) {
+      // Back, reload and refresh keep this view even if the stored choice changes later.
+      history.replaceState({ jobsView: activeView }, "");
+    }
     const requestedStatus = (searchParams && searchParams.get("status")) || (activeView === "chain" ? "all" : "queued");
     const activeStatus = activeView === "chain"
       ? (requestedStatus === "all" || ALL_STATUSES.includes(requestedStatus) ? requestedStatus : "all")
@@ -1538,8 +1571,8 @@
 
     function buildJobsURL(view, st, ag, ho, q) {
       const sp = new URLSearchParams();
+      sp.set("view", view);
       if (view === "chain") {
-        sp.set("view", "chain");
         if (st && st !== "all") {
           sp.set("status", st);
         }
@@ -1647,6 +1680,13 @@
     const counts = (statusRes.data && statusRes.data.counts) || {};
     const totalCount = (statusRes.data && statusRes.data.total) || 0;
 
+    function selectView(nextView, nextStatus) {
+      storeJobsView(nextView);
+      if (activeView !== nextView) {
+        navigate(buildJobsURL(nextView, nextStatus, filterAgent, filterHost, filterQ));
+      }
+    }
+
     const viewToggle = el("div", { className: "view-toggle", role: "group", "aria-label": L("jobs.viewSwitchLabel") }, [
       el("button", {
         type: "button",
@@ -1654,10 +1694,7 @@
         "aria-pressed": activeView === "flat" ? "true" : "false",
         text: L("jobs.viewFlat"),
         onClick: function () {
-          if (activeView !== "flat") {
-            const nextStatus = activeStatus === "all" ? "queued" : activeStatus;
-            navigate(buildJobsURL("flat", nextStatus, filterAgent, filterHost, filterQ));
-          }
+          selectView("flat", activeStatus === "all" ? "queued" : activeStatus);
         }
       }),
       el("button", {
@@ -1666,9 +1703,7 @@
         "aria-pressed": activeView === "chain" ? "true" : "false",
         text: L("jobs.viewChain"),
         onClick: function () {
-          if (activeView !== "chain") {
-            navigate(buildJobsURL("chain", "all", filterAgent, filterHost, filterQ));
-          }
+          selectView("chain", "all");
         }
       })
     ]);
