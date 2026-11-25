@@ -4,12 +4,67 @@ A design and specification for running a **fleet of coding agents on flat-rate
 subscription quotas**, with a verification pipeline that makes their output
 trustworthy enough to merge.
 
-> Status: **design phase**. This repository currently contains the
-> architecture and the specifications. It is extracted from a working private
-> system that has already developed and shipped real software (see the
-> [case study](docs/05-case-study.md)). A standalone reference implementation
-> is planned; the specifications here are written so that the core can be
-> rebuilt without the original hosting environment.
+> Status: **active implementation**.
+>
+> Implemented:
+>
+> - **Core features** ([design: docs/06](docs/06-implementation-design.md)):
+>   SQLite job store, HTTP API, Dispatcher/Launcher/Shepherd/Reconciler
+>   runtime, SSH/local host adapter, Quota Gate (hold/release),
+>   typed+decision Evaluator, and file/webhook Notifier. This is a list of
+>   implemented code, not a claim that the migration exit criteria in docs/06
+>   (such as the Phase 4 production cut-over and quality comparison) are met.
+> - Embedded **web UI** at `/ui/` ([docs/07](docs/07-ui-and-mcp.md)), including
+>   the model pick list and automatic pool derivation
+>   ([docs/11](docs/11-ui-models.md)).
+> - **MCP server** over stdio (`quota-fleet mcp`, docs/07) and Streamable HTTP
+>   (`/mcp`, [docs/13](docs/13-mcp-http.md); enable with `api.mcp_http: true`).
+> - **Scoped API tokens** (`api.tokens`, [docs/12](docs/12-api-tokens.md)).
+> - **Browser notifications** on job completion while the UI is open
+>   ([docs/14](docs/14-job-notifications.md); enable with
+>   `api.job_events: true`, then turn them on in the UI).
+>
+> Not yet implemented:
+>
+> - Automatic agent/model/pool selection (the Selector,
+>   [docs/10](docs/10-selector.md)) is planned; only the design exists.
+> - Web Push (notifications while no UI tab is open) is not implemented
+>   (a non-goal of docs/14).
+
+## Quickstart
+
+1. **Get the binary** (single static Go binary, `CGO_ENABLED=0`):
+   ```bash
+   CGO_ENABLED=0 go build -o quota-fleet ./cmd/quota-fleet
+   ```
+2. **Initialize and start the server**:
+   ```bash
+   ./quota-fleet init
+   ./quota-fleet serve
+   ```
+   `quota-fleet init` writes a minimal `fleet.yaml` (mode `0600`) with a
+   generated `instance_id` and Bearer API token. `quota-fleet serve` prints a
+   startup banner showing the active adapter, gate mode, evaluator mode,
+   notifier, API auth status, and UI URL.
+3. **Register your first job in the UI**:
+   Open the UI URL shown in the startup banner (default
+   `http://127.0.0.1:8737/ui/`), enter the API token (`api.token` in
+   `fleet.yaml`), and create a job from the new-job form. You can also register
+   jobs with the CLI (`./quota-fleet job create --title "..."`) or the HTTP API.
+   To generate MCP client config snippets for AI clients, run
+   `./quota-fleet mcp config`. The stdio snippets invoke `quota-fleet` by name,
+   so to use them as generated, put the binary on the MCP client's `PATH`.
+   Otherwise, pass its absolute path:
+   ```bash
+   ./quota-fleet mcp config --binary "$PWD/quota-fleet"
+   ```
+
+## Supported OS boundaries (v1)
+
+- **`quota-fleet serve` and local worker execution**: Linux (including Windows
+  **WSL2**).
+- **Native macOS / Windows**: CLI and MCP client connections to a remote
+  `quota-fleet serve` instance only (native local `serve` is out of scope for v1).
 
 ## Why this exists
 
@@ -66,11 +121,22 @@ the missing control plane around them.
 
 ## Repository layout
 
+- `cmd/quota-fleet/` — CLI entrypoint (`init`, `serve`, `job`, `gate`, `agents`, `mcp`, `mcp config`, `config check`, `status`)
+- `internal/` — store, config, API server, runtime, SSH/local adapter, quota gate, evaluator, web UI, MCP server, agent version and model probes
 - `docs/01-architecture.md` — components and how they interact
 - `docs/02-job-model.md` — job states, claims, chains, failure semantics
 - `docs/03-quota-gate.md` — pools, the hold/release gate, burn-down jobs
 - `docs/04-pipeline-conventions.md` — the implement/review/fix pipeline rules
 - `docs/05-case-study.md` — the system in production: a real OSS release
+- `docs/06-implementation-design.md` — standalone implementation specification
+- `docs/07-ui-and-mcp.md` — embedded UI and MCP design (v2)
+- `docs/08-agent-versions.md` — agent version inventory and drift notification
+- `docs/09-ui-redesign.md` — web UI visual redesign notes
+- `docs/10-selector.md` — automatic model selection design (not yet implemented)
+- `docs/11-ui-models.md` — UI model selection and automatic pool derivation
+- `docs/12-api-tokens.md` — API token scopes and audit
+- `docs/13-mcp-http.md` — MCP over Streamable HTTP
+- `docs/14-job-notifications.md` — job completion browser notifications (SSE)
 
 ## License
 

@@ -277,7 +277,7 @@ Quota Gate 側の修正もここに含める: 全体の `updated_at` だけで�
 
 ## 7. 未決事項・ゆうやの判断が要る点
 
-1. **Evaluator の評価方式**: (A) 構造化チェック（差分有無・コマンド実行・ファイル有無など決定論的に判定できる条件）＋判定できない条件だけ外部 LLM 評価器を呼ぶ、(B) Shepherd は終了検知と証跡収集まで行い、意味的評価は Coordinator（つむぎ）側へ寄せる、のどちらを基本にするか。費用と利用枠の消費先が変わる。
+1. **Evaluator の評価方式**: **確定（2026-11-23 ゆうや決定）**。(A) を採る: 決定論の型つきチェック（`file_exists:`／`file_nonempty:`／`contains:`／`command:`）を基本とし、型で書けない条件の意味判定には生成型 LLM ではなく判定専用モデル **Gemini Decision 1**（`gemini-decision-1`、Decisions API の noul 質問、確率しきい値で合否）を使う。Decision 1 は yui-social の validation で実績があり、安価で利用枠を食わない。API 不通・キー未設定時は合格にも不合格にもせず再評価し、連続失敗で理由つき Fail にする（silent fallback 禁止）。実装は Phase 3-1 の後に完了（`internal/evaluator`）。
 2. **実装言語**: 本書は Go を推奨。Python での試作先行を望む場合は Phase 1 の範囲が変わる。
 3. **`submit` アクション（draft → queued）の要否**: 現行は未実装で困っていない。参照実装でも draft は「登録前の下書き置き場」としてだけ残し、submit を持たない選択肢がある。
 4. **Shepherd の責務範囲**: 仕様 01 は「PR 作成・後続ジョブ登録」を Shepherd に含めるが、現行は Coordinator（つむぎ）が担い、Shepherd は禁止されている。本書は現行どおり「Shepherd は評価と納品まで、PR と後続登録は Coordinator」を推奨するが、仕様側の記述とどちらに寄せるか。

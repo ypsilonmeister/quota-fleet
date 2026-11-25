@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - impl/phase1-core
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: CGO_ENABLED=0 go build ./...
+
+      - name: Vet
+        run: CGO_ENABLED=0 go vet ./...
+
+      - name: Test
+        run: CGO_ENABLED=0 go test ./...
