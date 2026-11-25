@@ -692,6 +692,7 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 
 	reqAgent, reqModel := agent, model // what the client sent; record mode executes with these + defaults
 	var parentNote string
+	var parentJob selector.Candidate // the followed parent, with the pool it actually runs on
 	parentFollowed := false
 	if strings.TrimSpace(req.Role) == selector.RoleFix && req.ParentID != nil && agent == "" && model == "" {
 		// docs/10 §4: fix runs on the same implementer as the parent job.
@@ -699,6 +700,14 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 			agent, model = parent.Agent, parent.Model
 			parentNote = fmt.Sprintf("fix follows parent job #%d (%s/%s); ", parent.ID, agent, model)
 			parentFollowed = true
+			parentJob = selector.Candidate{Agent: parent.Agent, Model: parent.Model, Pool: parent.Pool}
+			if parentJob.Pool == "" {
+				// No pool stored on the parent: derive it from the parent's own agent/model.
+				parentJob.Pool = resolve(parent.Agent, parent.Model)
+			}
+			if parentJob.Pool == "" {
+				parentJob.Pool = selector.PoolFor(parent.Agent, parent.Model)
+			}
 		}
 	}
 
@@ -718,9 +727,10 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 	if parentFollowed && !res.Abstain && snap != nil {
 		// docs/10 §4: when the parent's pool is exhausted and another pool is healthy,
 		// propose switching to another line (the proposal is recorded only).
-		if ev := quota.EvaluatePool(res.Pool, snap, evalOpts); ev.Status == quota.PoolExhausted {
-			if alt, ok := selector.SwitchTarget(selector.RoleFix, strings.TrimSpace(req.Weight), res.Candidate, snap, evalOpts); ok {
-				parentNote += fmt.Sprintf("parent pool %s is exhausted and pool %s is healthy: proposing a switch to another line %s/%s (docs/10 §4); ", res.Pool, alt.Pool, alt.Agent, alt.Model)
+		// The parent's own pool is judged, not the pool of this job's candidate.
+		if ev := quota.EvaluatePool(parentJob.Pool, snap, evalOpts); ev.Status == quota.PoolExhausted {
+			if alt, ok := selector.SwitchTarget(selector.RoleFix, strings.TrimSpace(req.Weight), parentJob, snap, evalOpts); ok {
+				parentNote += fmt.Sprintf("parent pool %s is exhausted and pool %s is healthy: proposing a switch to another line %s/%s (docs/10 §4); ", parentJob.Pool, alt.Pool, alt.Agent, alt.Model)
 			}
 		}
 	}
