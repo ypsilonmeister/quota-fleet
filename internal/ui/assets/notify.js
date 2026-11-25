@@ -182,7 +182,8 @@
   }
 
   // createNotificationPresenter displays notifications through the service worker
-  // registration and falls back to new Notification() where that is not possible.
+  // registration and falls back to new Notification() where that is not possible, except
+  // on Android.
   function createNotificationPresenter(options) {
     const setTimer = options.setTimeout || defaultSetTimeout;
     const clearTimer = options.clearTimeout || defaultClearTimeout;
@@ -195,6 +196,10 @@
         const data = ev.data;
         if (data && data.type === "qf-open-job" &&
             Number.isInteger(data.jobId) && data.jobId > 0) {
+          // Without this answer sw.js loads the job URL in the tab instead.
+          if (ev.ports && ev.ports[0]) {
+            ev.ports[0].postMessage("ok");
+          }
           options.openJob(data.jobId);
         }
       });
@@ -229,6 +234,11 @@
     }
 
     function showFromPage(message) {
+      // Android Chrome exposes the constructor but throws when it is called, and calling
+      // it is the only feature test, so the platform is checked instead.
+      if (/Android/i.test(options.getUserAgent())) {
+        throw new Error("page notifications are not supported");
+      }
       const NotificationCtor = options.getNotification();
       const notification = new NotificationCtor(message.title, {
         body: message.body,
@@ -244,9 +254,13 @@
       };
     }
 
-    // show rejects when neither way can display the notification.
+    // show resolves to false if notifications were turned off while it was waiting, and
+    // rejects when neither way can display the notification.
     async function show(message) {
       const registration = await register();
+      if (!options.isEnabled()) {
+        return false;
+      }
       if (registration && typeof registration.showNotification === "function") {
         try {
           await registration.showNotification(message.title, {
@@ -254,12 +268,16 @@
             tag: message.tag,
             data: { jobId: message.jobID }
           });
-          return;
+          return true;
         } catch (_err) {
           // Fall back to the page notification below.
         }
+        if (!options.isEnabled()) {
+          return false;
+        }
       }
       showFromPage(message);
+      return true;
     }
 
     return {
@@ -301,7 +319,12 @@
           // Tabs sharing an origin replace each other's notification instead of stacking.
           tag: "qf-job-" + key
         }));
-      }).then(function () {
+      }).then(function (shown) {
+        if (shown === false) {
+          // Cancelled, so a later repeat of the event may still be shown.
+          notified.delete(key);
+          return false;
+        }
         return true;
       }, function () {
         notified.delete(key);
@@ -447,6 +470,7 @@
       stop: stop,
       restart: restart,
       toggle: toggle,
+      isEnabled: isEnabled,
       // reload picks up a preference changed by another tab.
       reload: function () {
         wanted = readPreference(options.storage);

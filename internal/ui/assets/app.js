@@ -3269,6 +3269,9 @@
     // Absent in insecure contexts and some private browsing modes.
     getServiceWorker: function () { return navigator.serviceWorker || null; },
     getNotification: getNotificationCtor,
+    getUserAgent: function () { return navigator.userAgent; },
+    // Read when about to display: the toggle may change while the worker is activating.
+    isEnabled: function () { return notifyController.isEnabled(); },
     focus: function () { window.focus(); },
     openJob: function (jobID) { navigate("/ui/jobs/" + jobID); }
   });

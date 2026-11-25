@@ -30,7 +30,8 @@ func TestUINotifyAssetsPresent(t *testing.T) {
 
 	js := string(appJS)
 	for _, token := range []string{`createNotifyController`, `createEventStream`, `createJobNotifier`, `refreshListView`,
-		`createNotificationPresenter`, `navigator.serviceWorker`, `show: notificationPresenter.show`, `notificationPresenter.register()`} {
+		`createNotificationPresenter`, `navigator.serviceWorker`, `show: notificationPresenter.show`, `notificationPresenter.register()`,
+		`navigator.userAgent`, `notifyController.isEnabled()`} {
 		if !strings.Contains(js, token) {
 			t.Errorf("app.js missing notification wiring %q", token)
 		}
@@ -84,17 +85,23 @@ const ORIGIN = "https://fleet.example";
 
 function load(windows) {
   const listeners = {};
-  const log = { opened: [], queries: [], skipped: 0 };
+  const log = { opened: [], queries: [], skipped: 0, claimed: 0, timers: [] };
   const self = {
     location: { origin: ORIGIN },
     addEventListener: (type, fn) => { listeners[type] = fn; },
     skipWaiting: () => { log.skipped++; },
     clients: {
+      claim: async () => { log.claimed++; },
       matchAll: async query => { log.queries.push(query); return windows; },
       openWindow: async url => { log.opened.push(url); }
     }
   };
-  vm.runInNewContext(source, { self, URL });
+  // The answer timeout fires on the next macrotask, after any answer has arrived.
+  const timers = {
+    setTimeout: (fn, ms) => { log.timers.push(ms); return setTimeout(fn, 20); },
+    clearTimeout
+  };
+  vm.runInNewContext(source, Object.assign({ self, URL, MessageChannel }, timers));
   const click = async data => {
     let closed = false, waited = null;
     listeners.notificationclick({
@@ -109,18 +116,31 @@ function load(windows) {
 }
 
 function client(path, extra) {
-  const c = Object.assign({ url: ORIGIN + path, focused: false, visibilityState: "hidden", focuses: 0, messages: [] }, extra);
+  const c = Object.assign({ url: ORIGIN + path, focused: false, visibilityState: "hidden", focuses: 0, messages: [], navigated: [] }, extra);
   c.focus = async () => { c.focuses++; if (c.gone) throw new Error("gone"); return c; };
-  c.postMessage = m => { c.messages.push(JSON.parse(JSON.stringify(m))); };
+  // A tab running the current UI answers on the port; a deaf one has no receiver.
+  c.postMessage = (m, ports) => {
+    c.messages.push(JSON.parse(JSON.stringify(m)));
+    if (!c.deaf) ports[0].postMessage("ok");
+  };
+  c.navigate = async url => {
+    if (c.uncontrolled) throw new TypeError("not the client's active service worker");
+    c.navigated.push(url);
+    return c;
+  };
   return c;
 }
 
 async function main() {
   {
     const w = load([]);
-    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["install", "notificationclick"], "no fetch handler");
+    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["activate", "install", "notificationclick"], "no fetch handler");
     w.listeners.install({});
     assert.strictEqual(w.log.skipped, 1);
+    let activating = null;
+    w.listeners.activate({ waitUntil: p => { activating = p; } });
+    await activating;
+    assert.strictEqual(w.log.claimed, 1, "open tabs are claimed so that they can be navigated");
 
     assert.ok(await w.click({ jobId: 7 }));
     assert.deepStrictEqual(w.log.opened, [ORIGIN + "/ui/jobs/7"], "no tab: open one");
@@ -152,7 +172,25 @@ async function main() {
     assert.strictEqual(tabs.reduce((sum, c) => sum + c.messages.length, 0), 1);
     assert.strictEqual(outside.focuses, 0, "pages outside the UI are left alone");
     assert.deepStrictEqual(w.log.opened, []);
+    assert.deepStrictEqual(chosen.navigated, [], "an answering tab is not reloaded");
     for (const c of preference) { c.focuses = 0; c.messages.length = 0; }
+  }
+
+  {
+    // A tab loaded before the deployment has no receiver: it is sent to the job URL.
+    const old = client("/ui/jobs", { deaf: true });
+    const w = load([old]);
+    await w.click({ jobId: 7 });
+    assert.strictEqual(old.focuses, 1);
+    assert.deepStrictEqual(old.navigated, [ORIGIN + "/ui/jobs/7"]);
+    assert.deepStrictEqual(w.log.timers, [2000]);
+    assert.deepStrictEqual(w.log.opened, []);
+  }
+  {
+    const stuck = client("/ui/jobs", { deaf: true, uncontrolled: true });
+    const w = load([stuck]);
+    await w.click({ jobId: 7 });
+    assert.deepStrictEqual(w.log.opened, [ORIGIN + "/ui/jobs/7"], "cannot navigate: try a new window");
   }
 
   {
@@ -308,15 +346,18 @@ async function main() {
   function presenterFixture(worker, Ctor) {
     const timers = fakeTimers();
     const calls = [];
+    const state = { userAgent: "Mozilla/5.0 (X11; Linux x86_64)", enabled: true };
     const presenter = n.createNotificationPresenter({
       getServiceWorker: () => worker && worker.container,
       getNotification: () => Ctor,
       focus: () => calls.push("focus"),
       openJob: id => calls.push("open " + id),
+      getUserAgent: () => state.userAgent,
+      isEnabled: () => state.enabled,
       setTimeout: timers.setTimeout,
       clearTimeout: timers.clearTimeout
     });
-    return { presenter, timers, calls };
+    return { presenter, timers, calls, state };
   }
   function illegalConstructor() {
     function Ctor() { Ctor.attempts++; throw new TypeError("Illegal constructor"); }
@@ -344,6 +385,13 @@ async function main() {
     assert.deepStrictEqual(f.calls, []);
     w.log.listeners.message({ data: { type: "qf-open-job", jobId: 5 } });
     assert.deepStrictEqual(f.calls, ["open 5"]);
+    const answers = [];
+    const ports = [{ postMessage: m => answers.push(m) }];
+    w.log.listeners.message({ data: { type: "other", jobId: 5 }, ports });
+    assert.deepStrictEqual(answers, []);
+    w.log.listeners.message({ data: { type: "qf-open-job", jobId: 6 }, ports });
+    assert.deepStrictEqual(answers, ["ok"], "the worker learns that this tab handles the click");
+    assert.deepStrictEqual(f.calls, ["open 5", "open 6"]);
   }
   for (const [name, worker] of [
     ["no service worker", null],
@@ -366,6 +414,54 @@ async function main() {
     assert.strictEqual(N.created[0].closed, true, name);
 
     await assert.rejects(presenterFixture(worker, illegalConstructor()).presenter.show(message), /Illegal constructor/, name);
+  }
+  // Android Chrome has the constructor but rejects it: no failure path may call it.
+  for (const [name, worker] of [
+    ["no service worker", null],
+    ["register fails", fakeWorker({ registerFails: true })],
+    ["showNotification fails", fakeWorker({ showFails: true })],
+    ["no showNotification", fakeWorker({ registration: {} })],
+    ["never active", fakeWorker({ neverReady: true })]
+  ]) {
+    const Ctor = illegalConstructor();
+    const f = presenterFixture(worker, Ctor);
+    f.state.userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/142.0.0.0 Mobile Safari/537.36";
+    const rejected = assert.rejects(f.presenter.show(message), /page notifications are not supported/, name);
+    if (name === "never active") { await flush(); await f.timers.fire(10000); }
+    await rejected;
+    assert.strictEqual(Ctor.attempts, 0, name);
+  }
+  // Turned off while waiting: nothing is shown, by either path.
+  for (const [name, opts] of [["worker", {}], ["page fallback", { registerFails: true }]]) {
+    const w = fakeWorker(opts);
+    const N = fakeNotification("granted");
+    const f = presenterFixture(w, N);
+    const shown = f.presenter.show(message);
+    f.state.enabled = false;
+    assert.strictEqual(await shown, false, name);
+    assert.strictEqual(w.log.shown.length, 0, name);
+    assert.strictEqual(N.created.length, 0, name);
+  }
+  {
+    // turned off while showNotification was failing
+    let f;
+    const N = fakeNotification("granted");
+    f = presenterFixture(fakeWorker({ registration: { showNotification: async () => { f.state.enabled = false; throw new TypeError("x"); } } }), N);
+    assert.strictEqual(await f.presenter.show(message), false);
+    assert.strictEqual(N.created.length, 0);
+  }
+  {
+    // a cancelled notification is no error and is not remembered
+    let errors = 0, result = false;
+    const notify = n.createJobNotifier({
+      getNotification: () => fakeNotification("granted"),
+      show: async () => result,
+      onError: () => errors++
+    });
+    assert.strictEqual(await notify(ev(1, "done", "claimed")), false);
+    result = true;
+    assert.strictEqual(await notify(ev(1, "done", "claimed")), true);
+    assert.strictEqual(errors, 0);
   }
   {
     // a failed registration is tried again
@@ -515,6 +611,7 @@ async function main() {
     assert.strictEqual(f.store.get("qf-job-notify"), "on");
     assert.strictEqual(f.running(), 1);
     assert.strictEqual(f.view().enabled, true);
+    assert.strictEqual(f.controller.isEnabled(), true);
     assert.ok(f.log.prepared > 0, "enabling readies the display path");
     f.controller.sync();
     assert.strictEqual(f.log.streams.length, 1, "sync does not reconnect");
@@ -533,6 +630,7 @@ async function main() {
     await f.controller.toggle();
     assert.strictEqual(f.store.get("qf-job-notify"), "off");
     assert.strictEqual(f.running(), 0);
+    assert.strictEqual(f.controller.isEnabled(), false);
 
     f.store.set("qf-job-notify", "on"); // another tab
     f.controller.reload();
