@@ -16,6 +16,7 @@
   <script src="/ui/assets/direction.js"></script>
   <link rel="stylesheet" href="/ui/assets/style.css">
   <script defer src="/ui/assets/notify.js"></script>
+  <!-- Served with the label dictionary in front of the application (docs/17). -->
   <script defer src="/ui/assets/app.js"></script>
 </head>
 <body>
@@ -74,8 +75,5 @@
       <div class="alert alert-error" lang="en">This UI requires JavaScript.</div>
     </noscript>
   </main>
-  <!-- Not deferred: fills in the labels above as soon as they are parsed, before the
-       deferred scripts that depend on it (docs/17). -->
-  <script src="/ui/assets/i18n.js"></script>
 </body>
 </html>

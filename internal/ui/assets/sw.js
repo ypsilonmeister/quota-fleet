@@ -16,7 +16,6 @@ const SHELL_PAGE = "/ui/";
 const SHELL_ASSETS = [
   "/ui/assets/style.css",
   "/ui/assets/direction.js",
-  "/ui/assets/i18n.js",
   "/ui/assets/notify.js",
   "/ui/assets/app.js",
   "/ui/manifest.webmanifest",

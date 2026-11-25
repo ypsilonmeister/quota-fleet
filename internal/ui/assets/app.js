@@ -1290,7 +1290,7 @@
     });
     statCards.push(
       el("div", { className: "stat-card" }, [
-        el("div", { className: "stat-label", text: "total" }),
+        el("div", { className: "stat-label", text: L("dashboard.total") }),
         el("div", { className: "stat-value", text: String(statusRes.data.total || 0) })
       ])
     );

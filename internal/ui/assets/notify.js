@@ -3,8 +3,13 @@
 (function (root) {
   "use strict";
 
-  const i18n = (root && root.__qfI18n) ||
-    (typeof require === "function" ? require("./i18n.js") : null);
+  // In the page the dictionary arrives with app.js, after this file has run, so it is
+  // looked up each time a message is needed (docs/17).
+  const i18n = {
+    t: function (key, params) {
+      return ((root && root.__qfI18n) || require("./i18n.js")).t(key, params);
+    }
+  };
   const NOTIFY_KEY = "qf-job-notify";
   // Message keys, looked up when shown so that they follow the current locale (docs/17).
   const TERMINAL_KEYS = {

@@ -120,6 +120,7 @@
 
       "dashboard.title": "ダッシュボード",
       "dashboard.statusCounts": "状態別件数",
+      "dashboard.total": "total",
       "dashboard.unmeasured": "unmeasured (バイパス)",
       "dashboard.weeklyRemaining": "週次残量: {percent}%",
       "dashboard.shortRemaining": "短期残量: {percent}%",
@@ -415,6 +416,7 @@
 
       "dashboard.title": "Dashboard",
       "dashboard.statusCounts": "Jobs by status",
+      "dashboard.total": "total",
       "dashboard.unmeasured": "unmeasured (bypass)",
       "dashboard.weeklyRemaining": "Weekly remaining: {percent}%",
       "dashboard.shortRemaining": "Short-term remaining: {percent}%",

@@ -232,11 +232,6 @@ func TestUII18nKeyReferences(t *testing.T) {
 
 func TestUII18nAssetsWiring(t *testing.T) {
 	html := string(indexHTML)
-	// Not deferred and at the end of the body: it runs before every deferred script.
-	script := strings.Index(html, `<script src="/ui/assets/i18n.js"></script>`)
-	if script < 0 || script < strings.Index(html, "</main>") {
-		t.Errorf("index.html must load i18n.js, not deferred, after the markup it translates")
-	}
 	for _, token := range []string{`id="locale-switch"`, `data-set-locale="ja"`, `data-set-locale="en"`} {
 		if !strings.Contains(html, token) {
 			t.Errorf("index.html missing %q", token)
@@ -257,12 +252,58 @@ func TestUII18nAssetsWiring(t *testing.T) {
 	for _, found := range eager.FindAllString(js, -1) {
 		t.Errorf("app.js puts a message on the page that is not redrawn: %q (use L, or i18n.setText)", found)
 	}
+}
 
-	rec := get(t, "/ui/assets/i18n.js")
-	if rec.Code != 200 || rec.Body.String() != string(i18nJS) ||
-		!strings.HasPrefix(rec.Header().Get("Content-Type"), "application/javascript") {
-		t.Errorf("GET /ui/assets/i18n.js did not serve the dictionary (status %d)", rec.Code)
+// The dictionary is delivered inside app.js. A separate file could fail to load on its
+// own and leave a page without any label or working control.
+func TestUII18nDictionaryServedWithApp(t *testing.T) {
+	rec := get(t, "/ui/assets/app.js")
+	if rec.Code != 200 || rec.Body.String() != string(i18nJS)+";\n"+string(appJS) {
+		t.Errorf("GET /ui/assets/app.js must serve the dictionary followed by the application (status %d)", rec.Code)
 	}
+	if rec := get(t, "/ui/assets/i18n.js"); rec.Code != 404 {
+		t.Errorf("GET /ui/assets/i18n.js status = %d, want 404", rec.Code)
+	}
+	if strings.Contains(string(indexHTML), "i18n.js") {
+		t.Errorf("index.html must not load the dictionary on its own")
+	}
+}
+
+// Runs the scripts as the browser receives them: in index.html order, without require.
+func TestUII18nServedScriptsWithNode(t *testing.T) {
+	var served []string
+	for _, m := range regexp.MustCompile(`<script[^>]*\ssrc="([^"]+)"`).FindAllStringSubmatch(string(indexHTML), -1) {
+		served = append(served, get(t, m[1]).Body.String())
+	}
+	input, err := json.Marshal(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const [direction, notify, bundle] = JSON.parse(fs.readFileSync(0, "utf8"));
+
+// notify.js runs before the dictionary exists and finds it when it needs a message.
+const page = vm.createContext({});
+vm.runInContext(direction, page);
+vm.runInContext(notify, page);
+assert.strictEqual(page.__qfI18n, undefined);
+// The bundle runs as one script; without a document the application stops after its helpers,
+// which it can only reach by finding the dictionary.
+vm.runInContext(bundle, page);
+assert.strictEqual(typeof page.__qfI18n.t, "function");
+let shown;
+page.__qfNotify.createJobNotifier({
+  getNotification: () => ({ permission: "granted" }),
+  show: message => { shown = [message.title, message.body]; },
+  onError: error => { throw error; }
+})({ job_id: 3, status: "done", title: "x" });
+assert.ok(shown && shown[0].includes("#3") && !shown[1].includes("notify."), String(shown));
+console.log("i18n served ok");
+`
+	runNode(t, "i18n served ok", script, input)
 }
 
 func TestUII18nLimitationNoteMatchesServer(t *testing.T) {
