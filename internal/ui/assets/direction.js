@@ -4,6 +4,8 @@
   const DIRECTION_KEY = "qf-direction";
   const DEFAULT_DIRECTION = "console";
   const VALID_DIRECTIONS = new Set(["console", "ledger"]);
+  // Each direction's --chrome-bg (style.css), for the browser and app window chrome.
+  const THEME_COLORS = { console: "#0c0d10", ledger: "#efe9dc" };
 
   function detectPreferredDirection(matchMediaFn) {
     const mm = typeof matchMediaFn === "function"
@@ -69,6 +71,10 @@
       const schemeMeta = document.querySelector('meta[name="color-scheme"]');
       if (schemeMeta) {
         schemeMeta.setAttribute("content", next === "ledger" ? "light" : "dark");
+      }
+      const themeMeta = document.querySelector('meta[name="theme-color"]');
+      if (themeMeta) {
+        themeMeta.setAttribute("content", THEME_COLORS[next]);
       }
       syncDirectionButtons(next);
     }

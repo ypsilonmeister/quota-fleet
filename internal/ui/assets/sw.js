@@ -1,19 +1,143 @@
-// Service worker for job completion notifications (docs/14). The page shows them through
-// this registration because some browsers (e.g. Android Chrome) reject new Notification().
-// There is deliberately no fetch handler: nothing is cached or intercepted.
+// Service worker for job completion notifications (docs/14) and the PWA app shell
+// (docs/15). The page shows notifications through this registration because some browsers
+// (e.g. Android Chrome) reject new Notification(). Only the app shell is cached, as an
+// offline fallback; API responses, /events and /mcp are never intercepted.
 "use strict";
 
 // A tab waking from the background may take a moment to answer.
 const ANSWER_TIMEOUT_MS = 2000;
 
-self.addEventListener("install", function () {
-  // With nothing cached, a new version can replace the old one at once.
-  self.skipWaiting();
+// The server replaces the placeholder with a hash of the embedded app shell.
+const SHELL_VERSION = "__QF_SHELL_VERSION__";
+const SHELL_CACHE_PREFIX = "qf-shell-";
+const SHELL_CACHE = SHELL_CACHE_PREFIX + SHELL_VERSION;
+// Every UI page is the same index.html, cached once under this path.
+const SHELL_PAGE = "/ui/";
+const SHELL_ASSETS = [
+  "/ui/assets/style.css",
+  "/ui/assets/direction.js",
+  "/ui/assets/notify.js",
+  "/ui/assets/app.js",
+  "/ui/manifest.webmanifest",
+  "/ui/assets/icon-192.png",
+  "/ui/assets/icon-512.png",
+  "/ui/assets/icon-maskable-512.png",
+  "/ui/assets/apple-touch-icon.png"
+];
+
+// isShellPage mirrors the page routes of the UI handler (embed.go).
+function isShellPage(pathname) {
+  return ["/ui/", "/ui/jobs", "/ui/gate/held", "/ui/gate/decisions", "/ui/deliveries", "/ui/agents"]
+    .includes(pathname) || /^\/ui\/jobs\/[^/]+$/.test(pathname);
+}
+
+// shellCacheKey is the allowlist: it returns the cache entry that can stand in for the
+// request, or null for everything the browser must handle without this worker.
+function shellCacheKey(request) {
+  if (request.method !== "GET") {
+    return null;
+  }
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) {
+    return null;
+  }
+  if (request.mode === "navigate") {
+    return isShellPage(url.pathname) ? SHELL_PAGE : null;
+  }
+  return url.search === "" && SHELL_ASSETS.includes(url.pathname) ? url.pathname : null;
+}
+
+const SHELL_PATHS = [SHELL_PAGE].concat(SHELL_ASSETS);
+
+async function precacheShell() {
+  const cache = await caches.open(SHELL_CACHE);
+  // "reload" skips the HTTP cache. addAll stores all of the files or none of them.
+  await cache.addAll(SHELL_PATHS.map(function (path) {
+    return new Request(path, { cache: "reload" });
+  }));
+}
+
+async function precacheMissingShell() {
+  const cache = await caches.open(SHELL_CACHE);
+  const found = await Promise.all(SHELL_PATHS.map(function (path) {
+    return cache.match(path);
+  }));
+  if (!found.every(Boolean)) {
+    await precacheShell();
+  }
+}
+
+let filling = null;
+
+// fillShell completes the cache if anything is missing. Requests arriving meanwhile share
+// the same download, and a failed one is tried again at the next request.
+function fillShell() {
+  if (!filling) {
+    filling = precacheMissingShell().finally(function () { filling = null; });
+  }
+  return filling;
+}
+
+// The network comes first so that a deployed change shows up at once. The cache is only
+// written as a whole shell, never from the responses passed through here.
+async function fetchOrFallBack(request, key) {
+  try {
+    return await fetch(request);
+  } catch (err) {
+    const cache = await caches.open(SHELL_CACHE);
+    const cached = await cache.match(key);
+    if (cached) {
+      return cached;
+    }
+    throw err;
+  }
+}
+
+async function deleteOldShellCaches() {
+  const names = await caches.keys();
+  await Promise.all(names.filter(function (name) {
+    return name.startsWith(SHELL_CACHE_PREFIX) && name !== SHELL_CACHE;
+  }).map(function (name) {
+    return caches.delete(name);
+  }));
+}
+
+self.addEventListener("install", function (event) {
+  // A first installation does not wait for the cache: notifications need the worker to
+  // become active soon, and pages ask for the cache afterwards (see "message"). An update
+  // caches first; if that fails it is retried later while the active worker stays.
+  const cached = self.registration.active ? precacheShell() : Promise.resolve();
+  event.waitUntil(cached.then(function () {
+    // Pages load all of their files up front, so a new version can take over at once.
+    return self.skipWaiting();
+  }));
 });
 
 self.addEventListener("activate", function (event) {
-  // Take control of tabs that are already open: navigate() only works on controlled ones.
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(deleteOldShellCaches().catch(function () {
+    // A leftover cache is never read; it must not keep the tabs from being claimed.
+  }).then(function () {
+    // Take control of tabs that are already open: navigate() only works on controlled ones.
+    return self.clients.claim();
+  }));
+});
+
+// Pages send this when they load and when the browser comes back online (notify.js).
+self.addEventListener("message", function (event) {
+  if (event.data && event.data.type === "qf-cache-shell") {
+    // waitUntil keeps the worker running for the download without delaying other events.
+    event.waitUntil(fillShell().catch(function () {
+      // Still unreachable; the next request tries again.
+    }));
+  }
+});
+
+self.addEventListener("fetch", function (event) {
+  const key = shellCacheKey(event.request);
+  // Without respondWith() the request goes to the network as if there were no worker.
+  if (key !== null) {
+    event.respondWith(fetchOrFallBack(event.request, key));
+  }
 });
 
 // askPage asks a tab to show the job and resolves to whether it answered.
