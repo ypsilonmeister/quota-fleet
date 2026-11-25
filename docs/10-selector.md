@@ -34,7 +34,7 @@
 | research | agy Flash / Neon Low | Orchestrator (Neon) / Neon Medium | Orchestrator（司令塔 Neon High＋実行 Hydrogen High） |
 | judge | agy Gemini（Neon）の専用ルーティング（Selector の対象。Decision 評価器の内部処理とは別） | 同左 | 同左 |
 
-補足（2026-11-25 確定）: fix の親プールが枯渇し他プールが健全な場合、選択記録の理由に別系統への切替提案を含める（提案のみで、勝手に系統は変えない）。
+補足（2026-11-25 確定）: fix の親プールが枯渇し他プールが健全な場合、選択記録の理由に別系統への切替提案を含める（提案のみで、勝手に系統は変えない）。同じ役割×重さの行に健全な別系統が無ければ、同じ役割の他の重さ、さらに表全体へ探索を広げる。
 
 - heavy のレビュー候補は実装側と排他的に構成する: 実装が Claude 系なら gpt-6.2-astra / Neon xhigh、実装が GPT 系なら Opus 5.5 / Neon xhigh、実装が Gemini 系なら Opus 5.5 / gpt-6.2-astra。同系統しか残らない場合は Selector で無理に埋めず、保持して判断を仰ぐ。
 - 段（Light / Standard / Heavy）と effort の対応（2026-11-24 の3段案を反映）: Light = 定型・小修正・下調べ・軽いレビュー（Claude: Haiku 5.5 / Sonnet 5.5 low／Codex: Sol low／agy: Hydrogen low〜medium、Flash）。Standard = 通常の実装・レビュー・fix（Claude: Sonnet 5.5 medium〜high／Codex: Sol medium〜high／agy: Neon medium〜high、Orchestrator (Neon)）。Heavy = 設計・難しい一貫作業・重要なレビュー・判定の最終確認（Claude: Opus 5.5 high〜xhigh／Codex: gpt-6.2-astra high〜xhigh／agy: Neon xhigh 主力、Carbon / Argon は機会的、Orchestrator (Carbon)）。

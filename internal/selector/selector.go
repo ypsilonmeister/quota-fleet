@@ -141,7 +141,7 @@ type Result struct {
 	Reason   string
 	Fallback bool // true when usage was unreliable and the deterministic default order was used
 	// Abstain is true when every candidate pool is unmeasured: the Selector selects nothing
-	// (Candidate keeps only explicit fields) and the job is registered with existing defaults.
+	// (Candidate is empty) and the job is registered with existing defaults.
 	Abstain bool
 }
 
@@ -263,10 +263,13 @@ func Select(in Input) Result {
 	}
 	if allUnmeas {
 		// docs/10 §1: unmeasured pools are never candidates. Abstain instead of adopting one.
+		// An explicit or default pool may still be executed, so don't call any of them "excluded".
+		for i := range cands {
+			notes[noteOf[i]] = excluded[noteOf[i]]
+		}
 		return Result{
-			Candidate: Candidate{Agent: in.Agent, Model: in.Model, Pool: in.Pool},
-			Abstain:   true,
-			Reason:    fmt.Sprintf("%s; all candidates unmeasured, automatic selection skipped (全候補が未測定のため自動選択を見送った): job registered with existing defaults; %s", head, strings.Join(notes, ", ")),
+			Abstain: true,
+			Reason:  fmt.Sprintf("%s; all candidates unmeasured, automatic selection skipped (全候補が未測定のため自動選択を見送った): job registered with existing defaults; %s", head, strings.Join(notes, ", ")),
 		}
 	}
 	// No pool is selectable (all exhausted, or exhausted mixed with unmeasured). The candidate that
@@ -292,6 +295,43 @@ func Select(in Input) Result {
 }
 
 var allCandidates = []Candidate{codexSol, agyNeonMedium, claudeSonnet, claudeOpus, codexAstra, agyNeonXHigh}
+
+// SwitchTarget finds where a fix could move when the pool of current (the followed parent)
+// is exhausted: the first candidate on a healthy pool from another model line (docs/10 §2:
+// the line follows the model, not the agent). It searches the role x weight row, then the
+// other weights of the role, then every known candidate. It only proposes; nothing is applied.
+func SwitchTarget(role, weight string, current Candidate, usage *quota.Snapshot, eval quota.EvalOptions) (Candidate, bool) {
+	search := Candidates(role, weight)
+	for _, w := range []string{WeightLight, WeightStandard, WeightHeavy} {
+		search = append(search, Candidates(role, w)...)
+	}
+	search = append(search, allCandidates...)
+
+	from := modelLine(current)
+	for _, c := range search {
+		if modelLine(c) != from && quota.EvaluatePool(c.Pool, usage, eval).Status == quota.PoolHealthy {
+			return c, true
+		}
+	}
+	return Candidate{}, false
+}
+
+// modelLine is the model family of c, falling back to the agent's native family when the
+// model ID does not tell.
+func modelLine(c Candidate) string {
+	if f := quota.ModelFamily(c.Model); f != quota.ModelFamilyUnknown {
+		return f
+	}
+	switch strings.ToLower(c.Agent) {
+	case "claude":
+		return quota.ModelFamilyClaude
+	case "codex":
+		return quota.ModelFamilyGPT
+	case "agy":
+		return quota.ModelFamilyGemini
+	}
+	return quota.ModelFamilyUnknown
+}
 
 // PoolFor returns the pool of a known table candidate matching agent and model, or "".
 func PoolFor(agent, model string) string {

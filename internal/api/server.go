@@ -719,58 +719,64 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 		// docs/10 §4: when the parent's pool is exhausted and another pool is healthy,
 		// propose switching to another line (the proposal is recorded only).
 		if ev := quota.EvaluatePool(res.Pool, snap, evalOpts); ev.Status == quota.PoolExhausted {
-			alt := selector.Select(selector.Input{Role: selector.RoleImplement, Weight: strings.TrimSpace(req.Weight), Pool: "", Usage: snap, UsageErr: snapErr, Eval: evalOpts, ResolvePool: resolve})
-			if !alt.Abstain && !alt.Fallback && alt.Pool != "" && alt.Pool != res.Pool {
+			if alt, ok := selector.SwitchTarget(selector.RoleFix, strings.TrimSpace(req.Weight), res.Candidate, snap, evalOpts); ok {
 				parentNote += fmt.Sprintf("parent pool %s is exhausted and pool %s is healthy: proposing a switch to another line %s/%s (docs/10 §4); ", res.Pool, alt.Pool, alt.Agent, alt.Model)
 			}
 		}
 	}
+	if parentFollowed && res.Abstain {
+		parentNote = fmt.Sprintf("parent job target %s/%s not followed; ", agent, model)
+	}
+	// res.Candidate is empty on abstain, so no selected_* value is recorded then.
 	params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Agent, res.Model, res.Pool
 	params.SelectionReason = parentNote + res.Reason
 
-	if res.Abstain {
-		// Every candidate is unmeasured (docs/10 §1): nothing is assigned automatically.
-		// The job is registered with the existing defaults, as in record mode.
-		params.SelectionMode = selector.ModeAbstained
-	}
-	switch {
-	case res.Abstain:
-		def := selector.Defaults(reqAgent, reqModel, explicitPool, resolve)
-		if reqAgent == "" {
-			params.Agent = def.Agent
-		}
-		if reqModel == "" {
-			params.Model = def.Model
-		}
-		if explicitPool == "" {
-			params.Pool = def.Pool
-		}
-		params.SelectionReason += fmt.Sprintf("; registered with defaults %s/%s on pool %s", params.Agent, params.Model, params.Pool)
-	case s.selectorMode == config.SelectorModeApply:
+	if s.selectorMode == config.SelectorModeApply && !res.Abstain {
 		params.SelectionMode = selector.ModeApplied
-		if strings.TrimSpace(req.Agent) == "" {
+		if reqAgent == "" {
 			params.Agent = res.Agent
 		}
-		if strings.TrimSpace(req.Model) == "" {
+		if reqModel == "" {
 			params.Model = res.Model
 		}
 		if explicitPool == "" && res.Pool != "" {
 			params.Pool = res.Pool
 		}
-	default: // record
-		params.SelectionMode = selector.ModeRecorded
-		def := selector.Defaults(reqAgent, reqModel, explicitPool, resolve)
-		if reqAgent == "" {
-			params.Agent = def.Agent
-		}
-		if reqModel == "" {
-			params.Model = def.Model
-		}
-		if explicitPool == "" {
-			params.Pool = def.Pool
-		}
-		params.SelectionReason += fmt.Sprintf("; record mode executes with defaults %s/%s on pool %s", params.Agent, params.Model, params.Pool)
+		return
 	}
+
+	// Record mode and abstain both execute explicit values plus the documented defaults.
+	def := selector.Defaults(reqAgent, reqModel, explicitPool, resolve)
+	if reqAgent == "" {
+		params.Agent = def.Agent
+	}
+	if reqModel == "" {
+		params.Model = def.Model
+	}
+	if explicitPool == "" {
+		params.Pool = def.Pool
+	}
+	if res.Abstain {
+		params.SelectionMode = selector.ModeAbstained
+		params.SelectionReason += fmt.Sprintf("; registered with %s %s %s",
+			executedField("agent", params.Agent, reqAgent),
+			executedField("model", params.Model, reqModel),
+			executedField("pool", params.Pool, explicitPool))
+		return
+	}
+	params.SelectionMode = selector.ModeRecorded
+	params.SelectionReason += fmt.Sprintf("; record mode executes with defaults %s/%s on pool %s", params.Agent, params.Model, params.Pool)
+}
+
+// executedField describes an executed value and whether the client specified it.
+func executedField(name, executed, requested string) string {
+	switch {
+	case requested != "":
+		return fmt.Sprintf("%s=%s(explicit)", name, executed)
+	case executed != "":
+		return fmt.Sprintf("%s=%s(default)", name, executed)
+	}
+	return name + "=(unset)"
 }
 
 // loadSnapshotForSelector reads the usage snapshot through the same path as the Gate.
