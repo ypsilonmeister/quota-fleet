@@ -90,6 +90,7 @@ type Job struct {
 	AltPools           []string
 	SessionID          string
 	CreatedBy          string
+	SupersedeKey       string
 }
 
 // CreateJobParams holds input fields for CreateJob.
@@ -110,6 +111,9 @@ type CreateJobParams struct {
 	AltPools           []string      `json:"alt_pools,omitempty"`
 	SessionID          string        `json:"session_id,omitempty"`
 	CreatedBy          string        `json:"created_by,omitempty"`
+	// SupersedeKey, when non-empty, cancels older unstarted registrations with the same
+	// key (docs/20).
+	SupersedeKey string `json:"supersede_key,omitempty"`
 }
 
 // CompleteResult holds the outcome of Complete.
@@ -280,6 +284,8 @@ type HeldJob struct {
 	ErrorCount      int
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	// CancelReason is set when the system cancelled the entry (superseded, docs/20).
+	CancelReason string
 }
 
 // HoldJobParams holds input fields for HoldJob.

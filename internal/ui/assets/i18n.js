@@ -248,6 +248,10 @@
       "held.titleAgentHost": "タイトル / agent・host",
       "held.snapshot": "判定スナップショット",
       "held.actions": "操作",
+      "held.ageSeconds": "{seconds}秒経過",
+      "held.ageMinutes": "{minutes}分経過",
+      "held.ageHours": "{hours}時間{minutes}分経過",
+      "held.ageDays": "{days}日{hours}時間経過",
 
       "decisions.title": "ゲート判定履歴",
       "decisions.fetchFailed": "ゲート判定履歴の取得に失敗しました",
@@ -568,6 +572,10 @@
       "held.titleAgentHost": "Title / agent, host",
       "held.snapshot": "Decision snapshot",
       "held.actions": "Actions",
+      "held.ageSeconds": "{seconds}s old",
+      "held.ageMinutes": "{minutes}m old",
+      "held.ageHours": "{hours}h {minutes}m old",
+      "held.ageDays": "{days}d {hours}h old",
 
       "decisions.title": "Gate decision history",
       "decisions.fetchFailed": "Failed to fetch the gate decision history",

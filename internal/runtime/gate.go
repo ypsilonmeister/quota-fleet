@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -189,6 +190,12 @@ func (g *GateChecker) tryReleaseHeld(
 		}, nil
 	}
 
+	// An entry with a supersede_key may have been replaced by a newer registration, so
+	// the check, the job creation and the status change happen in one transaction.
+	if held.Payload.SupersedeKey != "" {
+		return g.releaseKeyedHeld(ctx, held, eval)
+	}
+
 	// Build CreateJobParams using the held payload and the selected soonest-reset pool,
 	// preserving request_id for idempotent job creation.
 	params := held.Payload
@@ -197,20 +204,7 @@ func (g *GateChecker) tryReleaseHeld(
 
 	job, created, err := g.store.CreateJob(ctx, params)
 	if err != nil {
-		updatedHeld, isNew, recErr := g.store.RecordHeldReleaseError(ctx, held.ID, err.Error())
-		if recErr != nil {
-			g.logger.Printf("WARNING: failed to record release error on held %s: %v", held.ID, recErr)
-			updatedHeld = held
-		} else if isNew {
-			g.logger.Printf("WARNING: gate release failed for held %s (selected_pool=%s): %v", held.ID, eval.SelectedPool, err)
-		}
-		return &ReleaseResult{
-			Held:         updatedHeld,
-			Released:     false,
-			SelectedPool: eval.SelectedPool,
-			Evaluation:   eval,
-			Reason:       err.Error(),
-		}, err
+		return g.releaseFailed(ctx, held, eval, err)
 	}
 
 	updatedHeld, err := g.store.MarkHeldReleased(ctx, held.ID, job.ID, eval.SelectedPool)
@@ -227,6 +221,61 @@ func (g *GateChecker) tryReleaseHeld(
 		}, err
 	}
 
+	g.recordReleaseDecision(ctx, held, job, eval)
+
+	return &ReleaseResult{
+		Held:         updatedHeld,
+		Job:          job,
+		Created:      created,
+		Released:     true,
+		SelectedPool: eval.SelectedPool,
+		Evaluation:   eval,
+	}, nil
+}
+
+func (g *GateChecker) releaseKeyedHeld(ctx context.Context, held *store.HeldJob, eval quota.GateEvaluation) (*ReleaseResult, error) {
+	rel, err := g.store.ReleaseKeyedHeld(ctx, held.ID, eval.SelectedPool)
+	if errors.Is(err, store.ErrConflict) {
+		// Cancelled (for example superseded) or released since it was read.
+		return &ReleaseResult{Held: held, SelectedPool: eval.SelectedPool, Evaluation: eval, Reason: err.Error()}, err
+	}
+	if err != nil {
+		return g.releaseFailed(ctx, held, eval, err)
+	}
+	if rel.SupersededReason != "" {
+		g.logger.Printf("gate cancelled held %s instead of releasing it: %s", held.ID, rel.SupersededReason)
+		return &ReleaseResult{Held: rel.Held, Evaluation: eval, Reason: rel.SupersededReason}, nil
+	}
+	g.recordReleaseDecision(ctx, held, rel.Job, eval)
+	return &ReleaseResult{
+		Held:         rel.Held,
+		Job:          rel.Job,
+		Created:      rel.Created,
+		Released:     true,
+		SelectedPool: eval.SelectedPool,
+		Evaluation:   eval,
+	}, nil
+}
+
+// releaseFailed records on the held entry why its job could not be created.
+func (g *GateChecker) releaseFailed(ctx context.Context, held *store.HeldJob, eval quota.GateEvaluation, err error) (*ReleaseResult, error) {
+	updatedHeld, isNew, recErr := g.store.RecordHeldReleaseError(ctx, held.ID, err.Error())
+	if recErr != nil {
+		g.logger.Printf("WARNING: failed to record release error on held %s: %v", held.ID, recErr)
+		updatedHeld = held
+	} else if isNew {
+		g.logger.Printf("WARNING: gate release failed for held %s (selected_pool=%s): %v", held.ID, eval.SelectedPool, err)
+	}
+	return &ReleaseResult{
+		Held:         updatedHeld,
+		Released:     false,
+		SelectedPool: eval.SelectedPool,
+		Evaluation:   eval,
+		Reason:       err.Error(),
+	}, err
+}
+
+func (g *GateChecker) recordReleaseDecision(ctx context.Context, held *store.HeldJob, job *store.Job, eval quota.GateEvaluation) {
 	if _, derr := g.store.RecordGateDecision(ctx, store.GateDecision{
 		JobID:         job.ID,
 		HeldID:        held.ID,
@@ -244,15 +293,6 @@ func (g *GateChecker) tryReleaseHeld(
 	}); derr != nil {
 		g.logger.Printf("WARNING: failed to record release gate decision for held %s -> job #%d: %v", held.ID, job.ID, derr)
 	}
-
-	return &ReleaseResult{
-		Held:         updatedHeld,
-		Job:          job,
-		Created:      created,
-		Released:     true,
-		SelectedPool: eval.SelectedPool,
-		Evaluation:   eval,
-	}, nil
 }
 
 func (g *GateChecker) loadSnapshot() (*quota.Snapshot, error) {

@@ -959,6 +959,54 @@
     );
   }
 
+  // formatAge describes the seconds a held entry has existed.
+  function formatAge(seconds) {
+    if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) {
+      return "-";
+    }
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    if (hours >= 24) {
+      return L("held.ageDays", { days: Math.floor(hours / 24), hours: hours % 24 });
+    }
+    if (hours > 0) {
+      return L("held.ageHours", { hours: hours, minutes: minutes % 60 });
+    }
+    if (minutes > 0) {
+      return L("held.ageMinutes", { minutes: minutes });
+    }
+    return L("held.ageSeconds", { seconds: Math.floor(seconds) });
+  }
+
+  // The cells below tell apart held entries that share a title (docs/20).
+  function heldTitleCell(h, title, detail) {
+    return el("td", null, [
+      el("div", { text: title }),
+      detail ? el("div", { className: "small muted mono", text: detail }) : null,
+      h.supersede_key
+        ? el("div", { className: "small mono", text: "supersede_key: " + h.supersede_key })
+        : null
+    ]);
+  }
+
+  function heldParentCell(h) {
+    if (!h.parent_id) {
+      return el("td", null, [el("span", { className: "muted", text: "-" })]);
+    }
+    return el("td", null, [
+      navLink("/ui/jobs/" + h.parent_id, "#" + h.parent_id, "mono"),
+      " ",
+      statusBadge(h.parent_status)
+    ]);
+  }
+
+  function heldCreatedCell(h) {
+    return el("td", { className: "mono small muted" }, [
+      el("div", { text: formatTime(h.created_at) }),
+      el("div", { text: formatAge(h.age_seconds) })
+    ]);
+  }
+
   function generateRequestID() {
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
       return "ui-" + window.crypto.randomUUID();
@@ -1414,10 +1462,11 @@
       const title = (h.payload && h.payload.title) ? h.payload.title : L("common.noTitle");
       return el("tr", null, [
         el("td", { className: "mono" }, [navLink("/ui/gate/held", h.id)]),
-        el("td", { text: title }),
+        heldTitleCell(h, title, ""),
+        heldParentCell(h),
         el("td", { text: h.pool || "-" }),
         el("td", { text: h.reason || "-" }),
-        el("td", { className: "mono small muted", text: formatTime(h.created_at) })
+        heldCreatedCell(h)
       ]);
     });
     return el("div", { className: "table-wrap" }, [
@@ -1426,6 +1475,7 @@
           el("tr", null, [
             el("th", { text: L("field.heldID") }),
             el("th", { text: L("column.title") }),
+            el("th", { text: L("column.parentJob") }),
             el("th", { text: L("column.pool") }),
             el("th", { text: L("column.holdReason") }),
             el("th", { text: L("column.createdAt") })
@@ -2812,14 +2862,15 @@
         return el("tr", null, [
           el("td", { className: "mono", text: h.id }),
           el("td", null, [statusBadge(h.status)]),
-          el("td", null, [
-            el("div", { text: title }),
-            el("div", { className: "small muted mono", text: agentHost })
-          ]),
+          heldTitleCell(h, title, agentHost),
+          heldParentCell(h),
+          heldCreatedCell(h),
           el("td", { className: "mono small", text: poolsText }),
-          el("td", { text: h.reason || "-" }),
+          el("td", null, [
+            el("div", { text: h.reason || "-" }),
+            h.cancel_reason ? el("div", { className: "small muted", text: h.cancel_reason }) : null
+          ]),
           el("td", { className: "mono small", text: h.snapshot_summary || "-" }),
-          el("td", { className: "mono small muted", text: formatTime(h.created_at) }),
           el("td", null, actionCellChildren)
         ]);
       });
@@ -2831,10 +2882,11 @@
               el("th", { text: L("field.heldID") }),
               el("th", { text: L("column.status") }),
               el("th", { text: L("held.titleAgentHost") }),
+              el("th", { text: L("column.parentJob") }),
+              el("th", { text: L("column.createdAt") }),
               el("th", { text: L("column.pool") }),
               el("th", { text: L("column.holdReason") }),
               el("th", { text: L("held.snapshot") }),
-              el("th", { text: L("column.createdAt") }),
               el("th", { text: L("held.actions") })
             ])
           ]),

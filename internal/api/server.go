@@ -414,6 +414,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		AltPools:           req.AltPools,
 		SessionID:          req.SessionID,
 		CreatedBy:          createdBy,
+		SupersedeKey:       req.SupersedeKey,
 	}
 
 	if s.gateMode == config.GateModeEnforce {
@@ -435,10 +436,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if created {
 		status = http.StatusCreated
 	}
-	writeJSON(w, status, CreateJobResponse{
-		Job:     toJobDTO(job),
-		Created: created,
-	})
+	s.writeJobRegistration(r.Context(), w, status, job, created)
 }
 
 func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, req CreateJobRequest, params store.CreateJobParams) {
@@ -456,10 +454,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 
 	// Idempotency #1: if a job already exists for request_id, return it immediately without holding.
 	if existingJob, err := s.store.GetJobByRequestID(ctx, reqID); err == nil {
-		writeJSON(w, http.StatusOK, CreateJobResponse{
-			Job:     toJobDTO(existingJob),
-			Created: false,
-		})
+		s.writeJobRegistration(ctx, w, http.StatusOK, existingJob, false)
 		return
 	} else if !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -470,19 +465,12 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 	if existingHeld, err := s.store.GetHeldJobByRequestID(ctx, reqID); err == nil {
 		switch existingHeld.Status {
 		case store.HeldStatusHeld:
-			writeJSON(w, http.StatusAccepted, HoldJobResponse{
-				HeldID:  existingHeld.ID,
-				Held:    toHeldJobDTO(existingHeld),
-				Created: false,
-			})
+			s.writeHoldRegistration(ctx, w, existingHeld, false)
 			return
 		case store.HeldStatusReleased:
 			if existingHeld.ReleasedJobID != nil {
 				if job, jerr := s.store.GetJob(ctx, *existingHeld.ReleasedJobID); jerr == nil {
-					writeJSON(w, http.StatusOK, CreateJobResponse{
-						Job:     toJobDTO(job),
-						Created: false,
-					})
+					s.writeJobRegistration(ctx, w, http.StatusOK, job, false)
 					return
 				}
 			}
@@ -516,10 +504,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 		if created {
 			status = http.StatusCreated
 		}
-		writeJSON(w, status, CreateJobResponse{
-			Job:     toJobDTO(job),
-			Created: created,
-		})
+		s.writeJobRegistration(ctx, w, status, job, created)
 		return
 	}
 
@@ -541,10 +526,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 			switch {
 			case errors.Is(err, store.ErrJobAlreadyExists):
 				if existingJob, jerr := s.store.GetJobByRequestID(ctx, reqID); jerr == nil {
-					writeJSON(w, http.StatusOK, CreateJobResponse{
-						Job:     toJobDTO(existingJob),
-						Created: false,
-					})
+					s.writeJobRegistration(ctx, w, http.StatusOK, existingJob, false)
 					return
 				}
 				writeError(w, http.StatusConflict, err.Error())
@@ -555,7 +537,9 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 					resp.Held = toHeldJobDTO(held)
 				}
 				writeJSON(w, http.StatusConflict, resp)
-			case errors.Is(err, store.ErrInvalidInput):
+			case errors.Is(err, store.ErrInvalidInput),
+				errors.Is(err, store.ErrParentNotFound),
+				errors.Is(err, store.ErrParentTerminal):
 				writeError(w, http.StatusBadRequest, err.Error())
 			default:
 				writeError(w, http.StatusInternalServerError, err.Error())
@@ -582,11 +566,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 
-		writeJSON(w, http.StatusAccepted, HoldJobResponse{
-			HeldID:  held.ID,
-			Held:    toHeldJobDTO(held),
-			Created: heldCreated,
-		})
+		s.writeHoldRegistration(ctx, w, held, heldCreated)
 		return
 	}
 
@@ -625,10 +605,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 	if created {
 		status = http.StatusCreated
 	}
-	writeJSON(w, status, CreateJobResponse{
-		Job:     toJobDTO(job),
-		Created: created,
-	})
+	s.writeJobRegistration(ctx, w, status, job, created)
 }
 
 func (s *Server) writeCreateJobError(w http.ResponseWriter, err error) {
@@ -637,9 +614,72 @@ func (s *Server) writeCreateJobError(w http.ResponseWriter, err error) {
 		errors.Is(err, store.ErrParentNotFound),
 		errors.Is(err, store.ErrParentTerminal):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
+}
+
+// jobDetailDTO is toJobDTO plus the supersede relations of a job with a supersede_key.
+func (s *Server) jobDetailDTO(ctx context.Context, job *store.Job) (*JobDTO, error) {
+	dto := toJobDTO(job)
+	if job.SupersedeKey != "" {
+		info, err := s.store.SupersedeInfoForJob(ctx, job.ID)
+		if err != nil {
+			return nil, err
+		}
+		dto.SupersedeDTO = toSupersedeDTO(info)
+	}
+	return dto, nil
+}
+
+// heldDetailDTO is toHeldJobDTO plus age, parent status and supersede relations.
+func (s *Server) heldDetailDTO(ctx context.Context, h *store.HeldJob) (*HeldJobDTO, error) {
+	dto := toHeldJobDTO(h)
+	age := int64(s.nowFn().Sub(h.CreatedAt) / time.Second)
+	age = max(age, 0)
+	dto.AgeSeconds = &age
+	if dto.ParentID != nil {
+		status, err := s.store.GetJobStatus(ctx, *dto.ParentID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			dto.ParentStatus = "missing"
+		case err != nil:
+			return nil, err
+		default:
+			dto.ParentStatus = string(status)
+		}
+	}
+	if dto.SupersedeKey != "" {
+		info, err := s.store.SupersedeInfoForHeld(ctx, h.ID)
+		if err != nil {
+			return nil, err
+		}
+		dto.SupersedeDTO = toSupersedeDTO(info)
+	}
+	return dto, nil
+}
+
+// writeJobRegistration answers POST /jobs with a job. The registration is committed by
+// now, so a failure to read its supersede relations is logged and they are left out.
+func (s *Server) writeJobRegistration(ctx context.Context, w http.ResponseWriter, status int, job *store.Job, created bool) {
+	dto, err := s.jobDetailDTO(ctx, job)
+	if err != nil {
+		s.logger.Printf("WARNING: failed to read supersede relations of job #%d: %v", job.ID, err)
+		dto = toJobDTO(job)
+	}
+	writeJSON(w, status, CreateJobResponse{Job: dto, Created: created})
+}
+
+// writeHoldRegistration answers POST /jobs with a held entry (202).
+func (s *Server) writeHoldRegistration(ctx context.Context, w http.ResponseWriter, held *store.HeldJob, created bool) {
+	dto, err := s.heldDetailDTO(ctx, held)
+	if err != nil {
+		s.logger.Printf("WARNING: failed to read details of held %s: %v", held.ID, err)
+		dto = toHeldJobDTO(held)
+	}
+	writeJSON(w, http.StatusAccepted, HoldJobResponse{HeldID: held.ID, Held: dto, Created: created})
 }
 
 func (s *Server) resolveRequestPool(req CreateJobRequest) string {
@@ -742,8 +782,18 @@ func (s *Server) handleListHeldJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	held := make([]*HeldJobDTO, 0, len(page.Held))
+	for _, h := range page.Held {
+		dto, err := s.heldDetailDTO(r.Context(), h)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		held = append(held, dto)
+	}
+
 	writeJSON(w, http.StatusOK, ListHeldJobsResponse{
-		Held:       toHeldJobDTOs(page.Held),
+		Held:       held,
 		NextCursor: page.NextCursor,
 		HasMore:    page.HasMore,
 	})
@@ -975,7 +1025,12 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, toJobDTO(job))
+	dto, err := s.jobDetailDTO(r.Context(), job)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 func (s *Server) handleClaimJob(w http.ResponseWriter, r *http.Request) {
