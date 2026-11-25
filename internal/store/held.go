@@ -16,7 +16,7 @@ const (
 	heldJobColumns = `
 		id, request_id, status, pool, alt_pools, payload_json, reason, snapshot_summary,
 		released_job_id, released_pool, released_at, cancelled_at,
-		last_error, error_count, created_at, updated_at
+		last_error, error_count, created_at, updated_at, cancel_reason
 	`
 )
 
@@ -27,6 +27,9 @@ const (
 //   - If a held_jobs row already exists with status='held', returns (existing, false, nil).
 //   - If a held_jobs row already exists with status='released', returns ErrJobAlreadyExists.
 //   - If a held_jobs row already exists with status='cancelled', returns (existing, false, ErrConflict).
+//
+// A new hold with a supersede_key cancels older unstarted registrations with the same scope
+// and key in the same transaction (docs/20). It then requires an existing, non-terminal parent.
 func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, error) {
 	reqID := strings.TrimSpace(p.RequestID)
 	if reqID == "" {
@@ -41,6 +44,8 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 
 	payload := p.Payload
 	payload.RequestID = reqID
+	payload.SupersedeScope = strings.TrimSpace(payload.SupersedeScope)
+	payload.SupersedeKey = strings.TrimSpace(payload.SupersedeKey)
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: encode payload: %v", ErrInvalidInput, err)
@@ -55,7 +60,7 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 		created bool
 	)
 
-	err = s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+	err = s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		// Never hold if a real job already exists for this request_id.
 		if _, err := queryJobByRequestID(ctx, conn, reqID); err == nil {
 			return fmt.Errorf("%w: request_id=%s", ErrJobAlreadyExists, reqID)
@@ -88,6 +93,31 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 		}
 		heldID := "held-" + suffix
 		nowStr := formatTime(time.Now().UTC())
+
+		if err := checkSupersedeScope(payload.SupersedeScope, payload.SupersedeKey); err != nil {
+			return err
+		}
+		if key := payload.SupersedeKey; key != "" {
+			if err := checkKeyedDraft(key, payload); err != nil {
+				return err
+			}
+			superseded, err := registerSupersedeTx(ctx, conn, changes, supersedeRegistration{
+				scope: payload.SupersedeScope, key: key, requestID: reqID,
+				owner: strings.TrimSpace(payload.CreatedBy), ownOnly: payload.SupersedeOwnOnly,
+			}, nowStr)
+			if err != nil {
+				return err
+			}
+			if payload.ParentID != nil {
+				if err := checkHoldParentTx(ctx, conn, *payload.ParentID, key, superseded); err != nil {
+					return err
+				}
+			}
+			if _, err := conn.ExecContext(ctx,
+				`UPDATE supersede_registrations SET held_id = ? WHERE request_id = ?`, heldID, reqID); err != nil {
+				return err
+			}
+		}
 
 		_, err = conn.ExecContext(ctx, `
 			INSERT INTO held_jobs (
@@ -285,38 +315,39 @@ func (s *Store) MarkHeldReleased(ctx context.Context, heldID string, jobID int64
 
 	var out *HeldJob
 	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
-		nowStr := formatTime(time.Now().UTC())
-		res, err := conn.ExecContext(ctx, `
-			UPDATE held_jobs
-			SET status = 'released',
-				released_job_id = ?,
-				released_pool = ?,
-				released_at = ?,
-				last_error = '',
-				updated_at = ?
-			WHERE id = ? AND status = 'held'
-		`, jobID, strings.TrimSpace(selectedPool), nowStr, nowStr, heldID)
-		if err != nil {
-			return err
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if affected == 0 {
-			return classifyHeldConflict(ctx, conn, heldID, "held")
-		}
-		h, err := queryHeldJobByID(ctx, conn, heldID)
-		if err != nil {
-			return err
-		}
+		h, err := markHeldReleasedTx(ctx, conn, heldID, jobID, selectedPool)
 		out = h
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+func markHeldReleasedTx(ctx context.Context, conn *sql.Conn, heldID string, jobID int64, selectedPool string) (*HeldJob, error) {
+	nowStr := formatTime(time.Now().UTC())
+	res, err := conn.ExecContext(ctx, `
+		UPDATE held_jobs
+		SET status = 'released',
+			released_job_id = ?,
+			released_pool = ?,
+			released_at = ?,
+			last_error = '',
+			updated_at = ?
+		WHERE id = ? AND status = 'held'
+	`, jobID, strings.TrimSpace(selectedPool), nowStr, nowStr, heldID)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, classifyHeldConflict(ctx, conn, heldID, "held")
+	}
+	return queryHeldJobByID(ctx, conn, heldID)
 }
 
 // RecordHeldReleaseError records a release failure on a held entry while keeping it held.
@@ -425,7 +456,7 @@ func scanHeldJob(s rowScanner) (*HeldJob, error) {
 	err := s.Scan(
 		&h.ID, &h.RequestID, &statusStr, &h.Pool, &altPoolsStr, &payloadStr, &h.Reason, &h.SnapshotSummary,
 		&releasedJobID, &h.ReleasedPool, &releasedAt, &cancelledAt,
-		&h.LastError, &h.ErrorCount, &createdAt, &updatedAt,
+		&h.LastError, &h.ErrorCount, &createdAt, &updatedAt, &h.CancelReason,
 	)
 	if err != nil {
 		return nil, err
@@ -502,6 +533,7 @@ func ensureHeldJobsColumns(ctx context.Context, db *sql.DB) error {
 		{"cancelled_at", `ALTER TABLE held_jobs ADD COLUMN cancelled_at TEXT NULL`},
 		{"last_error", `ALTER TABLE held_jobs ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`},
 		{"error_count", `ALTER TABLE held_jobs ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0`},
+		{"cancel_reason", `ALTER TABLE held_jobs ADD COLUMN cancel_reason TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, add := range additions {
 		if _, ok := existing[add.name]; ok {

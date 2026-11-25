@@ -105,6 +105,14 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs.created_by: %w", err)
 	}
+	if err := ensureSupersedeKeyColumn(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs.supersede_key: %w", err)
+	}
+	if err := ensureSupersedeScopeColumn(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs.supersede_scope: %w", err)
+	}
 	if err := ensureSelectionColumns(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs selection columns: %w", err)
@@ -290,6 +298,24 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 		return nil, false, fmt.Errorf("%w: title must not be empty", ErrInvalidInput)
 	}
 
+	var (
+		result  *Job
+		created bool
+	)
+
+	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
+		var err error
+		result, created, err = s.createJobTx(ctx, conn, changes, p)
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return result, created, nil
+}
+
+// createJobTx is the body of CreateJob inside an open job transaction.
+func (s *Store) createJobTx(ctx context.Context, conn *sql.Conn, changes *[]statusChange, p CreateJobParams) (*Job, bool, error) {
 	altPoolsJSON, err := encodeAltPools(p.AltPools)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: encode alt_pools: %v", ErrInvalidInput, err)
@@ -299,115 +325,146 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 		return nil, false, fmt.Errorf("%w: encode worktree_spec: %v", ErrInvalidInput, err)
 	}
 
-	var (
-		result  *Job
-		created bool
-	)
+	// Idempotency check by request_id.
+	existing, err := queryJobByRequestID(ctx, conn, p.RequestID)
+	if err == nil {
+		return existing, false, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, false, err
+	}
 
-	err = s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
-		// Idempotency check by request_id.
-		existing, err := queryJobByRequestID(ctx, conn, p.RequestID)
-		if err == nil {
-			result = existing
-			created = false
-			return nil
-		}
-		if !errors.Is(err, ErrNotFound) {
-			return err
-		}
+	now := time.Now().UTC()
+	nowStr := formatTime(now)
 
-		// Determine initial status based on parent_id / Draft.
-		var status Status
-		if p.ParentID == nil {
-			if p.Draft {
-				status = StatusDraft
-			} else {
-				status = StatusQueued
-			}
+	if err := checkCancelledHoldTx(ctx, conn, p); err != nil {
+		return nil, false, err
+	}
+
+	// Supersede before looking at the parent, so a parent cancelled by this registration
+	// rejects it (and rolls the cancellations back).
+	supersedeScope := strings.TrimSpace(p.SupersedeScope)
+	supersedeKey := strings.TrimSpace(p.SupersedeKey)
+	if supersedeScope == "" && supersedeKey == "" {
+		// A request_id registered by a keyed hold stays registered when it is sent again
+		// without the scope and key, so superseded work cannot come back that way.
+		reg, err := querySupersedeRegistration(ctx, conn, p.RequestID)
+		switch {
+		case err == nil:
+			supersedeScope, supersedeKey = reg.scope, reg.key
+		case !errors.Is(err, ErrNotFound):
+			return nil, false, err
+		}
+	}
+	if err := checkSupersedeScope(supersedeScope, supersedeKey); err != nil {
+		return nil, false, err
+	}
+	if err := checkKeyedDraft(supersedeKey, p); err != nil {
+		return nil, false, err
+	}
+	var superseded map[int64]bool
+	if supersedeKey != "" {
+		superseded, err = registerSupersedeTx(ctx, conn, changes, supersedeRegistration{
+			scope: supersedeScope, key: supersedeKey, requestID: p.RequestID,
+			owner: strings.TrimSpace(p.CreatedBy), ownOnly: p.SupersedeOwnOnly,
+		}, nowStr)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+
+	// Determine initial status based on parent_id / Draft.
+	var status Status
+	if p.ParentID == nil {
+		if p.Draft {
+			status = StatusDraft
 		} else {
-			var parentStatusStr string
-			err := conn.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, *p.ParentID).Scan(&parentStatusStr)
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("%w: parent_id=%d", ErrParentNotFound, *p.ParentID)
-			}
-			if err != nil {
-				return err
-			}
-			parentStatus := Status(parentStatusStr)
-			switch parentStatus {
-			case StatusFailed, StatusCancelled:
-				return fmt.Errorf("%w: parent_id=%d has status %s", ErrParentTerminal, *p.ParentID, parentStatus)
-			case StatusDone:
-				status = StatusQueued
-			default:
-				status = StatusWaiting
+			status = StatusQueued
+		}
+	} else {
+		var parentStatusStr string
+		err := conn.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, *p.ParentID).Scan(&parentStatusStr)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, fmt.Errorf("%w: parent_id=%d", ErrParentNotFound, *p.ParentID)
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		if supersedeKey != "" {
+			if err := checkKeyedParentTx(ctx, conn, *p.ParentID, supersedeKey, superseded); err != nil {
+				return nil, false, err
 			}
 		}
-
-		now := time.Now().UTC()
-		nowStr := formatTime(now)
-
-		var parentArg any
-		if p.ParentID != nil {
-			parentArg = *p.ParentID
+		parentStatus := Status(parentStatusStr)
+		switch parentStatus {
+		case StatusFailed, StatusCancelled:
+			return nil, false, fmt.Errorf("%w: parent_id=%d has status %s", ErrParentTerminal, *p.ParentID, parentStatus)
+		case StatusDone:
+			status = StatusQueued
+		default:
+			status = StatusWaiting
 		}
+	}
 
-		res, err := conn.ExecContext(ctx, `
-			INSERT INTO jobs (
-				request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
-				instructions, acceptance_criteria, parent_id,
-				claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-				created_at, updated_at, model, pool, alt_pools, session_id, created_by,
-				selected_agent, selected_model, selected_pool, selection_reason, selection_mode
-			) VALUES (
-				?, ?, ?, ?, ?, ?, ?, ?,
-				?, ?, ?,
-				'', NULL, 0, '', '', NULL,
-				?, ?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?, ?
-			)
-		`,
-			p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
-			p.Instructions, p.AcceptanceCriteria, parentArg,
-			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy),
-			p.SelectedAgent, p.SelectedModel, p.SelectedPool, p.SelectionReason, p.SelectionMode,
+	var parentArg any
+	if p.ParentID != nil {
+		parentArg = *p.ParentID
+	}
+
+	res, err := conn.ExecContext(ctx, `
+		INSERT INTO jobs (
+			request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
+			instructions, acceptance_criteria, parent_id,
+			claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
+			created_at, updated_at, model, pool, alt_pools, session_id, created_by, supersede_key, supersede_scope,
+			selected_agent, selected_model, selected_pool, selection_reason, selection_mode
+		) VALUES (
+			?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?,
+			'', NULL, 0, '', '', NULL,
+			?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?
 		)
-		if err != nil {
-			if isUniqueConstraintError(err) {
-				existing, rerr := queryJobByRequestID(ctx, conn, p.RequestID)
-				if rerr == nil {
-					result = existing
-					created = false
-					return nil
-				}
-			}
-			return err
-		}
-
-		jobID, err := res.LastInsertId()
-		if err != nil {
-			return err
-		}
-
-		if status == StatusQueued {
-			if err := s.insertOutboxTx(ctx, conn, jobID, "create", "queued", nowStr); err != nil {
-				return err
+	`,
+		p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
+		p.Instructions, p.AcceptanceCriteria, parentArg,
+		nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy), supersedeKey, supersedeScope,
+		p.SelectedAgent, p.SelectedModel, p.SelectedPool, p.SelectionReason, p.SelectionMode,
+	)
+	if err != nil {
+		if isUniqueConstraintError(err) {
+			existing, rerr := queryJobByRequestID(ctx, conn, p.RequestID)
+			if rerr == nil {
+				return existing, false, nil
 			}
 		}
+		return nil, false, err
+	}
 
-		job, err := queryJobByID(ctx, conn, jobID)
-		if err != nil {
-			return err
-		}
-		result = job
-		created = true
-		*changes = append(*changes, statusChange{jobID: jobID, next: status})
-		return nil
-	})
+	jobID, err := res.LastInsertId()
 	if err != nil {
 		return nil, false, err
 	}
-	return result, created, nil
+
+	if status == StatusQueued {
+		if err := s.insertOutboxTx(ctx, conn, jobID, "create", "queued", nowStr); err != nil {
+			return nil, false, err
+		}
+	}
+
+	if supersedeKey != "" {
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE supersede_registrations SET job_id = ? WHERE request_id = ?`, jobID, p.RequestID); err != nil {
+			return nil, false, err
+		}
+	}
+
+	job, err := queryJobByID(ctx, conn, jobID)
+	if err != nil {
+		return nil, false, err
+	}
+	*changes = append(*changes, statusChange{jobID: jobID, next: status})
+	return job, true, nil
 }
 
 // Claim atomically checks that claimed count < maxClaimed and claims the oldest queued job
@@ -837,6 +894,11 @@ func (s *Store) Requeue(ctx context.Context, jobID int64) (*Job, error) {
 		if affected == 0 {
 			return classifyStatusConflict(ctx, conn, jobID, "failed|cancelled")
 		}
+		// A requeued job is live again, so it is no longer reported as superseded.
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE supersede_registrations SET superseded_by_seq = NULL WHERE job_id = ?`, jobID); err != nil {
+			return err
+		}
 
 		if err := s.insertOutboxTx(ctx, conn, jobID, "requeue", "queued", nowStr); err != nil {
 			return err
@@ -954,6 +1016,16 @@ func (s *Store) RejectInvalid(ctx context.Context, jobID int64, reason string) (
 // GetJob returns a job by ID, or ErrNotFound if it does not exist.
 func (s *Store) GetJob(ctx context.Context, jobID int64) (*Job, error) {
 	return queryJobByID(ctx, s.readDB, jobID)
+}
+
+// GetJobStatus returns only the status of a job, or ErrNotFound if it does not exist.
+func (s *Store) GetJobStatus(ctx context.Context, jobID int64) (Status, error) {
+	var status string
+	err := s.readDB.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, jobID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return Status(status), err
 }
 
 // GetJobByRequestID returns a job by request_id, or ErrNotFound if it does not exist.
@@ -1551,7 +1623,7 @@ const jobColumns = `
 	id, request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
 	instructions, acceptance_criteria, parent_id,
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-	created_at, updated_at, model, pool, alt_pools, session_id, created_by,
+	created_at, updated_at, model, pool, alt_pools, session_id, created_by, supersede_key, supersede_scope,
 	selected_agent, selected_model, selected_pool, selection_reason, selection_mode
 `
 
@@ -1590,7 +1662,7 @@ func scanJob(s rowScanner) (*Job, error) {
 		&j.Agent, &j.Host, &j.Workdir, &worktreeSpecStr, &j.TargetRef,
 		&j.Instructions, &j.AcceptanceCriteria, &parentID,
 		&j.ClaimedBy, &claimedAt, &j.Attempts, &j.ResultText, &j.LastError, &deliveredAt,
-		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy,
+		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy, &j.SupersedeKey, &j.SupersedeScope,
 		&j.SelectedAgent, &j.SelectedModel, &j.SelectedPool, &j.SelectionReason, &j.SelectionMode,
 	)
 	if err != nil {
@@ -1901,6 +1973,14 @@ func ensureWorktreeSpecColumn(ctx context.Context, db *sql.DB) error {
 
 func ensureCreatedByColumn(ctx context.Context, db *sql.DB) error {
 	return ensureJobsColumn(ctx, db, "created_by", `ALTER TABLE jobs ADD COLUMN created_by TEXT NOT NULL DEFAULT ''`)
+}
+
+func ensureSupersedeKeyColumn(ctx context.Context, db *sql.DB) error {
+	return ensureJobsColumn(ctx, db, "supersede_key", `ALTER TABLE jobs ADD COLUMN supersede_key TEXT NOT NULL DEFAULT ''`)
+}
+
+func ensureSupersedeScopeColumn(ctx context.Context, db *sql.DB) error {
+	return ensureJobsColumn(ctx, db, "supersede_scope", `ALTER TABLE jobs ADD COLUMN supersede_scope TEXT NOT NULL DEFAULT ''`)
 }
 
 // ensureSelectionColumns adds the Selector record columns (docs/19) to pre-existing databases.

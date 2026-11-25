@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     selected_model TEXT NOT NULL DEFAULT '',
     selected_pool TEXT NOT NULL DEFAULT '',
     selection_reason TEXT NOT NULL DEFAULT '',
-    selection_mode TEXT NOT NULL DEFAULT ''
+    selection_mode TEXT NOT NULL DEFAULT '',
+    supersede_key TEXT NOT NULL DEFAULT '',
+    supersede_scope TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id);
@@ -95,8 +97,27 @@ CREATE TABLE IF NOT EXISTS held_jobs (
     last_error TEXT NOT NULL DEFAULT '',
     error_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    cancel_reason TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS supersede_registrations (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    supersede_scope TEXT NOT NULL,
+    supersede_key TEXT NOT NULL,
+    request_id TEXT NOT NULL UNIQUE,
+    held_id TEXT NOT NULL DEFAULT '',
+    job_id INTEGER NULL REFERENCES jobs(id),
+    superseded_by_seq INTEGER NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    own_only INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_supersede_key_seq ON supersede_registrations(supersede_key, seq);
+CREATE INDEX IF NOT EXISTS idx_supersede_job_id ON supersede_registrations(job_id);
+CREATE INDEX IF NOT EXISTS idx_supersede_held_id ON supersede_registrations(held_id);
+CREATE INDEX IF NOT EXISTS idx_supersede_by_seq ON supersede_registrations(superseded_by_seq);
 
 CREATE TABLE IF NOT EXISTS burndown_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

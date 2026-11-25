@@ -90,6 +90,8 @@ type Job struct {
 	AltPools           []string
 	SessionID          string
 	CreatedBy          string
+	SupersedeKey       string
+	SupersedeScope     string
 
 	// Selector record (docs/19). Empty when the Selector did not run (mode off).
 	SelectedAgent   string
@@ -117,6 +119,15 @@ type CreateJobParams struct {
 	AltPools           []string      `json:"alt_pools,omitempty"`
 	SessionID          string        `json:"session_id,omitempty"`
 	CreatedBy          string        `json:"created_by,omitempty"`
+	// Registering with a SupersedeKey (the role) cancels older unstarted registrations with
+	// the same scope and key (docs/20). SupersedeScope optionally names the target and
+	// needs a key; registrations without it share one default scope.
+	SupersedeScope string `json:"supersede_scope,omitempty"`
+	SupersedeKey   string `json:"supersede_key,omitempty"`
+	// SupersedeOwnOnly limits that to registrations with the same CreatedBy, for a caller
+	// that may register jobs but not cancel them. It is recorded with the registration,
+	// not in a held payload.
+	SupersedeOwnOnly bool `json:"-"`
 
 	SelectedAgent   string `json:"selected_agent,omitempty"`
 	SelectedModel   string `json:"selected_model,omitempty"`
@@ -293,6 +304,8 @@ type HeldJob struct {
 	ErrorCount      int
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	// CancelReason is set when the system cancelled the entry (superseded, docs/20).
+	CancelReason string
 }
 
 // HoldJobParams holds input fields for HoldJob.

@@ -40,6 +40,43 @@ type JobDTO struct {
 	SelectedPool    string `json:"selected_pool,omitempty"`
 	SelectionReason string `json:"selection_reason,omitempty"`
 	SelectionMode   string `json:"selection_mode,omitempty"`
+	SupersedeKey       string     `json:"supersede_key,omitempty"`
+	SupersedeScope     string     `json:"supersede_scope,omitempty"`
+	// SupersedeDTO is filled by POST /jobs and GET /jobs/{id}, not by job lists.
+	SupersedeDTO
+}
+
+// SupersedeDTO describes which registrations a job or held entry replaced, and which one
+// replaced it (docs/20).
+type SupersedeDTO struct {
+	SupersededJobIDs  []int64          `json:"superseded_job_ids,omitempty"`
+	SupersededHeldIDs []string         `json:"superseded_held_ids,omitempty"`
+	SupersededBy      *SupersedeRefDTO `json:"superseded_by,omitempty"`
+}
+
+// SupersedeRefDTO names a job, or a held entry that has no job.
+type SupersedeRefDTO struct {
+	JobID  int64  `json:"job_id,omitempty"`
+	HeldID string `json:"held_id,omitempty"`
+}
+
+func toSupersedeDTO(info *store.SupersedeInfo) SupersedeDTO {
+	var dto SupersedeDTO
+	for _, ref := range info.Superseded {
+		if ref.JobID > 0 {
+			dto.SupersededJobIDs = append(dto.SupersededJobIDs, ref.JobID)
+		} else {
+			dto.SupersededHeldIDs = append(dto.SupersededHeldIDs, ref.HeldID)
+		}
+	}
+	if by := info.SupersededBy; by != nil {
+		if by.JobID > 0 {
+			dto.SupersededBy = &SupersedeRefDTO{JobID: by.JobID}
+		} else {
+			dto.SupersededBy = &SupersedeRefDTO{HeldID: by.HeldID}
+		}
+	}
+	return dto
 }
 
 func toJobDTO(j *store.Job) *JobDTO {
@@ -71,6 +108,8 @@ func toJobDTO(j *store.Job) *JobDTO {
 		Pool:               j.Pool,
 		SessionID:          j.SessionID,
 		CreatedBy:          j.CreatedBy,
+		SupersedeKey:       j.SupersedeKey,
+		SupersedeScope:     j.SupersedeScope,
 	}
 	if len(j.AltPools) > 0 {
 		dto.AltPools = append([]string(nil), j.AltPools...)
@@ -116,6 +155,8 @@ type CreateJobRequest struct {
 	Pool               string   `json:"pool"`
 	AltPools           []string `json:"alt_pools"`
 	SessionID          string   `json:"session_id"`
+	SupersedeKey       string   `json:"supersede_key"`
+	SupersedeScope     string   `json:"supersede_scope"`
 	// Selector hints (docs/19). Optional.
 	Role   string `json:"role"`
 	Weight string `json:"weight"`
@@ -257,6 +298,15 @@ type HeldJobDTO struct {
 	ErrorCount      int                   `json:"error_count,omitempty"`
 	CreatedAt       time.Time             `json:"created_at"`
 	UpdatedAt       time.Time             `json:"updated_at"`
+	CancelReason    string                `json:"cancel_reason,omitempty"`
+	SupersedeKey    string                `json:"supersede_key,omitempty"`
+	SupersedeScope  string                `json:"supersede_scope,omitempty"`
+	ParentID        *int64                `json:"parent_id,omitempty"`
+	// ParentStatus, AgeSeconds and SupersedeDTO are filled by GET /gate/held and by the
+	// 202 response of POST /jobs. ParentStatus is "missing" when the parent does not exist.
+	ParentStatus string `json:"parent_status,omitempty"`
+	AgeSeconds   *int64 `json:"age_seconds,omitempty"`
+	SupersedeDTO
 }
 
 func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
@@ -279,19 +329,15 @@ func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
 		ErrorCount:      h.ErrorCount,
 		CreatedAt:       h.CreatedAt,
 		UpdatedAt:       h.UpdatedAt,
+		CancelReason:    h.CancelReason,
+		SupersedeKey:    h.Payload.SupersedeKey,
+		SupersedeScope:  h.Payload.SupersedeScope,
+		ParentID:        h.Payload.ParentID,
 	}
 	if len(h.AltPools) > 0 {
 		dto.AltPools = append([]string(nil), h.AltPools...)
 	}
 	return dto
-}
-
-func toHeldJobDTOs(items []*store.HeldJob) []*HeldJobDTO {
-	out := make([]*HeldJobDTO, 0, len(items))
-	for _, h := range items {
-		out = append(out, toHeldJobDTO(h))
-	}
-	return out
 }
 
 // HoldJobResponse is returned with 202 Accepted by POST /jobs when Quota Gate holds a job.
