@@ -25,6 +25,8 @@ const path = require("path");
 const dir = process.argv[1];
 const ORIGIN = "http://ui.test";
 const KEY = "qf-jobs-view";
+const CHAIN_STATUSES = ["draft", "queued", "claimed", "waiting", "done", "failed", "cancelled"];
+Object.defineProperty(globalThis, "navigator", { value: { language: "ja-JP" }, configurable: true });
 
 class El {
   constructor(tag) {
@@ -112,10 +114,11 @@ async function open(href, local) {
     const body = url.startsWith("/jobs") ? { jobs: [] } : { counts: {}, total: 0 };
     return { ok: true, status: 200, text: async () => JSON.stringify(body) };
   };
-  for (const name of ["direction.js", "notify.js", "app.js"]) {
+  for (const name of ["direction.js", "i18n.js", "notify.js", "app.js"]) {
     delete require.cache[path.join(dir, name)];
   }
   globalThis.__qfDirection = require(path.join(dir, "direction.js"));
+  require(path.join(dir, "i18n.js"));
   require(path.join(dir, "notify.js"));
   require(path.join(dir, "app.js"));
   await settle();
@@ -166,10 +169,14 @@ async function open(href, local) {
       const pressed = nodes().filter((n) => n.attrs["aria-pressed"] === "true").map((n) => n.textContent);
       assert.strictEqual(pressed.length, 1, "one active view: " + pressed);
       const view = { "チェーン表示": "chain", "フラット表示": "flat" }[pressed[0]];
+      assert.ok(view, "unknown active view label: " + pressed[0]);
       const tab = nodes().find((n) => n.className === "tab active");
       const status = tab.children[0].textContent;
       const lists = requests.filter((u) => u.startsWith("/jobs?"));
-      assert.strictEqual(lists.length, view === "chain" ? 7 : 1, view + " requests: " + lists);
+      const expected = view === "chain"
+        ? CHAIN_STATUSES.map((st) => "/jobs?status=" + st + "&desc=true&limit=100")
+        : ["/jobs?status=" + status + "&desc=true&limit=50"];
+      assert.deepStrictEqual(lists.sort(), expected.sort(), view + " requests");
       return view + " " + status;
     }
   };
