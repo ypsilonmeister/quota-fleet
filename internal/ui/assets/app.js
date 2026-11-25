@@ -2059,6 +2059,11 @@
       kv(L("field.pool"), job.pool),
       kv(L("field.altPools"), (Array.isArray(job.alt_pools) && job.alt_pools.length > 0) ? job.alt_pools.join(", ") : "-"),
       kv(L("column.parentJob"), parentNode),
+      kv(L("field.selectionMode"), job.selection_mode || "-"),
+      kv(L("field.selectedTarget"), job.selection_mode
+        ? el("span", { className: "mono", text: [job.selected_agent, job.selected_model, job.selected_pool].map(function (v) { return v || "-"; }).join(" / ") })
+        : "-"),
+      kv(L("field.selectionReason"), job.selection_reason || "-"),
       kv(L("field.targetRef"), el("span", { className: "mono", text: job.target_ref || "-" })),
       kv(L("field.worktreeSpec"), el("span", { className: "mono", text: wtText })),
       kv(L("field.attempts"), String(job.attempts || 0)),

@@ -26,7 +26,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     pool TEXT NOT NULL DEFAULT '',
     alt_pools TEXT NOT NULL DEFAULT '[]',
     session_id TEXT NOT NULL DEFAULT '',
-    created_by TEXT NOT NULL DEFAULT ''
+    created_by TEXT NOT NULL DEFAULT '',
+    selected_agent TEXT NOT NULL DEFAULT '',
+    selected_model TEXT NOT NULL DEFAULT '',
+    selected_pool TEXT NOT NULL DEFAULT '',
+    selection_reason TEXT NOT NULL DEFAULT '',
+    selection_mode TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id);
