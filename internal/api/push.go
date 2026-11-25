@@ -31,6 +31,10 @@ func (s *Server) handleCreatePushSubscription(w http.ResponseWriter, r *http.Req
 	sub.TokenID = principal.tokenID
 	created, err := s.store.UpsertPushSubscription(r.Context(), sub)
 	if err != nil {
+		if errors.Is(err, store.ErrPushEndpointDeleted) {
+			writeError(w, http.StatusGone, err.Error())
+			return
+		}
 		if errors.Is(err, store.ErrInvalidInput) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return

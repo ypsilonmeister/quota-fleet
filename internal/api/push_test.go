@@ -209,3 +209,60 @@ func TestPushNeedsTokenAndIsOffByDefault(t *testing.T) {
 		}
 	}
 }
+
+// The registration is on its way before the removal, and the server reads it afterwards.
+func TestPushLateRegistrationDoesNotRestoreDeletedSubscription(t *testing.T) {
+	for name, registeredBefore := range map[string]bool{"registering again": true, "first registration": false} {
+		t.Run(name, func(t *testing.T) {
+			ts, st := newPushAPI(t, testVAPIDPublicKey, true)
+			const endpoint = "https://push.example/s/late"
+			sub := subscriptionJSON(t, endpoint)
+			if registeredBefore {
+				if code, body := pushCall(t, ts, "POST", "/push/subscriptions", "tok-subscriber", sub); code != http.StatusCreated {
+					t.Fatalf("register = %d %s", code, body)
+				}
+			}
+
+			reader, writer := io.Pipe()
+			defer writer.Close()
+			req, err := http.NewRequest("POST", ts.URL+"/push/subscriptions", reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer tok-subscriber")
+			type answer struct {
+				code int
+				err  error
+			}
+			late := make(chan answer, 1)
+			go func() {
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					late <- answer{err: err}
+					return
+				}
+				resp.Body.Close()
+				late <- answer{code: resp.StatusCode}
+			}()
+			if _, err := io.WriteString(writer, sub[:1]); err != nil {
+				t.Fatalf("send the start of the registration: %v", err)
+			}
+
+			code, body := pushCall(t, ts, "DELETE", "/push/subscriptions", "tok-subscriber", `{"endpoint":"`+endpoint+`"}`)
+			if code != http.StatusOK {
+				t.Fatalf("delete = %d %s", code, body)
+			}
+			if _, err := io.WriteString(writer, sub[1:]); err != nil {
+				t.Fatalf("send the rest of the registration: %v", err)
+			}
+			writer.Close()
+
+			if got := <-late; got.err != nil || got.code != http.StatusGone {
+				t.Errorf("late registration = %d, %v, want 410", got.code, got.err)
+			}
+			if stored, err := st.ListPushSubscriptions(context.Background()); err != nil || len(stored) != 0 {
+				t.Errorf("stored = %+v, %v, want none", stored, err)
+			}
+		})
+	}
+}

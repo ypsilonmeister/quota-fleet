@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,9 +24,20 @@ type PushSubscription struct {
 	TokenID string
 }
 
+// ErrPushEndpointDeleted reports a registration of an endpoint that was deleted.
+var ErrPushEndpointDeleted = errors.New("push endpoint was deleted; subscribe again for a new one")
+
+// endpointHash identifies a deleted endpoint without keeping its URL, which lets whoever
+// knows it send to the browser.
+func endpointHash(endpoint string) string {
+	sum := sha256.Sum256([]byte(endpoint))
+	return hex.EncodeToString(sum[:])
+}
+
 // UpsertPushSubscription stores sub, keyed by its endpoint. Registering a known endpoint
 // again replaces its keys, user agent and token and keeps created_at. created reports whether the
-// endpoint was new. sub.CreatedAt is ignored.
+// endpoint was new. sub.CreatedAt is ignored. An endpoint removed with
+// DeletePushSubscription is refused with ErrPushEndpointDeleted.
 func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription) (created bool, err error) {
 	if strings.TrimSpace(sub.Endpoint) == "" || sub.P256dh == "" || sub.Auth == "" {
 		return false, fmt.Errorf("%w: push subscription needs endpoint, p256dh and auth", ErrInvalidInput)
@@ -32,7 +45,15 @@ func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription
 	now := formatTime(time.Now().UTC())
 	err = s.withImmediateTx(ctx, func(conn *sql.Conn) error {
 		var found int
-		err := conn.QueryRowContext(ctx, `SELECT 1 FROM push_subscriptions WHERE endpoint = ?`, sub.Endpoint).Scan(&found)
+		err := conn.QueryRowContext(ctx, `SELECT 1 FROM push_deleted_endpoints WHERE endpoint_hash = ?`,
+			endpointHash(sub.Endpoint)).Scan(&found)
+		if err == nil {
+			return ErrPushEndpointDeleted
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		err = conn.QueryRowContext(ctx, `SELECT 1 FROM push_subscriptions WHERE endpoint = ?`, sub.Endpoint).Scan(&found)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -53,34 +74,52 @@ func (s *Store) UpsertPushSubscription(ctx context.Context, sub PushSubscription
 }
 
 // DeletePushSubscription removes the subscription for endpoint and reports whether there
-// was one.
+// was one. Either way the endpoint is not registered again: a registration sent before
+// this call may only arrive after it.
 func (s *Store) DeletePushSubscription(ctx context.Context, endpoint string) (bool, error) {
-	return s.deletePushSubscriptions(ctx, `DELETE FROM push_subscriptions WHERE endpoint = ?`, endpoint)
-}
-
-// DeleteExpiredPushSubscription removes sub after its push service reported it gone. A
-// subscription registered again with other keys in the meantime is kept.
-func (s *Store) DeleteExpiredPushSubscription(ctx context.Context, sub PushSubscription) (bool, error) {
-	return s.deletePushSubscriptions(ctx,
-		`DELETE FROM push_subscriptions WHERE endpoint = ? AND p256dh = ? AND auth = ?`,
-		sub.Endpoint, sub.P256dh, sub.Auth)
-}
-
-func (s *Store) deletePushSubscriptions(ctx context.Context, query string, args ...any) (bool, error) {
 	var deleted bool
 	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
-		res, err := conn.ExecContext(ctx, query, args...)
+		_, err := conn.ExecContext(ctx, `
+			INSERT INTO push_deleted_endpoints (endpoint_hash, deleted_at) VALUES (?, ?)
+			ON CONFLICT(endpoint_hash) DO NOTHING
+		`, endpointHash(endpoint), formatTime(time.Now().UTC()))
 		if err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
-		deleted = n > 0
+		deleted, err = execDeleted(ctx, conn, `DELETE FROM push_subscriptions WHERE endpoint = ?`, endpoint)
 		return err
 	})
 	if err != nil {
 		return false, err
 	}
 	return deleted, nil
+}
+
+// DeleteExpiredPushSubscription removes sub after its push service reported it gone. A
+// subscription registered again with other keys in the meantime is kept.
+func (s *Store) DeleteExpiredPushSubscription(ctx context.Context, sub PushSubscription) (bool, error) {
+	var deleted bool
+	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
+		var err error
+		deleted, err = execDeleted(ctx, conn,
+			`DELETE FROM push_subscriptions WHERE endpoint = ? AND p256dh = ? AND auth = ?`,
+			sub.Endpoint, sub.P256dh, sub.Auth)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return deleted, nil
+}
+
+// execDeleted runs a DELETE and reports whether it removed a row.
+func execDeleted(ctx context.Context, conn *sql.Conn, query string, args ...any) (bool, error) {
+	res, err := conn.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // ListPushSubscriptions returns every stored subscription, oldest first.

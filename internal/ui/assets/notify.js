@@ -721,14 +721,28 @@
       if (!options.isEnabled()) {
         return "off";
       }
+      function subscribe() {
+        return within(manager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+      }
       if (!subscription) {
-        subscription = await within(manager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: key
-        }));
+        subscription = await subscribe();
       }
       // Sent every time: the server may have dropped it, and registering is idempotent.
-      const saved = await call("POST", "/push/subscriptions", subscription.toJSON());
+      let saved = await call("POST", "/push/subscriptions", subscription.toJSON());
+      if (saved.status === 410) {
+        // The server was told to delete this endpoint and never takes it back, so that a
+        // late registration cannot undo a removal. Only a new subscription can be used.
+        await release(manager, subscription);
+        if (!options.isEnabled()) {
+          return "off";
+        }
+        // Another tab may have replaced it already.
+        const current = await within(manager.getSubscription());
+        if (current && current.endpoint === subscription.endpoint) {
+          return "error";
+        }
+        saved = await call("POST", "/push/subscriptions", (current || await subscribe()).toJSON());
+      }
       return saved.ok ? "active" : failure(saved.status);
     }
 

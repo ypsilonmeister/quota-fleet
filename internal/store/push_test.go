@@ -128,3 +128,53 @@ func TestJobEventsClosed(t *testing.T) {
 		t.Fatal("not closed after CloseJobEvents")
 	}
 }
+
+// A deleted endpoint is not registered again, however late the registration arrives, so
+// that one overtaken by the removal cannot bring the subscription back (docs/16).
+func TestPushDeletedEndpointStaysDeleted(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fleet.db")
+	st, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	sub := func(endpoint string) PushSubscription {
+		return PushSubscription{Endpoint: endpoint, P256dh: "k", Auth: "a", TokenID: "t"}
+	}
+	registered := sub("https://push.example/registered")
+	// The removal of the other one arrives before its first registration does.
+	unseen := sub("https://push.example/unseen")
+	if _, err := st.UpsertPushSubscription(ctx, registered); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	for endpoint, want := range map[string]bool{registered.Endpoint: true, unseen.Endpoint: false} {
+		// Deleting twice is harmless.
+		for _, existed := range []bool{want, false} {
+			if deleted, err := st.DeletePushSubscription(ctx, endpoint); err != nil || deleted != existed {
+				t.Fatalf("delete %s = %v, %v, want %v", endpoint, deleted, err, existed)
+			}
+		}
+	}
+
+	// It still holds after a restart.
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if st, err = Open(ctx, path, Options{}); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	for _, late := range []PushSubscription{registered, unseen} {
+		late.P256dh, late.TokenID = "other-key", "other-token"
+		if created, err := st.UpsertPushSubscription(ctx, late); !errors.Is(err, ErrPushEndpointDeleted) || created {
+			t.Errorf("late upsert of %s = %v, %v, want ErrPushEndpointDeleted", late.Endpoint, created, err)
+		}
+	}
+	if got, err := st.ListPushSubscriptions(ctx); err != nil || len(got) != 0 {
+		t.Errorf("list = %+v, %v", got, err)
+	}
+	if created, err := st.UpsertPushSubscription(ctx, sub("https://push.example/new")); err != nil || !created {
+		t.Errorf("another endpoint = %v, %v", created, err)
+	}
+}

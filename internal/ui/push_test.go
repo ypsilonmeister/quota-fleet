@@ -103,7 +103,9 @@ function fixture(opts) {
       log.requests.push({ method: init.method, url, headers: init.headers,
         body: init.body === undefined ? undefined : JSON.parse(init.body) });
       if (env.offline) throw new TypeError("offline");
-      const status = env.status[init.method];
+      // A list answers one call after another.
+      const answer = env.status[init.method];
+      const status = Array.isArray(answer) ? answer.shift() : answer;
       return { status, ok: status >= 200 && status < 300, json: async () => ({ public_key: KEY_TEXT }) };
     }
   });
@@ -256,6 +258,54 @@ async function main() {
       assert.deepStrictEqual(g.calls(), [GET, POST]);
       assert.strictEqual(g.log.subscribes.length, 0);
     }
+  }
+  {
+    // The server never takes back an endpoint it was told to delete (410): the
+    // subscription is replaced and registered.
+    const f = fixture({ existing: KEY });
+    f.env.status.POST = [410, 201];
+    assert.strictEqual((await f.controller.sync()).state, "active");
+    assert.deepStrictEqual(f.calls(), [GET, POST, POST]);
+    assert.deepStrictEqual(f.log.unsubscribed, ["https://push.example/old"]);
+    assert.strictEqual(f.log.subscribes.length, 1);
+    assert.deepStrictEqual(f.log.subscribes[0].key, KEY);
+    assert.strictEqual(f.log.requests[2].body.endpoint, "https://push.example/new1");
+
+    // It is tried once.
+    const twice = fixture({ existing: KEY });
+    twice.env.status.POST = [410, 410, 201];
+    assert.strictEqual((await twice.controller.sync()).state, "error");
+    assert.deepStrictEqual(twice.calls(), [GET, POST, POST]);
+
+    // A subscription that cannot be removed is not replaced.
+    const stuck = fixture({ existing: KEY });
+    stuck.env.status.POST = [410];
+    stuck.env.current.unsubscribe = async () => { throw new Error("boom"); };
+    assert.strictEqual((await stuck.controller.sync()).state, "error");
+    assert.deepStrictEqual(stuck.calls(), [GET, POST]);
+    assert.strictEqual(stuck.log.subscribes.length, 0);
+
+    // Another tab replaced it first: its new subscription is registered.
+    const raced = fixture({ existing: KEY });
+    raced.env.status.POST = [410, 200];
+    raced.env.current.unsubscribe = async () => {
+      raced.env.current = raced.make("https://push.example/other-tab", KEY);
+      return false;
+    };
+    assert.strictEqual((await raced.controller.sync()).state, "active");
+    assert.deepStrictEqual(raced.calls(), [GET, POST, POST]);
+    assert.strictEqual(raced.log.requests[2].body.endpoint, "https://push.example/other-tab");
+    assert.strictEqual(raced.log.subscribes.length, 0);
+
+    // Turned off meanwhile: removed, and nothing new is made.
+    const off = fixture({ existing: KEY });
+    off.env.status.POST = [410];
+    const unsubscribe = off.env.current.unsubscribe;
+    off.env.current.unsubscribe = () => { off.env.enabled = false; return unsubscribe(); };
+    assert.strictEqual((await off.controller.sync()).state, "off");
+    assert.deepStrictEqual(off.calls(), [GET, POST]);
+    assert.strictEqual(off.log.subscribes.length, 0);
+    assert.strictEqual(off.env.current, null);
   }
   {
     // Fallbacks: nothing is thrown and the state says why only open tabs are notified.

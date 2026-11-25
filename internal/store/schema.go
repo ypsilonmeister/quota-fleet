@@ -191,4 +191,10 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     user_agent TEXT NOT NULL DEFAULT '',
     token_id TEXT NOT NULL DEFAULT ''
 );
+
+-- Endpoints removed through the API, which are never registered again (docs/16).
+CREATE TABLE IF NOT EXISTS push_deleted_endpoints (
+    endpoint_hash TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL
+);
 `
