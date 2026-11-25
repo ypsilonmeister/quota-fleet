@@ -35,10 +35,11 @@ api:
 |---|---|
 | read | すべての GET（/jobs、/jobs/{id}、/status、/meta、/deliveries、/gate/held、/gate/decisions、/agents、/agents/events） |
 | register | POST /jobs |
-| operate | POST /jobs/{id}/cancel、/requeue、/reset、/deliver、POST /gate/held/{id}/release、DELETE /gate/held/{id}、POST /agents/check |
+| operate | POST /jobs/{id}/cancel、/requeue、/reset、/deliver、POST /gate/held/{id}/release、DELETE /gate/held/{id}、POST /agents/check、POST /decision/review-verdict（[docs/18](18-review-gate.md)） |
 | worker | POST /jobs/{id}/claim、/complete、/fail、/cancel-claimed、/reject-invalid（実行系の内部用。MCP には公開しない） |
 | agents | 将来のエージェント管理用に予約（当面は operate に含まれる /agents/check のみ） |
 
+- `POST /decision/review-verdict` は匿名では使えない。トークン未設定の場合は `require_auth: false` でも 401（[docs/18](18-review-gate.md)）。
 - 認証なし（トークン不一致・欠落）は従来どおり 401。認証は通ったがスコープ不足は 403 とし、不足したスコープ名だけを返す（トークンの情報は返さない）。
 - UI（/ui/*）は従来どおり認証対象外の静的配信とし、UI からの API 呼び出しは利用者が持つトークンで行う。/meta の応答に、そのトークンのスコープ一覧を含め、UI ができない操作を無効化できるようにする。
 

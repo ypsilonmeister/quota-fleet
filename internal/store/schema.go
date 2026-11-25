@@ -26,7 +26,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     pool TEXT NOT NULL DEFAULT '',
     alt_pools TEXT NOT NULL DEFAULT '[]',
     session_id TEXT NOT NULL DEFAULT '',
-    created_by TEXT NOT NULL DEFAULT ''
+    created_by TEXT NOT NULL DEFAULT '',
+    selected_agent TEXT NOT NULL DEFAULT '',
+    selected_model TEXT NOT NULL DEFAULT '',
+    selected_pool TEXT NOT NULL DEFAULT '',
+    selection_reason TEXT NOT NULL DEFAULT '',
+    selection_mode TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id);
@@ -129,6 +134,16 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_gate_decisions_id_desc ON gate_decisions(id DESC);
 CREATE INDEX IF NOT EXISTS idx_gate_decisions_job_id ON gate_decisions(job_id);
+
+CREATE TABLE IF NOT EXISTS decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    job_id INTEGER NULL,
+    review_job_id INTEGER NULL,
+    verdict TEXT NOT NULL CHECK(verdict IN ('ok_to_merge','changes_needed')),
+    score REAL NOT NULL,
+    model TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS agent_versions (
     host TEXT NOT NULL,

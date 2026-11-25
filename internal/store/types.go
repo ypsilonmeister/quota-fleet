@@ -90,6 +90,13 @@ type Job struct {
 	AltPools           []string
 	SessionID          string
 	CreatedBy          string
+
+	// Selector record (docs/19). Empty when the Selector did not run (mode off).
+	SelectedAgent   string
+	SelectedModel   string
+	SelectedPool    string
+	SelectionReason string
+	SelectionMode   string // explicit | recorded | applied
 }
 
 // CreateJobParams holds input fields for CreateJob.
@@ -110,6 +117,12 @@ type CreateJobParams struct {
 	AltPools           []string      `json:"alt_pools,omitempty"`
 	SessionID          string        `json:"session_id,omitempty"`
 	CreatedBy          string        `json:"created_by,omitempty"`
+
+	SelectedAgent   string `json:"selected_agent,omitempty"`
+	SelectedModel   string `json:"selected_model,omitempty"`
+	SelectedPool    string `json:"selected_pool,omitempty"`
+	SelectionReason string `json:"selection_reason,omitempty"`
+	SelectionMode   string `json:"selection_mode,omitempty"`
 }
 
 // CompleteResult holds the outcome of Complete.

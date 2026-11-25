@@ -1,12 +1,15 @@
 # 10 自動モデル選択（Selector）の設計
 
+> **実装済み（2026-11-25）**: S1（記録のみ）と S2（未指定時の自動適用）は docs/19-selector.md のとおり実装した（Issue #21）。S3 と本書 §7 の未決事項は未着手。
+
+
 ジョブ登録時に agent／model／pool が未指定の場合、Gate の手前で「役割×重さ」と利用枠の実測から自動で選ぶ仕組みの設計（2026-11-23 ゆうや要望、2026-11-24 作成）。
 
 ## 1. 原則
 - **明示指定が常に優先**する。Selector は未指定のときだけ動く。
 - **黙った差し替えはしない**: 選択した agent／model／pool と、その理由（役割・重さ・各プールの残量スナップショット）をジョブに記録し、詳細画面で見えるようにする。
 - Selector は「健全なプールの中での最適」を担う。枯渇の判定と保持は従来どおり Gate の仕事で、Selector は枯渇プールを候補から外すだけにする。
-- usage が未測定のプールは候補に入れない（登録時バイパスの原則と整合）。
+- usage が未測定のプールは候補に入れない（登録時バイパスの原則と整合）。**全候補が未測定の場合、Selector は自動割り当てをせず（abstain）**、ジョブは既存の既定で登録し、選択記録に「全候補が未測定のため自動選択を見送った」旨と理由を残す（2026-11-25 確定）。
 
 ## 2. 入力
 - **role ヒント**（登録時に任意指定）: implementation / fix / review / research / judge。未指定なら title や指示文からの推定はせず、standard 扱いの既定表を使う。
@@ -29,7 +32,9 @@
 | fix | 実装者と同一（セッション継続が既定） | 同左 | 同左 |
 | review | agy Neon Medium（別系統） | Codex sol / Sonnet 5.5（別系統） | 実装の系統と排他に選ぶ（下記） |
 | research | agy Flash / Neon Low | Orchestrator (Neon) / Neon Medium | Orchestrator（司令塔 Neon High＋実行 Hydrogen High） |
-| judge | Gemini Decision（評価器） | 同左 | 同左 |
+| judge | agy Gemini（Neon）の専用ルーティング（Selector の対象。Decision 評価器の内部処理とは別） | 同左 | 同左 |
+
+補足（2026-11-25 確定）: fix の親プールが枯渇し他プールが健全な場合、選択記録の理由に別系統への切替提案を含める（提案のみで、勝手に系統は変えない）。同じ役割×重さの行に健全な別系統が無ければ、同じ役割の他の重さ、さらに表全体へ探索を広げる。
 
 - heavy のレビュー候補は実装側と排他的に構成する: 実装が Claude 系なら gpt-6.2-astra / Neon xhigh、実装が GPT 系なら Opus 5.5 / Neon xhigh、実装が Gemini 系なら Opus 5.5 / gpt-6.2-astra。同系統しか残らない場合は Selector で無理に埋めず、保持して判断を仰ぐ。
 - 段（Light / Standard / Heavy）と effort の対応（2026-11-24 の3段案を反映）: Light = 定型・小修正・下調べ・軽いレビュー（Claude: Haiku 5.5 / Sonnet 5.5 low／Codex: Sol low／agy: Hydrogen low〜medium、Flash）。Standard = 通常の実装・レビュー・fix（Claude: Sonnet 5.5 medium〜high／Codex: Sol medium〜high／agy: Neon medium〜high、Orchestrator (Neon)）。Heavy = 設計・難しい一貫作業・重要なレビュー・判定の最終確認（Claude: Opus 5.5 high〜xhigh／Codex: gpt-6.2-astra high〜xhigh／agy: Neon xhigh 主力、Carbon / Argon は機会的、Orchestrator (Carbon)）。

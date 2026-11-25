@@ -12,24 +12,29 @@ func TestUIWebPushAssetsPresent(t *testing.T) {
 		`createPushController`,
 		`getRegistration: notificationPresenter.register`,
 		`navigator.serviceWorker.getRegistration("/ui/")`,
-		`"通知: 解除中"`,
-		`"通知: 解除未確認"`,
+		`"push.labelRemoving"`,
+		`"push.labelUnconfirmed"`,
 		`isEnabled: function () { return notifyController.isEnabled(); }`,
 		`void pushController.sync();`,
 		`pushController.settled()`,
-		`unsupportedHint: iosHint`,
-		`notifyHelper.IOS_PUSH_NOTE`,
+		`isIOS: function () {`,
+		`t("push.iosNote")`,
 		`navigator.maxTouchPoints`,
-		`"通知: Push"`,
-		`"通知: タブのみ"`,
+		`"push.labelActive"`,
+		`"push.labelTabOnly"`,
 	} {
 		if !strings.Contains(js, token) {
 			t.Errorf("app.js missing web push wiring %q", token)
 		}
 	}
 	// docs/16: the iOS limit is explained in the UI.
-	if !strings.Contains(string(indexHTML), "ホーム画面に追加した PWA のみ、iOS 16.4 以降") {
-		t.Errorf("index.html does not explain the iOS limit")
+	if !strings.Contains(string(indexHTML), `data-i18n-title="header.notifyTitle"`) {
+		t.Errorf("index.html does not title the notification button")
+	}
+	for locale, want := range map[string]string{"ja": "ホーム画面に追加した PWA のみ、iOS 16.4 以降", "en": "iOS 16.4 or later"} {
+		if got := dictionaries(t)[locale]["header.notifyTitle"]; !strings.Contains(got, want) {
+			t.Errorf("%s notification title does not explain the iOS limit: %q", locale, got)
+		}
 	}
 }
 
@@ -42,6 +47,8 @@ func TestUIPushControllerWithNode(t *testing.T) {
 	script := `
 const assert = require("assert");
 const n = require("./assets/notify.js");
+const i18n = require("./assets/i18n.js");
+const text = view => i18n.t(view.messageKey);
 
 const tick = () => new Promise(r => setImmediate(r));
 const flush = async () => { for (let i = 0; i < 20; i++) await tick(); };
@@ -176,7 +183,7 @@ async function main() {
         server(f.env);
         const view = await f.controller.sync();
         assert.strictEqual(view.state, "unconfirmed", label);
-        assert.ok(view.message.includes("解除を確認できません"), view.message);
+        assert.ok(text(view).includes("解除を確認できません"), text(view));
         assert.deepStrictEqual(f.log.views, ["removing", "unconfirmed"], label);
 
         // A retry that still fails says so again; one that works ends in off.
@@ -277,7 +284,11 @@ async function main() {
       f.env.status[method] = status;
       const view = await f.controller.sync();
       assert.strictEqual(view.state, state, method + " " + status);
-      assert.ok(view.message.startsWith("Web Push: "), view.message);
+      for (const locale of ["ja", "en"]) {
+        i18n.setLocale(locale, false);
+        assert.ok(text(view).startsWith("Web Push: "), locale + " " + text(view));
+      }
+      i18n.setLocale("ja", false);
       assert.deepStrictEqual(f.log.unsubscribed, [], "an earlier registration is left alone");
     }
 
@@ -340,7 +351,8 @@ async function main() {
     assert.strictEqual(n.isIOS("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 5), true);
     assert.strictEqual(n.isIOS("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", 0), false);
     assert.strictEqual(n.isIOS("Mozilla/5.0 (Linux; Android 14)", 5), false);
-    assert.ok(n.IOS_PUSH_NOTE.includes("ホーム画面") && n.IOS_PUSH_NOTE.includes("16.4"));
+    const note = i18n.t("push.iosNote");
+    assert.ok(note.includes("ホーム画面") && note.includes("16.4"));
 
     // An iOS Safari tab has no Notification: the toggle explains what to do.
     const messages = [];
@@ -348,11 +360,12 @@ async function main() {
       storage: { getItem: () => null, setItem: () => {} },
       getNotification: () => null,
       isSecureContext: () => true,
-      unsupportedHint: () => n.IOS_PUSH_NOTE,
-      onMessage: m => messages.push(m)
+      isIOS: () => true,
+      onMessage: (m, key) => messages.push([m, key])
     });
     await controller.toggle();
-    assert.deepStrictEqual(messages, ["このブラウザは通知に対応していません。" + n.IOS_PUSH_NOTE]);
+    assert.deepStrictEqual(messages, [[i18n.t("notify.unsupportedIOS"), "notify.unsupportedIOS"]]);
+    assert.ok(messages[0][0].includes("ホーム画面"));
   }
   console.log("ALL_UI_PUSH_TESTS_PASSED");
 }

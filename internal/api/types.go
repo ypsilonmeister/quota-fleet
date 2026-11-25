@@ -34,6 +34,12 @@ type JobDTO struct {
 	AltPools           []string   `json:"alt_pools,omitempty"`
 	SessionID          string     `json:"session_id,omitempty"`
 	CreatedBy          string     `json:"created_by,omitempty"`
+
+	SelectedAgent   string `json:"selected_agent,omitempty"`
+	SelectedModel   string `json:"selected_model,omitempty"`
+	SelectedPool    string `json:"selected_pool,omitempty"`
+	SelectionReason string `json:"selection_reason,omitempty"`
+	SelectionMode   string `json:"selection_mode,omitempty"`
 }
 
 func toJobDTO(j *store.Job) *JobDTO {
@@ -69,6 +75,11 @@ func toJobDTO(j *store.Job) *JobDTO {
 	if len(j.AltPools) > 0 {
 		dto.AltPools = append([]string(nil), j.AltPools...)
 	}
+	dto.SelectedAgent = j.SelectedAgent
+	dto.SelectedModel = j.SelectedModel
+	dto.SelectedPool = j.SelectedPool
+	dto.SelectionReason = j.SelectionReason
+	dto.SelectionMode = j.SelectionMode
 	return dto
 }
 
@@ -105,6 +116,9 @@ type CreateJobRequest struct {
 	Pool               string   `json:"pool"`
 	AltPools           []string `json:"alt_pools"`
 	SessionID          string   `json:"session_id"`
+	// Selector hints (docs/19). Optional.
+	Role   string `json:"role"`
+	Weight string `json:"weight"`
 }
 
 // CreateJobResponse is returned by POST /jobs.
@@ -408,9 +422,33 @@ type MetaResponse struct {
 	Pools         []string                         `json:"pools"`
 	PoolRules     map[string][]PoolAppliesToDTO    `json:"pool_rules,omitempty"`
 	GateMode      string                           `json:"gate_mode"`
+	SelectorMode  string                           `json:"selector_mode"`
 	EvaluatorMode string                           `json:"evaluator_mode"`
+	ReviewGate    ReviewGateDTO                    `json:"review_gate"`
 	PoolSummaries []PoolSummaryDTO                 `json:"pool_summaries"`
 	Scopes        []string                         `json:"scopes"`
+}
+
+// ReviewGateDTO is the review verdict gate state exposed by GET /meta (docs/18). It says
+// only whether an API key is configured, never anything about its value.
+type ReviewGateDTO struct {
+	Enabled       bool   `json:"enabled"`
+	Model         string `json:"model"`
+	KeyConfigured bool   `json:"key_configured"`
+}
+
+// ReviewVerdictRequest is the body of POST /decision/review-verdict.
+type ReviewVerdictRequest struct {
+	Text        string `json:"text"`
+	JobID       *int64 `json:"job_id,omitempty"`
+	ReviewJobID *int64 `json:"review_job_id,omitempty"`
+}
+
+// ReviewVerdictResponse is returned by POST /decision/review-verdict.
+type ReviewVerdictResponse struct {
+	Verdict string  `json:"verdict"`
+	Score   float64 `json:"score"`
+	Reason  string  `json:"reason"`
 }
 
 // AgentVersionEventDTO is the JSON representation of an agent_version_events entry.

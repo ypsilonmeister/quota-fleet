@@ -1274,6 +1274,80 @@ func TestAPIMCPAllowedOriginHosts(t *testing.T) {
 	}
 }
 
+func TestEvaluatorResolveAPIKey(t *testing.T) {
+	env := map[string]string{DefaultEvaluatorAPIKeyEnv: " default-env ", "CUSTOM_KEY": "custom-env"}
+	getenv := func(name string) string { return env[name] }
+	for yamlText, want := range map[string]string{
+		"instance_id: x\n": "default-env",
+		"instance_id: x\nevaluator:\n  api_key_env: CUSTOM_KEY\n":                             "custom-env",
+		"instance_id: x\nevaluator:\n  api_key: from-yaml\n":                                  "from-yaml",
+		"instance_id: x\nevaluator:\n  api_key: \" from-yaml \"\n  api_key_env: CUSTOM_KEY\n": "from-yaml",
+		"instance_id: x\nevaluator:\n  api_key: \"  \"\n  api_key_env: CUSTOM_KEY\n":          "custom-env",
+		"instance_id: x\nevaluator:\n  api_key_env: UNSET_KEY\n":                              "",
+	} {
+		cfg, err := Parse([]byte(yamlText))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", yamlText, err)
+		}
+		if got := cfg.Evaluator.ResolveAPIKey(getenv); got != want {
+			t.Errorf("ResolveAPIKey for %q = %q, want %q", yamlText, got, want)
+		}
+	}
+
+	t.Setenv(DefaultEvaluatorAPIKeyEnv, "process-env")
+	if got := (EvaluatorConfig{}).ResolveAPIKey(nil); got != "process-env" {
+		t.Errorf("ResolveAPIKey(nil) = %q, want the process environment value", got)
+	}
+}
+
+func TestReviewGateDefaultsFalseAndParses(t *testing.T) {
+	for yamlText, want := range map[string]bool{
+		"instance_id: x\n": false,
+		"instance_id: x\nreview_gate:\n  enabled: false\n": false,
+		"instance_id: x\nreview_gate:\n  enabled: true\n":  true,
+	} {
+		cfg, err := Parse([]byte(yamlText))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", yamlText, err)
+		}
+		if cfg.ReviewGate.Enabled != want {
+			t.Errorf("Parse(%q) review_gate.enabled = %v, want %v", yamlText, cfg.ReviewGate.Enabled, want)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate(%q): %v", yamlText, err)
+		}
+	}
+}
+
+func TestSelectorModeConfig(t *testing.T) {
+	cases := []struct {
+		yaml    string
+		want    string
+		wantErr bool
+	}{
+		{"", SelectorModeOff, false},
+		{"selector:\n  mode: record\n", SelectorModeRecord, false},
+		{"selector:\n  mode: apply\n", SelectorModeApply, false},
+		{"selector:\n  mode: bogus\n", "", true},
+	}
+	for _, c := range cases {
+		cfg, err := Parse([]byte("instance_id: x\nstate_dir: /tmp/x\n" + c.yaml))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		verr := cfg.Validate()
+		if c.wantErr {
+			if verr == nil || !strings.Contains(verr.Error(), "selector.mode") {
+				t.Errorf("%q: want selector.mode error, got %v", c.yaml, verr)
+			}
+			continue
+		}
+		if got := cfg.Selector.EffectiveMode(); got != c.want {
+			t.Errorf("%q: mode = %q, want %q", c.yaml, got, c.want)
+		}
+	}
+}
+
 func TestAPIWebPushDefaultsFalseAndParses(t *testing.T) {
 	for yamlText, want := range map[string]bool{
 		"instance_id: x\n":                          false,

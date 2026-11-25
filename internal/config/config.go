@@ -113,7 +113,9 @@ type Config struct {
 	Pools               map[string]PoolConfig  `yaml:"pools"`
 	Quota               QuotaConfig            `yaml:"quota"`
 	Evaluator           EvaluatorConfig        `yaml:"evaluator"`
+	ReviewGate          ReviewGateConfig       `yaml:"review_gate"`
 	Notifier            NotifierConfig         `yaml:"notifier"`
+	Selector            SelectorConfig         `yaml:"selector"`
 }
 
 // EffectiveAgentsCheckInterval returns the configured periodic agent version probe interval.
@@ -227,8 +229,11 @@ func (n NotifierConfig) EffectiveWebhookRetries() int {
 
 // EvaluatorConfig holds acceptance criteria evaluator settings.
 type EvaluatorConfig struct {
-	Mode              string   `yaml:"mode"`
-	APIKeyEnv         string   `yaml:"api_key_env"`
+	Mode      string `yaml:"mode"`
+	APIKeyEnv string `yaml:"api_key_env"`
+	// APIKey is the Gemini API key itself (optional). When set it takes precedence over the
+	// APIKeyEnv environment variable. It is a secret: never log it or return it (docs/18).
+	APIKey            string   `yaml:"api_key"`
 	DecisionThreshold *float64 `yaml:"decision_threshold"`
 	MaxEvalRetries    *int     `yaml:"max_eval_retries"`
 }
@@ -252,6 +257,26 @@ func (e EvaluatorConfig) EffectiveAPIKeyEnv() string {
 	return v
 }
 
+// ResolveAPIKey returns the Decision 1 API key: api_key when set, otherwise the value of
+// the environment variable named by EffectiveAPIKeyEnv. It returns "" when neither is set.
+// A nil getenv means os.Getenv. The result is a secret.
+func (e EvaluatorConfig) ResolveAPIKey(getenv func(string) string) string {
+	if v := strings.TrimSpace(e.APIKey); v != "" {
+		return v
+	}
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	return strings.TrimSpace(getenv(e.EffectiveAPIKeyEnv()))
+}
+
+// ReviewGateConfig holds the review verdict gate settings (docs/18). The gate uses the
+// Decision 1 client and API key configured under evaluator.
+type ReviewGateConfig struct {
+	// Enabled turns on POST /decision/review-verdict. Default false.
+	Enabled bool `yaml:"enabled"`
+}
+
 // EffectiveDecisionThreshold returns the configured Decision 1 noul probability threshold,
 // defaulting to 0.5.
 func (e EvaluatorConfig) EffectiveDecisionThreshold() float64 {
@@ -268,6 +293,30 @@ func (e EvaluatorConfig) EffectiveMaxEvalRetries() int {
 		return DefaultEvaluatorMaxEvalRetries
 	}
 	return *e.MaxEvalRetries
+}
+
+// Selector modes (docs/10, docs/19).
+const (
+	// SelectorModeOff keeps the legacy behavior: no automatic selection.
+	SelectorModeOff = "off"
+	// SelectorModeRecord computes and records a selection but executes with the documented defaults (S1).
+	SelectorModeRecord = "record"
+	// SelectorModeApply executes jobs with the selection for unspecified fields (S2).
+	SelectorModeApply = "apply"
+)
+
+// SelectorConfig holds the Selector settings (docs/19).
+type SelectorConfig struct {
+	Mode string `yaml:"mode"`
+}
+
+// EffectiveMode returns the configured selector mode, defaulting to "off".
+func (s SelectorConfig) EffectiveMode() string {
+	v := strings.TrimSpace(s.Mode)
+	if v == "" {
+		return SelectorModeOff
+	}
+	return v
 }
 
 // QuotaConfig holds Quota Gate and usage snapshot settings.
@@ -727,6 +776,10 @@ func (c *Config) Validate() error {
 	}
 	if mode := strings.TrimSpace(c.Quota.GateMode); mode != "" && mode != GateModeOff && mode != GateModeDryRun && mode != GateModeEnforce {
 		errs = append(errs, fmt.Errorf("quota.gate_mode %q is not supported (allowed: %q, %q, %q)", mode, GateModeOff, GateModeDryRun, GateModeEnforce))
+	}
+
+	if mode := strings.TrimSpace(c.Selector.Mode); mode != "" && mode != SelectorModeOff && mode != SelectorModeRecord && mode != SelectorModeApply {
+		errs = append(errs, fmt.Errorf("selector.mode %q is not supported (allowed: %q, %q, %q)", mode, SelectorModeOff, SelectorModeRecord, SelectorModeApply))
 	}
 
 	if mode := strings.TrimSpace(c.Evaluator.Mode); mode != "" && mode != EvaluatorModeTypedDecision && mode != EvaluatorModeAlwaysPass {

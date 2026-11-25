@@ -124,6 +124,7 @@ func TestUIShellAndAssetsFollowSecurityRules(t *testing.T) {
 		src  string
 	}{
 		{name: "direction.js", src: string(directionJS)},
+		{name: "i18n.js", src: string(i18nJS)},
 		{name: "notify.js", src: string(notifyJS)},
 		{name: "app.js", src: string(appJS)},
 		{name: "sw.js", src: string(swJS)},
@@ -149,15 +150,22 @@ func TestUIChainViewAndMiniTreeAssetsPresent(t *testing.T) {
 		"buildChainJobsTable",
 		"fetchFullJobChain",
 		"buildMiniChainSection",
-		"チェーン表示",
-		"フラット表示",
-		"チェーン構成",
-		"現在表示中",
+		`L("jobs.viewChain")`,
+		`L("jobs.viewFlat")`,
+		`L("chain.sectionTitle")`,
+		`L("chain.currentTag")`,
 	} {
 		if !strings.Contains(js, token) {
 			t.Errorf("app.js missing expected chain UI token %q", token)
 		}
 	}
+
+	assertJapaneseMessages(t, map[string]string{
+		"jobs.viewChain":     "チェーン表示",
+		"jobs.viewFlat":      "フラット表示",
+		"chain.sectionTitle": "チェーン構成",
+		"chain.currentTag":   "現在表示中",
+	})
 
 	css := string(styleCSS)
 	for _, cls := range []string{
@@ -177,7 +185,7 @@ func TestUIChainViewAndMiniTreeAssetsPresent(t *testing.T) {
 
 func TestUIAgentVersionsAssetsPresent(t *testing.T) {
 	html := string(indexHTML)
-	if !strings.Contains(html, `href="/ui/agents"`) || !strings.Contains(html, "エージェント版数") {
+	if !strings.Contains(html, `href="/ui/agents"`) || !strings.Contains(html, `data-i18n="nav.agents"`) {
 		t.Errorf("index.html missing navigation link for /ui/agents")
 	}
 
@@ -189,15 +197,22 @@ func TestUIAgentVersionsAssetsPresent(t *testing.T) {
 		"buildAgentEventsTable",
 		"/agents/check",
 		"/agents/events",
-		"エージェント版数",
-		"今すぐ確認",
+		`L("agents.title")`,
+		`L("agents.checkNow")`,
 		"pinned:",
-		"要手作業",
+		`L("agents.manualBadge")`,
 	} {
 		if !strings.Contains(js, token) {
 			t.Errorf("app.js missing expected agent versions UI token %q", token)
 		}
 	}
+
+	assertJapaneseMessages(t, map[string]string{
+		"nav.agents":         "エージェント版数",
+		"agents.title":       "エージェント版数",
+		"agents.checkNow":    "今すぐ確認",
+		"agents.manualBadge": "要手作業",
+	})
 
 	css := string(styleCSS)
 	for _, cls := range []string{
@@ -221,8 +236,8 @@ func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
 		`id="direction-switch"`,
 		`data-set-direction="console"`,
 		`data-set-direction="ledger"`,
-		`aria-label="ダーク（計器盤）">ダーク</button>`,
-		`aria-label="ライト（台帳）">ライト</button>`,
+		`data-i18n-aria-label="theme.darkLabel" data-i18n="theme.dark"></button>`,
+		`data-i18n-aria-label="theme.lightLabel" data-i18n="theme.light"></button>`,
 	} {
 		if !strings.Contains(html, token) {
 			t.Errorf("index.html missing expected direction switcher token %q", token)
@@ -237,6 +252,13 @@ func TestUIDirectionSwitcherAssetsPresent(t *testing.T) {
 			t.Errorf("index.html must not hardcode initial direction state %q (prevents FOUC)", forbidden)
 		}
 	}
+
+	assertJapaneseMessages(t, map[string]string{
+		"theme.darkLabel":  "ダーク（計器盤）",
+		"theme.dark":       "ダーク",
+		"theme.lightLabel": "ライト（台帳）",
+		"theme.light":      "ライト",
+	})
 
 	css := string(styleCSS)
 	for _, token := range []string{
@@ -756,7 +778,7 @@ func TestUIModelPickerAndPoolAutoAssetsPresent(t *testing.T) {
 		"derived-pool-display",
 		"host-empty-notice",
 		"model_select",
-		"Pool（自動判定）",
+		`L("newJob.poolLabel")`,
 	} {
 		if !strings.Contains(js, token) {
 			t.Errorf("app.js missing expected model-picker / pool-auto UI token %q", token)
@@ -765,6 +787,8 @@ func TestUIModelPickerAndPoolAutoAssetsPresent(t *testing.T) {
 	if strings.Contains(js, `el("select", { name: "pool" }`) {
 		t.Errorf("app.js must not render a manual pool <select> dropdown in the job form")
 	}
+
+	assertJapaneseMessages(t, map[string]string{"newJob.poolLabel": "Pool（自動判定）"})
 
 	css := string(styleCSS)
 	for _, cls := range []string{

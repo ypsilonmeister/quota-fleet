@@ -245,7 +245,7 @@ async function main() {
     assert.strictEqual(w.log.opened[1], ORIGIN + "/ui/jobs/8");
 
     // Every push shows something, whatever arrives.
-    const generic = { title: "quota-fleet: ジョブの通知", options: { body: "" } };
+    const generic = { title: "quota-fleet: job notification", options: { body: "" } };
     for (const body of [null, "not json", "null", "[]", "42", "{}", "{\"job_id\":\"7\"}", "{\"job_id\":-1}"]) {
       const before = w.log.shown.length;
       assert.deepStrictEqual(await w.push(body), generic, String(body));

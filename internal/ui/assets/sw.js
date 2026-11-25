@@ -198,7 +198,7 @@ function readPush(data) {
 self.addEventListener("push", function (event) {
   const message = readPush(event.data);
   const title = typeof message.title === "string" && message.title ?
-    message.title : "quota-fleet: ジョブの通知";
+    message.title : "quota-fleet: job notification";
   const options = { body: typeof message.body === "string" ? message.body : "" };
   const jobID = message.job_id;
   if (Number.isInteger(jobID) && jobID > 0) {
