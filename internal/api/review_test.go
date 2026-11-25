@@ -162,6 +162,62 @@ func TestReviewVerdictRequiresOperateScope(t *testing.T) {
 	}
 }
 
+func TestReviewVerdictRequiresConfiguredToken(t *testing.T) {
+	// Without any API token the rest of the JSON API is anonymous unless require_auth is
+	// set. The gate must refuse in both cases, whether or not it could answer.
+	for _, requireAuth := range []bool{false, true} {
+		for _, enabled := range []bool{false, true} {
+			for _, bearer := range []string{"", "made-up-token"} {
+				judge := &fakeReviewJudge{hasKey: true, judgment: evaluator.ReviewJudgment{Verdict: evaluator.VerdictOKToMerge, Score: 1}}
+				opts := reviewTestOptions(judge, enabled)
+				opts.Tokens = nil
+				opts.RequireAuth = requireAuth
+				_, st, ts := newTestServer(t, opts)
+				resp := doJSON(t, http.MethodPost, ts.URL+reviewTestPath, bearer, ReviewVerdictRequest{Text: "x"})
+				body := readBody(t, resp)
+				if resp.StatusCode != http.StatusUnauthorized || strings.Contains(body, `"verdict"`) {
+					t.Errorf("require_auth=%v enabled=%v bearer=%q: status = %d body = %s, want 401 without verdict",
+						requireAuth, enabled, bearer, resp.StatusCode, body)
+				}
+				if judge.calls.Load() != 0 {
+					t.Errorf("require_auth=%v enabled=%v bearer=%q: judge was called", requireAuth, enabled, bearer)
+				}
+				assertNoDecisionLog(t, st)
+			}
+		}
+	}
+}
+
+func TestReviewVerdictAcceptsLegacyToken(t *testing.T) {
+	judge := &fakeReviewJudge{hasKey: true, judgment: evaluator.ReviewJudgment{Verdict: evaluator.VerdictOKToMerge, Score: 1}}
+	opts := reviewTestOptions(judge, true)
+	opts.Tokens = nil
+	opts.Token = "tok-legacy"
+	_, _, ts := newTestServer(t, opts)
+	for bearer, want := range map[string]int{"": http.StatusUnauthorized, "wrong": http.StatusUnauthorized, "tok-legacy": http.StatusOK} {
+		resp := doJSON(t, http.MethodPost, ts.URL+reviewTestPath, bearer, ReviewVerdictRequest{Text: "x"})
+		if body := readBody(t, resp); resp.StatusCode != want {
+			t.Errorf("bearer %q: status = %d, want %d: %s", bearer, resp.StatusCode, want, body)
+		}
+	}
+}
+
+// A response that answers the same question twice must not become a verdict.
+func TestReviewVerdictRejectsAmbiguousUpstreamAnswer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"answers":{"verdict":{"noul":0.1,"noul":0.9},"unresolved":{"noul":0.9},"reviewer_reliability":{"noul":0.9}}}`)
+	}))
+	defer upstream.Close()
+	judge := evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{Endpoint: upstream.URL, APIKey: reviewTestKey})
+	_, st, ts := newTestServer(t, reviewTestOptions(judge, true))
+	resp := doJSON(t, http.MethodPost, ts.URL+reviewTestPath, "tok-operate", ReviewVerdictRequest{Text: "x"})
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(body, "invalid_response") || strings.Contains(body, `"verdict"`) {
+		t.Fatalf("status = %d body = %s, want 502 invalid_response without verdict", resp.StatusCode, body)
+	}
+	assertNoDecisionLog(t, st)
+}
+
 func TestReviewVerdictRejectsBadRequests(t *testing.T) {
 	judge := &fakeReviewJudge{hasKey: true, judgment: evaluator.ReviewJudgment{Verdict: evaluator.VerdictOKToMerge, Score: 1}}
 	_, st, ts := newTestServer(t, reviewTestOptions(judge, true))
@@ -276,6 +332,8 @@ func TestReviewVerdictNeverExposesAPIKey(t *testing.T) {
 		// The key straddles the point where the logged snippet is cut.
 		{"error body cut inside the key", http.StatusBadRequest, strings.Repeat("a", 500) + reviewTestKey, http.StatusBadGateway},
 		{"invalid JSON", http.StatusOK, reviewTestKey, http.StatusBadGateway},
+		{"type error under an echoed object key", http.StatusOK,
+			`{"answers":{"` + reviewTestKey + `":{"noul":"x"}}}`, http.StatusBadGateway},
 	}
 	for _, tc := range tests {
 		for _, source := range []string{"api_key", "env"} {

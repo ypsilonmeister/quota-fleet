@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
@@ -414,7 +415,7 @@ func (e *TypedDecisionEvaluator) callDecisions(
 			return none, &EvaluationUnavailableError{
 				Kind:   UnavailableTimeout,
 				Reason: fmt.Sprintf("decisions API request timed out after %s", apiTimeout),
-				Err:    err,
+				Err:    redactError(err, apiKey),
 			}
 		}
 		return none, &EvaluationUnavailableError{
@@ -434,13 +435,13 @@ func (e *TypedDecisionEvaluator) callDecisions(
 			return none, &EvaluationUnavailableError{
 				Kind:   UnavailableTimeout,
 				Reason: "reading decisions API response timed out",
-				Err:    err,
+				Err:    redactError(err, apiKey),
 			}
 		}
 		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableAPIError,
 			Reason: "read decisions API response",
-			Err:    err,
+			Err:    redactError(err, apiKey),
 		}
 	}
 	if len(respBody) > maxAPIResponseBytes {
@@ -468,6 +469,14 @@ func (e *TypedDecisionEvaluator) callDecisions(
 		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableInvalidResp,
 			Reason: "invalid JSON from decisions API",
+			// A type error quotes object keys from the response.
+			Err: redactError(err, apiKey),
+		}
+	}
+	if err := checkDuplicateKeys(respBody); err != nil {
+		return none, &EvaluationUnavailableError{
+			Kind:   UnavailableInvalidResp,
+			Reason: "ambiguous JSON from decisions API",
 			Err:    err,
 		}
 	}
@@ -479,6 +488,58 @@ func (e *TypedDecisionEvaluator) callDecisions(
 	}
 
 	return parsed, nil
+}
+
+// checkDuplicateKeys fails when any object in data repeats a key, because json.Unmarshal
+// would silently keep the last value and so pick one of two contradicting answers. Keys are
+// compared case-insensitively, as Unmarshal matches struct fields that way. data must
+// already have been accepted by json.Unmarshal, which bounds the nesting depth.
+func checkDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return checkNextValueKeys(dec)
+}
+
+func checkNextValueKeys(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for dec.More() {
+		if delim == '{' {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			name, _ := keyTok.(string)
+			folded := foldKey(name)
+			if seen[folded] {
+				return errors.New("duplicate object key")
+			}
+			seen[folded] = true
+		}
+		if err := checkNextValueKeys(dec); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token() // closing delimiter
+	return err
+}
+
+// foldKey maps strings that are equal under Unicode case folding to the same value.
+func foldKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		lowest := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			lowest = min(lowest, f)
+		}
+		return lowest
+	}, s)
 }
 
 func noulProbability(parsed decisionsResponse, key string) (float64, error) {

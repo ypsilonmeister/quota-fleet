@@ -276,7 +276,10 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("GET /agents", s.requireScope(config.ScopeRead, s.handleGetAgents))
 	mux.HandleFunc("GET /agents/events", s.requireScope(config.ScopeRead, s.handleListAgentEvents))
 	mux.HandleFunc("POST /agents/check", s.requireScope(config.ScopeOperate, s.handleCheckAgents))
-	mux.HandleFunc("POST /decision/review-verdict", s.requireScope(config.ScopeOperate, s.handleReviewVerdict))
+	// docs/18: a verdict can drive a merge, so like /events this route has no anonymous
+	// fallback even when require_auth is false.
+	mux.Handle("POST /decision/review-verdict",
+		s.requireTokenAuth(s.requireScope(config.ScopeOperate, s.handleReviewVerdict)))
 	apiHandler := s.authMiddleware(mux)
 	uiHandler := ui.NewHandler()
 

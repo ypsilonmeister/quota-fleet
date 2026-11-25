@@ -119,6 +119,101 @@ func TestJudgeReviewRejectsIncompleteAnswers(t *testing.T) {
 	}
 }
 
+func TestJudgeReviewRejectsDuplicateKeys(t *testing.T) {
+	const rest = `,"unresolved":{"noul":0.9},"reviewer_reliability":{"noul":0.9}}`
+	for name, answers := range map[string]string{
+		"noul":              `{"verdict":{"noul":0.1,"noul":0.9}` + rest,
+		"noul, other order": `{"verdict":{"noul":0.9,"noul":0.1}` + rest,
+		"noul, other case":  `{"verdict":{"noul":0.1,"NOUL":0.9}` + rest,
+		"noul, escaped":     `{"verdict":{"noul":0.1,"no\u0075l":0.9}` + rest,
+		"noul then null":    `{"verdict":{"noul":0.9,"noul":null}` + rest,
+		"question":          `{"verdict":{"noul":0.1},"verdict":{"noul":0.9}` + rest,
+		// The stub wraps this in {"answers": ...}, so it repeats the top-level field.
+		"answers":             `{"verdict":{"noul":0.1}` + rest + `,"answers":{"verdict":{"noul":0.9}` + rest,
+		"answers, other case": `{"verdict":{"noul":0.1}` + rest + `,"Anſwers":{"verdict":{"noul":0.9}` + rest,
+		"inside an array":     `{"verdict":{"noul":0.9,"extra":[{"a":1,"a":2}]}` + rest,
+	} {
+		srv := stubDecisions(t, answers, nil, nil)
+		client := NewTypedDecision(TypedDecisionOptions{Endpoint: srv.URL, APIKey: "fake-key"})
+		got, err := client.JudgeReview(context.Background(), "x")
+		var unavailable *EvaluationUnavailableError
+		if !errors.As(err, &unavailable) || unavailable.Kind != UnavailableInvalidResp || got.Verdict != "" {
+			t.Errorf("%s: got %+v, err %v; want invalid_response and no verdict", name, got, err)
+		}
+	}
+}
+
+// The same names in different objects are not duplicates, and fields the client ignores
+// may hold anything that is valid JSON.
+func TestJudgeReviewAcceptsRepeatedNamesInSeparateObjects(t *testing.T) {
+	answers := `{"verdict":{"noul":0.9,"extra":[{"a":1},{"a":2},1e999]},` +
+		`"unresolved":{"noul":0.9,"extra":{"noul":0}},"reviewer_reliability":{"noul":0.9}}`
+	srv := stubDecisions(t, answers, nil, nil)
+	client := NewTypedDecision(TypedDecisionOptions{Endpoint: srv.URL, APIKey: "fake-key"})
+	got, err := client.JudgeReview(context.Background(), "x")
+	if err != nil || got.Verdict != VerdictOKToMerge {
+		t.Fatalf("got %+v, err %v; want ok_to_merge", got, err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
+
+type timeoutError string
+
+func (e timeoutError) Error() string   { return string(e) }
+func (e timeoutError) Timeout() bool   { return true }
+func (e timeoutError) Temporary() bool { return true }
+
+func TestDecisionTransportErrorsRedactAPIKey(t *testing.T) {
+	const key = "FAKE-DECISION-KEY-do-not-leak-0123456789"
+	sendFails := func(err error) roundTripFunc {
+		return func(*http.Request) (*http.Response, error) { return nil, err }
+	}
+	readFails := func(err error) roundTripFunc {
+		return func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(failingReader{err})}, nil
+		}
+	}
+	msg := "upstream said " + key
+	for _, tc := range []struct {
+		name      string
+		transport roundTripFunc
+		want      EvaluationUnavailableKind
+	}{
+		{"send", sendFails(errors.New(msg)), UnavailableAPIError},
+		{"send timeout", sendFails(timeoutError(msg)), UnavailableTimeout},
+		{"read", readFails(errors.New(msg)), UnavailableAPIError},
+		{"read timeout", readFails(timeoutError(msg)), UnavailableTimeout},
+	} {
+		client := NewTypedDecision(TypedDecisionOptions{APIKey: key, HTTPClient: &http.Client{Transport: tc.transport}})
+		_, judgeErr := client.JudgeReview(context.Background(), "x")
+		// Acceptance evaluation stores the same error text in the job result.
+		_, evalErr := client.Evaluate(context.Background(),
+			&store.Job{Title: "t", AcceptanceCriteria: "the work is complete"}, adapter.Evidence{})
+		for path, err := range map[string]error{"JudgeReview": judgeErr, "Evaluate": evalErr} {
+			var unavailable *EvaluationUnavailableError
+			if !errors.As(err, &unavailable) || unavailable.Kind != tc.want {
+				t.Errorf("%s/%s: err = %v, want kind %s", tc.name, path, err, tc.want)
+				continue
+			}
+			// Check the wrapped error too, not only the formatted message.
+			full := err.Error()
+			if inner := errors.Unwrap(err); inner != nil {
+				full += " " + inner.Error()
+			}
+			if strings.Contains(full, key) || !strings.Contains(full, "upstream said [REDACTED]") {
+				t.Errorf("%s/%s: err = %q, want the detail with the key redacted", tc.name, path, full)
+			}
+		}
+	}
+}
+
 func TestJudgeReviewWithoutKeyDoesNotCallAPI(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("API must not be called without a key")
