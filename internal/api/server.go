@@ -79,6 +79,12 @@ type Options struct {
 	GateReleaser GateReleaser
 	// AgentChecker handles POST /agents/check via immediate host×agent version probing.
 	AgentChecker AgentChecker
+	// ReviewGateEnabled turns on POST /decision/review-verdict (docs/18). When false the
+	// endpoint answers 503.
+	ReviewGateEnabled bool
+	// ReviewJudge makes the judgments for that endpoint. Without a judge that has an API
+	// key the endpoint answers 503.
+	ReviewJudge ReviewJudge
 	// Now overrides the evaluation clock in tests when non-nil.
 	Now func() time.Time
 	// SnapshotLoader optionally overrides loading usage snapshots from QuotaUsageFile in tests.
@@ -128,6 +134,10 @@ func normalizeScopes(scopes []string) ([]string, map[string]struct{}) {
 
 // Server exposes the quota-fleet Job Store over an HTTP JSON API.
 type Server struct {
+	// Review verdict gate (docs/18).
+	reviewGateEnabled bool
+	reviewJudge       ReviewJudge
+
 	store           *store.Store
 	instanceID      string
 	maxClaimed      int
@@ -215,6 +225,9 @@ func NewServer(st *store.Store, opts Options) *Server {
 	}
 
 	s := &Server{
+		reviewGateEnabled: opts.ReviewGateEnabled,
+		reviewJudge:       opts.ReviewJudge,
+
 		store:           st,
 		instanceID:      opts.InstanceID,
 		maxClaimed:      maxClaimed,
@@ -263,6 +276,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("GET /agents", s.requireScope(config.ScopeRead, s.handleGetAgents))
 	mux.HandleFunc("GET /agents/events", s.requireScope(config.ScopeRead, s.handleListAgentEvents))
 	mux.HandleFunc("POST /agents/check", s.requireScope(config.ScopeOperate, s.handleCheckAgents))
+	mux.HandleFunc("POST /decision/review-verdict", s.requireScope(config.ScopeOperate, s.handleReviewVerdict))
 	apiHandler := s.authMiddleware(mux)
 	uiHandler := ui.NewHandler()
 
@@ -1297,6 +1311,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		PoolRules:     poolRules,
 		GateMode:      s.gateMode,
 		EvaluatorMode: s.evaluatorMode,
+		ReviewGate:    s.reviewGateMeta(),
 		PoolSummaries: summaries,
 		Scopes:        scopes,
 	})

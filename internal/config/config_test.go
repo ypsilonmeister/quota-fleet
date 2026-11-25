@@ -1273,3 +1273,48 @@ func TestAPIMCPAllowedOriginHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestEvaluatorResolveAPIKey(t *testing.T) {
+	env := map[string]string{DefaultEvaluatorAPIKeyEnv: " default-env ", "CUSTOM_KEY": "custom-env"}
+	getenv := func(name string) string { return env[name] }
+	for yamlText, want := range map[string]string{
+		"instance_id: x\n": "default-env",
+		"instance_id: x\nevaluator:\n  api_key_env: CUSTOM_KEY\n":                             "custom-env",
+		"instance_id: x\nevaluator:\n  api_key: from-yaml\n":                                  "from-yaml",
+		"instance_id: x\nevaluator:\n  api_key: \" from-yaml \"\n  api_key_env: CUSTOM_KEY\n": "from-yaml",
+		"instance_id: x\nevaluator:\n  api_key: \"  \"\n  api_key_env: CUSTOM_KEY\n":          "custom-env",
+		"instance_id: x\nevaluator:\n  api_key_env: UNSET_KEY\n":                              "",
+	} {
+		cfg, err := Parse([]byte(yamlText))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", yamlText, err)
+		}
+		if got := cfg.Evaluator.ResolveAPIKey(getenv); got != want {
+			t.Errorf("ResolveAPIKey for %q = %q, want %q", yamlText, got, want)
+		}
+	}
+
+	t.Setenv(DefaultEvaluatorAPIKeyEnv, "process-env")
+	if got := (EvaluatorConfig{}).ResolveAPIKey(nil); got != "process-env" {
+		t.Errorf("ResolveAPIKey(nil) = %q, want the process environment value", got)
+	}
+}
+
+func TestReviewGateDefaultsFalseAndParses(t *testing.T) {
+	for yamlText, want := range map[string]bool{
+		"instance_id: x\n": false,
+		"instance_id: x\nreview_gate:\n  enabled: false\n": false,
+		"instance_id: x\nreview_gate:\n  enabled: true\n":  true,
+	} {
+		cfg, err := Parse([]byte(yamlText))
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", yamlText, err)
+		}
+		if cfg.ReviewGate.Enabled != want {
+			t.Errorf("Parse(%q) review_gate.enabled = %v, want %v", yamlText, cfg.ReviewGate.Enabled, want)
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate(%q): %v", yamlText, err)
+		}
+	}
+}

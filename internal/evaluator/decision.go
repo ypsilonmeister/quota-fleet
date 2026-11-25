@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
+	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -55,6 +56,8 @@ type TypedDecisionOptions struct {
 	Model string
 	// APIKeyEnv is the environment variable name holding the Gemini API key (defaults to GEMINI_API_KEY).
 	APIKeyEnv string
+	// APIKey is the Gemini API key itself. When set it takes precedence over APIKeyEnv. Secret.
+	APIKey string
 	// DecisionThreshold is the minimum noul probability required for PASS (defaults to 0.5).
 	// Use ThresholdSet or leave 0 for the default 0.5.
 	DecisionThreshold float64
@@ -78,6 +81,7 @@ type TypedDecisionEvaluator struct {
 	Endpoint          string
 	Model             string
 	APIKeyEnv         string
+	APIKey            string
 	DecisionThreshold float64
 	CommandTimeout    time.Duration
 	APITimeout        time.Duration
@@ -119,6 +123,7 @@ func NewTypedDecision(opts TypedDecisionOptions) *TypedDecisionEvaluator {
 		Endpoint:          endpoint,
 		Model:             model,
 		APIKeyEnv:         apiKeyEnv,
+		APIKey:            opts.APIKey,
 		DecisionThreshold: threshold,
 		CommandTimeout:    cmdTimeout,
 		APITimeout:        apiTimeout,
@@ -267,20 +272,9 @@ func (e *TypedDecisionEvaluator) evaluateFreeform(
 	fa FileAccess,
 	items []indexedFreeform,
 ) ([]CriterionResult, error) {
-	envName := strings.TrimSpace(e.APIKeyEnv)
-	if envName == "" {
-		envName = DefaultAPIKeyEnv
-	}
-	getenv := e.Getenv
-	if getenv == nil {
-		getenv = os.Getenv
-	}
-	apiKey := strings.TrimSpace(getenv(envName))
-	if apiKey == "" {
-		return nil, &EvaluationUnavailableError{
-			Kind:   UnavailableMissingAPIKey,
-			Reason: fmt.Sprintf("API key environment variable %s is not set", envName),
-		}
+	apiKey, err := e.requireAPIKey()
+	if err != nil {
+		return nil, err
 	}
 
 	sharedInput := buildDecisionSharedInputWithFileAccess(ctx, job, ev, fa)
@@ -298,21 +292,89 @@ func (e *TypedDecisionEvaluator) evaluateFreeform(
 		}
 	}
 
-	model := strings.TrimSpace(e.Model)
-	if model == "" {
-		model = DefaultDecisionModel
+	parsed, err := e.callDecisions(ctx, apiKey, sharedInput, questions)
+	if err != nil {
+		return nil, err
 	}
+
+	threshold := e.DecisionThreshold
+	out := make([]CriterionResult, len(items))
+	for i, item := range items {
+		prob, err := noulProbability(parsed, keys[i])
+		if err != nil {
+			return nil, err
+		}
+
+		passed := prob >= threshold
+		op := "<"
+		if passed {
+			op = ">="
+		}
+		out[i] = CriterionResult{
+			Criterion: item.text,
+			Passed:    passed,
+			Evidence:  fmt.Sprintf("decision1 noul p=%.2f (%s %.2f)", prob, op, threshold),
+		}
+	}
+	return out, nil
+}
+
+// ModelName returns the Decisions model the client calls.
+func (e *TypedDecisionEvaluator) ModelName() string {
+	if model := strings.TrimSpace(e.Model); model != "" {
+		return model
+	}
+	return DefaultDecisionModel
+}
+
+// HasAPIKey reports whether an API key is currently configured, without exposing it.
+func (e *TypedDecisionEvaluator) HasAPIKey() bool {
+	return e.resolveAPIKey() != ""
+}
+
+func (e *TypedDecisionEvaluator) apiKeyEnvName() string {
+	if v := strings.TrimSpace(e.APIKeyEnv); v != "" {
+		return v
+	}
+	return DefaultAPIKeyEnv
+}
+
+func (e *TypedDecisionEvaluator) resolveAPIKey() string {
+	return config.EvaluatorConfig{APIKey: e.APIKey, APIKeyEnv: e.apiKeyEnvName()}.ResolveAPIKey(e.Getenv)
+}
+
+func (e *TypedDecisionEvaluator) requireAPIKey() (string, error) {
+	apiKey := e.resolveAPIKey()
+	if apiKey == "" {
+		return "", &EvaluationUnavailableError{
+			Kind: UnavailableMissingAPIKey,
+			Reason: fmt.Sprintf("API key environment variable %s is not set and evaluator.api_key is empty",
+				e.apiKeyEnvName()),
+		}
+	}
+	return apiKey, nil
+}
+
+// callDecisions posts one Decisions API request. Every failure is an
+// EvaluationUnavailableError (or the context error), and none of them contains apiKey.
+func (e *TypedDecisionEvaluator) callDecisions(
+	ctx context.Context,
+	apiKey string,
+	input string,
+	questions map[string]decisionQuestion,
+) (decisionsResponse, error) {
+	var none decisionsResponse
 	reqPayload := decisionsRequest{
-		Model: model,
+		Model: e.ModelName(),
 		Input: []decisionsInputPart{
-			{Type: "text", Text: sharedInput},
+			{Type: "text", Text: input},
 		},
 		Questions: questions,
 	}
 
 	bodyBytes, err := json.Marshal(reqPayload)
 	if err != nil {
-		return nil, &EvaluationUnavailableError{
+		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableAPIError,
 			Reason: "marshal decisions request",
 			Err:    err,
@@ -333,7 +395,7 @@ func (e *TypedDecisionEvaluator) evaluateFreeform(
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, &EvaluationUnavailableError{
+		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableAPIError,
 			Reason: "build decisions request",
 			Err:    err,
@@ -346,19 +408,19 @@ func (e *TypedDecisionEvaluator) evaluateFreeform(
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return none, ctx.Err()
 		}
 		if isTimeoutErr(reqCtx, err) {
-			return nil, &EvaluationUnavailableError{
+			return none, &EvaluationUnavailableError{
 				Kind:   UnavailableTimeout,
 				Reason: fmt.Sprintf("decisions API request timed out after %s", apiTimeout),
 				Err:    err,
 			}
 		}
-		return nil, &EvaluationUnavailableError{
+		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableAPIError,
 			Reason: "decisions API request failed",
-			Err:    err,
+			Err:    redactError(err, apiKey),
 		}
 	}
 	defer resp.Body.Close()
@@ -366,35 +428,36 @@ func (e *TypedDecisionEvaluator) evaluateFreeform(
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes+1))
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return none, ctx.Err()
 		}
 		if isTimeoutErr(reqCtx, err) {
-			return nil, &EvaluationUnavailableError{
+			return none, &EvaluationUnavailableError{
 				Kind:   UnavailableTimeout,
 				Reason: "reading decisions API response timed out",
 				Err:    err,
 			}
 		}
-		return nil, &EvaluationUnavailableError{
+		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableAPIError,
 			Reason: "read decisions API response",
 			Err:    err,
 		}
 	}
 	if len(respBody) > maxAPIResponseBytes {
-		return nil, &EvaluationUnavailableError{
+		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableInvalidResp,
 			Reason: fmt.Sprintf("decisions API response exceeded %d bytes", maxAPIResponseBytes),
 		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		snippet := sanitizeOneLineSnippet(string(respBody), maxAPIErrorBodyBytes)
+		// Redact before truncating so that a cut cannot leave part of an echoed key behind.
+		snippet := sanitizeOneLineSnippet(redactSecret(string(respBody), apiKey), maxAPIErrorBodyBytes)
 		reason := fmt.Sprintf("decisions API returned HTTP %d", resp.StatusCode)
 		if snippet != "" {
 			reason = fmt.Sprintf("%s: %s", reason, snippet)
 		}
-		return nil, &EvaluationUnavailableError{
+		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableAPIError,
 			Reason: reason,
 		}
@@ -402,56 +465,44 @@ func (e *TypedDecisionEvaluator) evaluateFreeform(
 
 	var parsed decisionsResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, &EvaluationUnavailableError{
+		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableInvalidResp,
 			Reason: "invalid JSON from decisions API",
 			Err:    err,
 		}
 	}
 	if parsed.Answers == nil {
-		return nil, &EvaluationUnavailableError{
+		return none, &EvaluationUnavailableError{
 			Kind:   UnavailableInvalidResp,
 			Reason: "decisions API response missing answers object",
 		}
 	}
 
-	threshold := e.DecisionThreshold
-	out := make([]CriterionResult, len(items))
-	for i, item := range items {
-		key := keys[i]
-		ans, ok := parsed.Answers[key]
-		if !ok {
-			return nil, &EvaluationUnavailableError{
-				Kind:   UnavailableInvalidResp,
-				Reason: fmt.Sprintf("decisions API response missing answer for %q", key),
-			}
-		}
-		if ans.Noul == nil {
-			return nil, &EvaluationUnavailableError{
-				Kind:   UnavailableInvalidResp,
-				Reason: fmt.Sprintf("decisions API answer for %q missing noul probability", key),
-			}
-		}
-		prob := *ans.Noul
-		if math.IsNaN(prob) || math.IsInf(prob, 0) || prob < 0 || prob > 1 {
-			return nil, &EvaluationUnavailableError{
-				Kind:   UnavailableInvalidResp,
-				Reason: fmt.Sprintf("decisions API answer for %q has invalid noul probability %v", key, prob),
-			}
-		}
+	return parsed, nil
+}
 
-		passed := prob >= threshold
-		op := "<"
-		if passed {
-			op = ">="
-		}
-		out[i] = CriterionResult{
-			Criterion: item.text,
-			Passed:    passed,
-			Evidence:  fmt.Sprintf("decision1 noul p=%.2f (%s %.2f)", prob, op, threshold),
+func noulProbability(parsed decisionsResponse, key string) (float64, error) {
+	ans, ok := parsed.Answers[key]
+	if !ok {
+		return 0, &EvaluationUnavailableError{
+			Kind:   UnavailableInvalidResp,
+			Reason: fmt.Sprintf("decisions API response missing answer for %q", key),
 		}
 	}
-	return out, nil
+	if ans.Noul == nil {
+		return 0, &EvaluationUnavailableError{
+			Kind:   UnavailableInvalidResp,
+			Reason: fmt.Sprintf("decisions API answer for %q missing noul probability", key),
+		}
+	}
+	prob := *ans.Noul
+	if math.IsNaN(prob) || math.IsInf(prob, 0) || prob < 0 || prob > 1 {
+		return 0, &EvaluationUnavailableError{
+			Kind:   UnavailableInvalidResp,
+			Reason: fmt.Sprintf("decisions API answer for %q has invalid noul probability %v", key, prob),
+		}
+	}
+	return prob, nil
 }
 
 func (e *TypedDecisionEvaluator) effectiveHTTPClient(timeout time.Duration) *http.Client {
@@ -464,6 +515,23 @@ func (e *TypedDecisionEvaluator) effectiveHTTPClient(timeout time.Duration) *htt
 			return errors.New("redirect refused")
 		},
 	}
+}
+
+func redactSecret(s, secret string) string {
+	if secret == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, secret, "[REDACTED]")
+}
+
+// redactError keeps err as is unless its message contains secret, in which case only the
+// redacted message survives.
+func redactError(err error, secret string) error {
+	msg := err.Error()
+	if redacted := redactSecret(msg, secret); redacted != msg {
+		return errors.New(redacted)
+	}
+	return err
 }
 
 func isTimeoutErr(reqCtx context.Context, err error) bool {

@@ -130,6 +130,16 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
 CREATE INDEX IF NOT EXISTS idx_gate_decisions_id_desc ON gate_decisions(id DESC);
 CREATE INDEX IF NOT EXISTS idx_gate_decisions_job_id ON gate_decisions(job_id);
 
+CREATE TABLE IF NOT EXISTS decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    job_id INTEGER NULL,
+    review_job_id INTEGER NULL,
+    verdict TEXT NOT NULL CHECK(verdict IN ('ok_to_merge','changes_needed')),
+    score REAL NOT NULL,
+    model TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agent_versions (
     host TEXT NOT NULL,
     agent TEXT NOT NULL,

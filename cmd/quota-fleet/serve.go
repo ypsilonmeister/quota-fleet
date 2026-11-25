@@ -93,14 +93,18 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		return 1
 	}
 
+	// One Decision 1 client serves both acceptance evaluation and the review gate (docs/18).
+	decisionClient := evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{
+		APIKeyEnv:         cfg.Evaluator.EffectiveAPIKeyEnv(),
+		APIKey:            cfg.Evaluator.APIKey,
+		DecisionThreshold: cfg.Evaluator.EffectiveDecisionThreshold(),
+		ThresholdSet:      cfg.Evaluator.DecisionThreshold != nil,
+	})
+
 	var jobEvaluator evaluator.Evaluator
 	switch cfg.Evaluator.EffectiveMode() {
 	case config.EvaluatorModeTypedDecision:
-		jobEvaluator = evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{
-			APIKeyEnv:         cfg.Evaluator.EffectiveAPIKeyEnv(),
-			DecisionThreshold: cfg.Evaluator.EffectiveDecisionThreshold(),
-			ThresholdSet:      cfg.Evaluator.DecisionThreshold != nil,
-		})
+		jobEvaluator = decisionClient
 	case config.EvaluatorModeAlwaysPass:
 		jobEvaluator = evaluator.NewAlwaysPass()
 	default:
@@ -167,6 +171,9 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		}
 	}
 	apiSrv := api.NewServer(st, api.Options{
+		ReviewGateEnabled: cfg.ReviewGate.Enabled,
+		ReviewJudge:       decisionClient,
+
 		MCPHandler:      mcpHandler,
 		JobEvents:       cfg.API.JobEvents,
 		InstanceID:      cfg.InstanceID,
@@ -276,21 +283,35 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 	fmt.Fprintf(w, "  adapter:   %s\n", adapterName)
 	fmt.Fprintf(w, "  gate_mode: %s\n", gateMode)
 	fmt.Fprintf(w, "  evaluator: %s\n", evalMode)
+	reviewGateSummary := "disabled"
+	if cfg.ReviewGate.Enabled {
+		reviewGateSummary = "enabled"
+	}
+	fmt.Fprintf(w, "  review_gate: %s\n", reviewGateSummary)
 	fmt.Fprintf(w, "  notifier:  %s\n", notifierSummary)
 	fmt.Fprintf(w, "  api_auth:  %s\n", apiAuthSummary)
 	fmt.Fprintf(w, "  agents_check: %s\n", agentsCheckSummary)
 	fmt.Fprintf(w, "  models_check: %s\n", modelsCheckSummary)
 	fmt.Fprintf(w, "  ui_url:    %s\n", formatPlannedUIURL(listen))
 
-	if evalMode == config.EvaluatorModeTypedDecision && strings.TrimSpace(os.Getenv(apiKeyEnv)) == "" {
-		warnMsg := fmt.Sprintf(
-			"%s is not set while evaluator.mode is %q; free-form acceptance criteria will fail evaluation (set %s or set evaluator.mode to %q)",
-			apiKeyEnv, evalMode, apiKeyEnv, config.EvaluatorModeAlwaysPass,
-		)
+	keyConfigured := cfg.Evaluator.ResolveAPIKey(nil) != ""
+	warn := func(warnMsg string) {
 		fmt.Fprintf(w, "  WARNING:   %s\n", warnMsg)
 		if logger != nil {
 			logger.Printf("WARNING: %s", warnMsg)
 		}
+	}
+	if evalMode == config.EvaluatorModeTypedDecision && !keyConfigured {
+		warn(fmt.Sprintf(
+			"%s is not set and evaluator.api_key is empty while evaluator.mode is %q; free-form acceptance criteria will fail evaluation (set %s or evaluator.api_key, or set evaluator.mode to %q)",
+			apiKeyEnv, evalMode, apiKeyEnv, config.EvaluatorModeAlwaysPass,
+		))
+	}
+	if cfg.ReviewGate.Enabled && !keyConfigured {
+		warn(fmt.Sprintf(
+			"review_gate.enabled is true but no Decision API key is configured; POST /decision/review-verdict will answer 503 (set %s or evaluator.api_key)",
+			apiKeyEnv,
+		))
 	}
 }
 
