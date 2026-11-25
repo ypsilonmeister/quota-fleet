@@ -162,19 +162,39 @@ func Select(in Input) Result {
 			cands = append(cands, c)
 		}
 	}
+	widened := false
+	if len(cands) == 0 {
+		// The role/weight row has nothing compatible with the explicit fields: widen to
+		// every known candidate (fixed, deterministic order) before giving up.
+		for _, c := range allCandidates {
+			if in.compatible(c) {
+				cands = append(cands, c)
+			}
+		}
+		widened = true
+	}
 	if len(cands) == 0 {
 		return noCandidate(in, head)
+	}
+	if widened {
+		head += "; role/weight row has no candidate compatible with the explicit fields, widened to all known candidates"
 	}
 
 	var (
 		notes     []string
-		firstLive *Candidate // first candidate that is not exhausted (usage may be unknown)
+		firstLive *Candidate // first candidate that is not exhausted/unmeasured (usage may be unknown)
 		healthy   *Candidate
-		exhausted int
+		missing   bool
+		stale     bool
+		allUnmeas = true
+		anyUnmeas bool
 	)
 	for i := range cands {
 		c := cands[i]
 		ev := quota.EvaluatePool(c.Pool, in.Usage, in.Eval)
+		if ev.Status != quota.PoolUnmeasured {
+			allUnmeas = false
+		}
 		switch ev.Status {
 		case quota.PoolHealthy:
 			notes = append(notes, fmt.Sprintf("%s: healthy", c.Pool))
@@ -185,14 +205,22 @@ func Select(in Input) Result {
 				firstLive = &cands[i]
 			}
 		case quota.PoolExhausted:
-			exhausted++
-			notes = append(notes, fmt.Sprintf("%s: exhausted(%s) excluded", c.Pool, ev.BlockedBy))
+			notes = append(notes, fmt.Sprintf("%s: exhausted(%s), excluded", c.Pool, ev.BlockedBy))
+		case quota.PoolUnmeasured:
+			anyUnmeas = true
+			// docs/10: pools without a measurement are never chosen automatically.
+			notes = append(notes, fmt.Sprintf("%s: unmeasured (pools.%s.unmeasured), excluded", c.Pool, c.Pool))
 		default:
 			why := ev.Reason
 			if in.UsageErr != nil {
 				why = "usage_unavailable"
 			}
-			notes = append(notes, fmt.Sprintf("%s: %s(%s) excluded", c.Pool, ev.Status, why))
+			if strings.Contains(strings.ToLower(string(ev.Status)+why), "stale") {
+				stale = true
+			} else {
+				missing = true
+			}
+			notes = append(notes, fmt.Sprintf("%s: %s(%s), unconfirmed", c.Pool, ev.Status, why))
 			if firstLive == nil {
 				firstLive = &cands[i]
 			}
@@ -203,20 +231,44 @@ func Select(in Input) Result {
 		return Result{Candidate: in.complete(*healthy), Reason: fmt.Sprintf("%s; chose %s/%s on pool %s; %s", head, healthy.Agent, healthy.Model, healthy.Pool, strings.Join(notes, ", "))}
 	}
 	if firstLive != nil {
-		// No pool could be confirmed healthy: usage is stale/missing/unmeasured. Say so.
+		kind := "usage missing"
+		if stale && !missing {
+			kind = "usage stale"
+		} else if stale && missing {
+			kind = "usage stale or missing"
+		}
 		return Result{
 			Candidate: in.complete(*firstLive),
 			Fallback:  true,
-			Reason:    fmt.Sprintf("%s; FALLBACK to deterministic default order (usage stale or missing): %s/%s on pool %s; %s", head, firstLive.Agent, firstLive.Model, firstLive.Pool, strings.Join(notes, ", ")),
+			Reason:    fmt.Sprintf("%s; FALLBACK to deterministic default order (%s): chose %s/%s on pool %s; %s", head, kind, firstLive.Agent, firstLive.Model, firstLive.Pool, strings.Join(notes, ", ")),
 		}
 	}
-	// Every candidate pool is exhausted. Keep the table's first candidate and let the Gate hold.
+	// No pool is usable (all exhausted, or all unmeasured). Keep the first table candidate;
+	// the Gate (which now sees this pool) decides whether to hold.
 	c := cands[0]
+	why := "all candidate pools exhausted"
+	if allUnmeas {
+		why = "all candidate pools unmeasured (excluded from automatic selection)"
+	} else if anyUnmeas {
+		why = "all candidate pools exhausted or unmeasured"
+	}
 	return Result{
 		Candidate: in.complete(c),
 		Fallback:  true,
-		Reason:    fmt.Sprintf("%s; all candidate pools exhausted, kept first table candidate %s/%s on pool %s for the Gate to hold; %s", head, c.Agent, c.Model, c.Pool, strings.Join(notes, ", ")),
+		Reason:    fmt.Sprintf("%s; %s, kept first table candidate %s/%s on pool %s for the Gate to judge; %s", head, why, c.Agent, c.Model, c.Pool, strings.Join(notes, ", ")),
 	}
+}
+
+var allCandidates = []Candidate{codexSol, agyNeonMedium, claudeSonnet, claudeOpus, codexAstra, agyNeonXHigh}
+
+// PoolFor returns the pool of a known table candidate matching agent and model, or "".
+func PoolFor(agent, model string) string {
+	for _, c := range allCandidates {
+		if strings.EqualFold(c.Agent, agent) && c.Model == model {
+			return c.Pool
+		}
+	}
+	return ""
 }
 
 // complete merges explicit input over the candidate (explicit always wins).

@@ -400,11 +400,11 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !selector.ValidRole(strings.TrimSpace(req.Role)) {
+	if s.selectorMode != config.SelectorModeOff && !selector.ValidRole(strings.TrimSpace(req.Role)) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: role %q is not supported (implement|review|judge|fix|publish|misc)", store.ErrInvalidInput, req.Role))
 		return
 	}
-	if !selector.ValidWeight(strings.TrimSpace(req.Weight)) {
+	if s.selectorMode != config.SelectorModeOff && !selector.ValidWeight(strings.TrimSpace(req.Weight)) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: weight %q is not supported (light|standard|heavy)", store.ErrInvalidInput, req.Weight))
 		return
 	}
@@ -448,7 +448,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if created && s.gateMode == config.GateModeDryRun {
-		s.recordDryRunGateDecision(r.Context(), job, req)
+		s.recordDryRunGateDecision(r.Context(), job, params.Pool, req.AltPools)
 	}
 
 	status := http.StatusOK
@@ -525,7 +525,8 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	reqPool := s.resolveRequestPool(req)
+	// Gate input is the pool the job will actually run on (after the Selector).
+	reqPool := params.Pool
 	if reqPool == "" && len(req.AltPools) == 0 {
 		job, created, err := s.store.CreateJob(ctx, params)
 		if err != nil {
@@ -675,10 +676,25 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 	resolve := func(a, m string) string { return quota.ResolvePoolByAppliesTo(s.pools, a, m) }
 
 	if agent != "" && model != "" {
+		if params.Pool == "" {
+			// Known table pair: fill the pool so the Gate sees it (apply mode only fills).
+			if p := selector.PoolFor(agent, model); p != "" && s.selectorMode == config.SelectorModeApply {
+				params.Pool = p
+			}
+		}
 		params.SelectedAgent, params.SelectedModel, params.SelectedPool = agent, model, params.Pool
 		params.SelectionMode = selector.ModeExplicit
 		params.SelectionReason = "agent and model explicitly specified; selector not consulted"
 		return
+	}
+
+	var parentNote string
+	if s.selectorMode == config.SelectorModeApply && strings.TrimSpace(req.Role) == selector.RoleFix && req.ParentID != nil && agent == "" && model == "" {
+		// docs/10 §4: fix runs on the same implementer as the parent job.
+		if parent, err := s.store.GetJob(context.Background(), *req.ParentID); err == nil && parent.Agent != "" {
+			agent, model = parent.Agent, parent.Model
+			parentNote = fmt.Sprintf("fix follows parent job #%d (%s/%s); ", parent.ID, agent, model)
+		}
 	}
 
 	snap, snapErr := s.loadSnapshotForSelector()
@@ -694,15 +710,15 @@ func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobReque
 		ResolvePool: resolve,
 	})
 	params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Agent, res.Model, res.Pool
-	params.SelectionReason = res.Reason
+	params.SelectionReason = parentNote + res.Reason
 
 	switch s.selectorMode {
 	case config.SelectorModeApply:
 		params.SelectionMode = selector.ModeApplied
-		if agent == "" {
+		if strings.TrimSpace(req.Agent) == "" {
 			params.Agent = res.Agent
 		}
-		if model == "" {
+		if strings.TrimSpace(req.Model) == "" {
 			params.Model = res.Model
 		}
 		if explicitPool == "" && res.Pool != "" {
@@ -770,13 +786,12 @@ func (s *Server) evaluateGate(primaryPool string, altPools []string) (quota.Gate
 	return quota.EvaluateFromFile(s.quotaUsageFile, primaryPool, altPools, opts)
 }
 
-func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, req CreateJobRequest) {
-	reqPool := s.resolveRequestPool(req)
-	if reqPool == "" && len(req.AltPools) == 0 {
+func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, reqPool string, altPools []string) {
+	if reqPool == "" && len(altPools) == 0 {
 		return
 	}
 
-	eval, evalErr := s.evaluateGate(reqPool, req.AltPools)
+	eval, evalErr := s.evaluateGate(reqPool, altPools)
 	if evalErr != nil {
 		s.logger.Printf("WARNING: quota gate dry-run evaluation for job #%d failed to load snapshot: %v", job.ID, evalErr)
 	}

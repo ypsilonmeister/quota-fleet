@@ -62,3 +62,11 @@ store には jobs テーブルの列追加マイグレーションで保持す�
 ## 7. 未実装・留意
 - S3（チェーン自動編成）、host 制約、親モデルによる別系統レビュー、残量スナップショット全体の保存（理由文字列に要約のみ）。
 - Gate が `alt_pools` で別プールに倒した場合、ジョブの `pool` は Gate の結果、`selected_pool` は Selector の選択のまま残る。
+
+## レビュー修正で確定した挙動（PR #22）
+
+- **Gate の入力**: enforce / dry-run とも、Selector 適用後に実際に実行されるプール（apply は選択結果、record は既定 codex）を評価する。apply で全候補が枯渇、record の既定プールが枯渇している場合は Gate が保持（HTTP 202）する。
+- **部分指定の補完**: role/weight の行に適合候補が無い場合は全既知候補（固定順）へ広げて、指定された agent / model / pool と両立するものを探す。agent+model が表の既知ペアなら pool も補完（apply のみ）。表に無い組み合わせは指定値のまま保持し、足りない項目は空のまま理由に記録する。
+- **off**: role / weight は受理するが検証も使用もしない（従来クライアント互換を優先）。Issue #21 の「agent 未指定はバリデーションエラー」は採用していない（要合意）。record / apply では不正な role / weight は 400。
+- **fix**: apply で `parent_id` があり agent/model 未指定なら親ジョブの agent/model に追従する。親が取得できない場合は implement 行。**judge**: docs/10 の Gemini Decision（評価器）はジョブではないため S1/S2 の対象外で、暫定的に agy Neon で実行する。
+- **未測定プール**: `unmeasured` のプールは自動選択から除外する（全候補が未測定／枯渇のときのみ表の先頭を保持し Gate に委ねる）。理由には usage 欠落（missing）／stale／unmeasured／exhausted を区別して記録する。
