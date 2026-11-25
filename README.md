@@ -4,12 +4,30 @@ A design and specification for running a **fleet of coding agents on flat-rate
 subscription quotas**, with a verification pipeline that makes their output
 trustworthy enough to merge.
 
-> Status: **active implementation**. Core phases 1–3 and Phase 4 preparation
-> (SQLite job store, HTTP API, Dispatcher/Launcher/Shepherd/Reconciler runtime,
-> SSH/local host adapter, Quota Gate, typed+decision Evaluator, file/webhook
-> Notifier, and Phase UI-0 bootstrap CLI) are implemented. The embedded web UI
-> is planned for **Phase UI-1**, and the MCP server (`quota-fleet mcp`) is
-> planned for **Phase UI-2** (see [docs/07-ui-and-mcp.md](docs/07-ui-and-mcp.md)).
+> Status: **active implementation**.
+>
+> Implemented:
+>
+> - Core **Phases 1–4** ([docs/06](docs/06-implementation-design.md)): SQLite
+>   job store, HTTP API, Dispatcher/Launcher/Shepherd/Reconciler runtime,
+>   SSH/local host adapter, Quota Gate, typed+decision Evaluator, and
+>   file/webhook Notifier.
+> - Embedded **web UI** at `/ui/` ([docs/07](docs/07-ui-and-mcp.md)), including
+>   the model pick list and automatic pool derivation
+>   ([docs/11](docs/11-ui-models.md)).
+> - **MCP server** over stdio (`quota-fleet mcp`, docs/07) and Streamable HTTP
+>   (`/mcp`, [docs/13](docs/13-mcp-http.md); enable with `api.mcp_http: true`).
+> - **Scoped API tokens** (`api.tokens`, [docs/12](docs/12-api-tokens.md)).
+> - **Browser notifications** on job completion while the UI is open
+>   ([docs/14](docs/14-job-notifications.md); enable with
+>   `api.job_events: true`, then turn them on in the UI).
+>
+> Not yet implemented:
+>
+> - Automatic agent/model/pool selection (the Selector,
+>   [docs/10](docs/10-selector.md)) is planned; only the design exists.
+> - Web Push (notifications while no UI tab is open) is not implemented
+>   (a non-goal of docs/14).
 
 ## Quickstart
 
@@ -25,12 +43,14 @@ trustworthy enough to merge.
    `quota-fleet init` writes a minimal `fleet.yaml` (mode `0600`) with a
    generated `instance_id` and Bearer API token. `quota-fleet serve` prints a
    startup banner showing the active adapter, gate mode, evaluator mode,
-   notifier, API auth status, and planned UI URL.
+   notifier, API auth status, and UI URL.
 3. **Register your first job in the UI**:
-   Open the UI URL shown in the startup banner (default `http://127.0.0.1:8737/ui/`).
-   *Note: the embedded web UI is planned for **Phase UI-1**; until then, you can
-   register jobs via CLI (`quota-fleet job create --title "..."`) or the HTTP API.
-   To generate MCP client config snippets for AI clients, run `quota-fleet mcp config`.*
+   Open the UI URL shown in the startup banner (default
+   `http://127.0.0.1:8737/ui/`), enter the API token (`api.token` in
+   `fleet.yaml`), and create a job from the new-job form. You can also register
+   jobs with the CLI (`quota-fleet job create --title "..."`) or the HTTP API.
+   To generate MCP client config snippets for AI clients, run
+   `quota-fleet mcp config`.
 
 ## Supported OS boundaries (v1)
 
@@ -94,8 +114,8 @@ the missing control plane around them.
 
 ## Repository layout
 
-- `cmd/quota-fleet/` — CLI entrypoint (`init`, `serve`, `job`, `gate`, `mcp config`, `config check`, `status`)
-- `internal/` — store, config, API server, runtime, SSH/local adapter, quota gate, evaluator
+- `cmd/quota-fleet/` — CLI entrypoint (`init`, `serve`, `job`, `gate`, `agents`, `mcp`, `mcp config`, `config check`, `status`)
+- `internal/` — store, config, API server, runtime, SSH/local adapter, quota gate, evaluator, web UI, MCP server, agent version and model probes
 - `docs/01-architecture.md` — components and how they interact
 - `docs/02-job-model.md` — job states, claims, chains, failure semantics
 - `docs/03-quota-gate.md` — pools, the hold/release gate, burn-down jobs
@@ -103,6 +123,13 @@ the missing control plane around them.
 - `docs/05-case-study.md` — the system in production: a real OSS release
 - `docs/06-implementation-design.md` — standalone implementation specification
 - `docs/07-ui-and-mcp.md` — embedded UI and MCP design (v2)
+- `docs/08-agent-versions.md` — agent version inventory and drift notification
+- `docs/09-ui-redesign.md` — web UI visual redesign notes
+- `docs/10-selector.md` — automatic model selection design (not yet implemented)
+- `docs/11-ui-models.md` — UI model selection and automatic pool derivation
+- `docs/12-api-tokens.md` — API token scopes and audit
+- `docs/13-mcp-http.md` — MCP over Streamable HTTP
+- `docs/14-job-notifications.md` — job completion browser notifications (SSE)
 
 ## License
 
