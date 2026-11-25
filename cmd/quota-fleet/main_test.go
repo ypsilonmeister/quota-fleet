@@ -104,6 +104,14 @@ pools:
 	}
 }
 
+// stopServe closes the test client's idle connections and then cancels serve. The client
+// can hold a connection it dialed but never used, and http.Server.Shutdown waits about five
+// seconds for such a connection, which is as long as these tests wait for serve to exit.
+func stopServe(cancel context.CancelFunc) {
+	http.DefaultClient.CloseIdleConnections()
+	cancel()
+}
+
 func TestCLIJobCreateListGetCancelRequeue(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "cli-jobs.db")
 
@@ -287,7 +295,7 @@ evaluator:
 	}
 
 	// Trigger graceful shutdown and ensure serve exits cleanly with code 0.
-	cancel()
+	stopServe(cancel)
 	select {
 	case code := <-doneCh:
 		if code != 0 {
@@ -365,7 +373,7 @@ agents:
 		time.Sleep(15 * time.Millisecond)
 	}
 
-	cancel()
+	stopServe(cancel)
 	select {
 	case code := <-doneCh:
 		if code != 0 {
@@ -500,7 +508,7 @@ evaluator:
 		t.Errorf("unexpected ResultText:\n%s", resultText)
 	}
 
-	cancel()
+	stopServe(cancel)
 	select {
 	case code := <-doneCh:
 		if code != 0 {
@@ -869,7 +877,7 @@ quota:
 	}
 
 	// Stop serve cleanly before testing standalone CLI manual release.
-	cancel()
+	stopServe(cancel)
 	select {
 	case code := <-doneCh:
 		if code != 0 {
@@ -1057,7 +1065,7 @@ notifier:
 		t.Fatalf("unexpected webhook payload: %+v", gotPayload)
 	}
 
-	cancel()
+	stopServe(cancel)
 	select {
 	case code := <-doneCh:
 		if code != 0 {
