@@ -83,11 +83,13 @@ const vm = require("vm");
 const source = fs.readFileSync("assets/sw.js", "utf8");
 const ORIGIN = "https://fleet.example";
 
+// Notification behavior only; the app shell cache is covered by pwa_test.go.
 function load(windows) {
   const listeners = {};
   const log = { opened: [], queries: [], skipped: 0, claimed: 0, timers: [] };
   const self = {
     location: { origin: ORIGIN },
+    registration: { active: null },
     addEventListener: (type, fn) => { listeners[type] = fn; },
     skipWaiting: () => { log.skipped++; },
     clients: {
@@ -101,7 +103,9 @@ function load(windows) {
     setTimeout: (fn, ms) => { log.timers.push(ms); return setTimeout(fn, 20); },
     clearTimeout
   };
-  vm.runInNewContext(source, Object.assign({ self, URL, MessageChannel }, timers));
+  const caches = { open: async () => ({ addAll: async () => {} }), keys: async () => [] };
+  function Request(url) { this.url = url; }
+  vm.runInNewContext(source, Object.assign({ self, URL, MessageChannel, caches, Request }, timers));
   const click = async data => {
     let closed = false, waited = null;
     listeners.notificationclick({
@@ -134,8 +138,10 @@ function client(path, extra) {
 async function main() {
   {
     const w = load([]);
-    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["activate", "install", "notificationclick"], "no fetch handler");
-    w.listeners.install({});
+    assert.deepStrictEqual(Object.keys(w.listeners).sort(), ["activate", "fetch", "install", "notificationclick"]);
+    let installing = null;
+    w.listeners.install({ waitUntil: p => { installing = p; } });
+    await installing;
     assert.strictEqual(w.log.skipped, 1);
     let activating = null;
     w.listeners.activate({ waitUntil: p => { activating = p; } });
@@ -613,7 +619,7 @@ async function main() {
     assert.strictEqual(f.running(), 0, "default off");
     assert.strictEqual(f.view().enabled, false);
     assert.strictEqual(f.N.prompts, 0, "no permission prompt without a click");
-    assert.strictEqual(f.log.prepared, 0, "no service worker while off");
+    assert.strictEqual(f.log.prepared, 0, "the controller prepares nothing while off");
 
     await f.controller.toggle();
     assert.strictEqual(f.N.prompts, 1);

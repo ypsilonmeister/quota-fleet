@@ -3428,6 +3428,8 @@
   });
 
   // Boot
+  // Registered even with notifications off: the app shell cache needs it (docs/15).
+  void notificationPresenter.register();
   notifyController.sync();
   if (hasCredentialsConfigured()) {
     void refreshHeaderMeta();

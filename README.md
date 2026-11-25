@@ -23,6 +23,8 @@ trustworthy enough to merge.
 > - **Browser notifications** on job completion while the UI is open
 >   ([docs/14](docs/14-job-notifications.md); enable with
 >   `api.job_events: true`, then turn them on in the UI).
+> - **Installable web UI** (PWA) with an offline copy of the app shell
+>   ([docs/15](docs/15-pwa.md); needs HTTPS or localhost).
 >
 > Not yet implemented:
 >
@@ -137,6 +139,7 @@ the missing control plane around them.
 - `docs/12-api-tokens.md` — API token scopes and audit
 - `docs/13-mcp-http.md` — MCP over Streamable HTTP
 - `docs/14-job-notifications.md` — job completion browser notifications (SSE)
+- `docs/15-pwa.md` — installable web UI (manifest, icons, app shell cache)
 
 ## License
 

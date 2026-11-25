@@ -107,3 +107,41 @@ func TestUIShellServedWithoutAuthContainsNoDataAndKeepsAPIAuth(t *testing.T) {
 		}
 	}
 }
+
+func TestPWAFilesServedWithoutAuth(t *testing.T) {
+	st, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "fleet.db"), store.Options{InstanceID: "pwa"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := api.NewServer(st, api.Options{InstanceID: "pwa", Token: "secret", RequireAuth: true, JobEvents: true})
+
+	// Browsers fetch these without the bearer token.
+	for path, contentType := range map[string]string{
+		"/ui/manifest.webmanifest":         "application/manifest+json",
+		"/ui/sw.js":                        "application/javascript; charset=utf-8",
+		"/ui/assets/icon-192.png":          "image/png",
+		"/ui/assets/icon-512.png":          "image/png",
+		"/ui/assets/icon-maskable-512.png": "image/png",
+		"/ui/assets/apple-touch-icon.png":  "image/png",
+	} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("unauthenticated GET %s status = %d, want 200", path, rec.Code)
+		}
+		if got := rec.Header().Get("Content-Type"); got != contentType {
+			t.Errorf("GET %s Content-Type = %q, want %q", path, got, contentType)
+		}
+		if got := rec.Header().Get("Content-Security-Policy"); got != ui.ContentSecurityPolicy {
+			t.Errorf("GET %s CSP = %q, want %q", path, got, ui.ContentSecurityPolicy)
+		}
+	}
+
+	// The event stream stays behind authentication and outside the service worker scope.
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/events", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET /events status = %d, want 401", rec.Code)
+	}
+}
