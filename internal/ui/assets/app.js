@@ -1394,7 +1394,7 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "Held ID" }),
+            el("th", { text: L("field.heldID") }),
             el("th", { text: L("column.title") }),
             el("th", { text: L("column.pool") }),
             el("th", { text: L("column.holdReason") }),
@@ -1428,10 +1428,10 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "ID" }),
+            el("th", { text: L("field.id") }),
             el("th", { text: L("column.title") }),
             el("th", { text: L("column.status") }),
-            el("th", { text: "agent / host" }),
+            el("th", { text: L("field.agentHost") }),
             el("th", { text: L("column.createdAt") }),
             el("th", { text: L("column.parentJob") })
           ])
@@ -1511,7 +1511,7 @@
           el("tr", null, [
             el("th", { scope: "col", text: L("chain.tableHeading") }),
             el("th", { scope: "col", text: L("column.status") }),
-            el("th", { scope: "col", text: "agent / host" }),
+            el("th", { scope: "col", text: L("field.agentHost") }),
             el("th", { scope: "col", text: L("column.createdAt") })
           ])
         ]),
@@ -1739,11 +1739,11 @@
       }
     }, [
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "Agent" }),
+        el("span", { className: "field-label", text: L("field.agent") }),
         agentSelect
       ]),
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "Host" }),
+        el("span", { className: "field-label", text: L("field.host") }),
         hostSelect
       ]),
       el("label", { className: "field" }, [
@@ -2016,23 +2016,23 @@
 
     const metaGrid = el("div", { className: "kv-grid" }, [
       kv(L("column.status"), statusBadge(job.status)),
-      kv("Request ID", el("span", { className: "mono", text: job.request_id || "-" })),
-      kv("Agent", job.agent),
-      kv("Host", job.host),
-      kv("Workdir", el("span", { className: "mono", text: job.workdir || "-" })),
-      kv("Model", job.model),
-      kv("Pool", job.pool),
-      kv("Alt Pools", (Array.isArray(job.alt_pools) && job.alt_pools.length > 0) ? job.alt_pools.join(", ") : "-"),
+      kv(L("field.requestID"), el("span", { className: "mono", text: job.request_id || "-" })),
+      kv(L("field.agent"), job.agent),
+      kv(L("field.host"), job.host),
+      kv(L("field.workdir"), el("span", { className: "mono", text: job.workdir || "-" })),
+      kv(L("field.model"), job.model),
+      kv(L("field.pool"), job.pool),
+      kv(L("field.altPools"), (Array.isArray(job.alt_pools) && job.alt_pools.length > 0) ? job.alt_pools.join(", ") : "-"),
       kv(L("column.parentJob"), parentNode),
-      kv("Target Ref", el("span", { className: "mono", text: job.target_ref || "-" })),
-      kv("Worktree Spec", el("span", { className: "mono", text: wtText })),
-      kv("Attempts", String(job.attempts || 0)),
-      kv("Claimed By", el("span", { className: "mono", text: job.claimed_by || "-" })),
-      kv("Claimed At", el("span", { className: "mono", text: formatTime(job.claimed_at) })),
-      kv("Created At", el("span", { className: "mono", text: formatTime(job.created_at) })),
-      kv("Updated At", el("span", { className: "mono", text: formatTime(job.updated_at) })),
-      kv("Delivered At", el("span", { className: "mono", text: formatTime(job.delivered_at) })),
-      kv("Session ID", el("span", { className: "mono", text: job.session_id || "-" }))
+      kv(L("field.targetRef"), el("span", { className: "mono", text: job.target_ref || "-" })),
+      kv(L("field.worktreeSpec"), el("span", { className: "mono", text: wtText })),
+      kv(L("field.attempts"), String(job.attempts || 0)),
+      kv(L("field.claimedBy"), el("span", { className: "mono", text: job.claimed_by || "-" })),
+      kv(L("field.claimedAt"), el("span", { className: "mono", text: formatTime(job.claimed_at) })),
+      kv(L("field.createdAt"), el("span", { className: "mono", text: formatTime(job.created_at) })),
+      kv(L("field.updatedAt"), el("span", { className: "mono", text: formatTime(job.updated_at) })),
+      kv(L("field.deliveredAt"), el("span", { className: "mono", text: formatTime(job.delivered_at) })),
+      kv(L("field.sessionID"), el("span", { className: "mono", text: job.session_id || "-" }))
     ]);
 
     // Allowed actions strictly per state:
@@ -2568,16 +2568,16 @@
       ]),
       el("div", { className: "form-grid" }, [
         el("label", { className: "field" }, [
-          el("span", { className: "field-label", text: "Agent" }),
+          el("span", { className: "field-label", text: L("field.agent") }),
           agentSelect
         ]),
         el("label", { className: "field" }, [
-          el("span", { className: "field-label", text: "Host" }),
+          el("span", { className: "field-label", text: L("field.host") }),
           hostSelect,
           hostNotice
         ]),
         el("div", { className: "field" }, [
-          el("span", { className: "field-label", text: "Model" }),
+          el("span", { className: "field-label", text: L("field.model") }),
           modelControlWrap
         ]),
         el("div", { className: "field" }, [
@@ -2587,7 +2587,7 @@
       ]),
       el("div", { className: "form-grid" }, [
         el("label", { className: "field" }, [
-          el("span", { className: "field-label", text: "Workdir" }),
+          el("span", { className: "field-label", text: L("field.workdir") }),
           workdirInput
         ]),
         el("label", { className: "field" }, [
@@ -2793,7 +2793,7 @@
         el("table", null, [
           el("thead", null, [
             el("tr", null, [
-              el("th", { text: "Held ID" }),
+              el("th", { text: L("field.heldID") }),
               el("th", { text: L("column.status") }),
               el("th", { text: L("held.titleAgentHost") }),
               el("th", { text: L("column.pool") }),
@@ -2850,11 +2850,11 @@
       }
     }, [
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "Job ID" }),
+        el("span", { className: "field-label", text: L("field.jobID") }),
         jobInput
       ]),
       el("label", { className: "field" }, [
-        el("span", { className: "field-label", text: "Held ID" }),
+        el("span", { className: "field-label", text: L("field.heldID") }),
         heldInput
       ]),
       el("div", { className: "btn-row" }, [
@@ -2886,9 +2886,9 @@
     const rows = decisions.map(function (d) {
       let targetNode;
       if (d.job_id) {
-        targetNode = navLink("/ui/jobs/" + d.job_id, "Job #" + d.job_id, "mono");
+        targetNode = navLink("/ui/jobs/" + d.job_id, L("decisions.targetJob", { id: d.job_id }), "mono");
       } else if (d.held_id) {
-        targetNode = navLink("/ui/gate/held", "Held " + d.held_id, "mono");
+        targetNode = navLink("/ui/gate/held", L("decisions.targetHeld", { id: d.held_id }), "mono");
       } else {
         targetNode = el("span", { className: "muted", text: "-" });
       }
@@ -2909,7 +2909,7 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "ID" }),
+            el("th", { text: L("field.id") }),
             el("th", { text: L("decisions.decision") }),
             el("th", { text: L("decisions.mode") }),
             el("th", { text: L("decisions.target") }),
@@ -3024,11 +3024,11 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "ID" }),
+            el("th", { text: L("field.id") }),
             el("th", { text: L("column.title") }),
             el("th", { text: L("column.status") }),
             el("th", { text: L("deliveries.columnDelivery") }),
-            el("th", { text: "agent / host" }),
+            el("th", { text: L("field.agentHost") }),
             el("th", { text: L("deliveries.columnExcerpt") }),
             el("th", { text: L("deliveries.columnUpdatedAt") }),
             el("th", { text: L("deliveries.columnAction") })
@@ -3315,7 +3315,7 @@
       el("table", null, [
         el("thead", null, [
           el("tr", null, [
-            el("th", { text: "ID" }),
+            el("th", { text: L("field.id") }),
             el("th", { text: L("agents.columnTime") }),
             el("th", { text: L("agents.columnType") }),
             el("th", { text: L("agents.columnAgent") }),

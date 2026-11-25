@@ -254,6 +254,18 @@ func TestUII18nAssetsWiring(t *testing.T) {
 	}
 }
 
+// Item names come from the dictionary even when both languages spell them the same.
+// The exceptions are inputs labelled with the API field name (docs/17).
+func TestUII18nItemNamesFromDictionary(t *testing.T) {
+	literal := regexp.MustCompile(`(?:\bkv\(\s*|el\("(?:th|h1|h2)",[^\n]*\btext:\s*|"field-label",\s*text:\s*|\bnavLink\([^,\n]+,\s*)"([^"]*[A-Za-z][^"]*)"`)
+	apiNames := []string{"target_ref", "worktree_spec.repo_path", "worktree_spec.base_ref", "worktree_spec.branch"}
+	for _, m := range literal.FindAllStringSubmatch(string(appJS), -1) {
+		if !slices.Contains(apiNames, m[1]) {
+			t.Errorf("app.js writes the item name %q directly (put it in the dictionary): %s", m[1], m[0])
+		}
+	}
+}
+
 // The dictionary is delivered inside app.js. A separate file could fail to load on its
 // own and leave a page without any label or working control.
 func TestUII18nDictionaryServedWithApp(t *testing.T) {
