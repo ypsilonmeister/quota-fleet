@@ -126,6 +126,7 @@ func TestUIShellAndAssetsFollowSecurityRules(t *testing.T) {
 		{name: "direction.js", src: string(directionJS)},
 		{name: "notify.js", src: string(notifyJS)},
 		{name: "app.js", src: string(appJS)},
+		{name: "sw.js", src: string(swJS)},
 	} {
 		for _, forbidden := range []string{"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"} {
 			if strings.Contains(asset.src, forbidden) {
