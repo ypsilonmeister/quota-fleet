@@ -1039,7 +1039,12 @@ func (s *Store) CancelChainRun(ctx context.Context, runID, reason string) (*Canc
 		`, truncateBytes(strings.TrimSpace(reason), maxHeldErrorBytes), nowStr, run.ID, run.Revision); err != nil {
 			return err
 		}
-		if snap.Held != nil && snap.Held.Status == HeldStatusHeld {
+		// Only rows that provably belong to this step are written. A hold of another run
+		// or seq is left alone, and so is the job of a failing ownership check (another
+		// run's job, a missing row, a job reached through a foreign hold).
+		problem := snap.OwnershipProblem()
+		out.Inconsistency = problem
+		if snap.Held != nil && snap.Held.Status == HeldStatusHeld && snap.HeldOwnershipProblem() == "" {
 			if _, err := conn.ExecContext(ctx, `
 				UPDATE held_jobs SET status = 'cancelled', cancel_reason = 'chain cancelled', cancelled_at = ?, updated_at = ?
 				WHERE id = ? AND status = 'held'
@@ -1048,16 +1053,29 @@ func (s *Store) CancelChainRun(ctx context.Context, runID, reason string) (*Canc
 			}
 			out.CancelledHeldID = snap.Held.ID
 		}
-		// Only a job that provably belongs to this step is cancelled: the step's job, or
-		// the job of a released hold not yet linked (R10). A job failing the ownership
-		// check (another run's job, a missing row) is left alone.
+		// The target is the step's job, or the job of a released hold not yet linked (R10).
 		target := snap.Job
 		if snap.Job == nil {
 			target = snap.ReleasedJob
 		}
-		if problem := snap.OwnershipProblem(); problem != "" {
+		if problem != "" {
 			target = nil
-			out.Inconsistency = problem
+		}
+		if target != nil && snap.Step != nil && snap.Step.JobID == nil {
+			// R10: record the released job on the step and the job, as the link action
+			// would, so a later Reset of a job claimed before the cancel sees the
+			// terminal run and does not make the job claimable again (§5.2).
+			if _, err := conn.ExecContext(ctx, `
+				UPDATE chain_steps SET job_id = ? WHERE run_id = ? AND seq = ? AND job_id IS NULL
+			`, target.ID, run.ID, snap.Step.Seq); err != nil {
+				return err
+			}
+			if _, err := conn.ExecContext(ctx, `
+				UPDATE jobs SET chain_run_id = ?, chain_seq = ? WHERE id = ? AND chain_run_id IS NULL
+			`, run.ID, snap.Step.Seq, target.ID); err != nil {
+				return err
+			}
+			out.LinkedJobID = &target.ID
 		}
 		if target != nil {
 			switch target.Status {

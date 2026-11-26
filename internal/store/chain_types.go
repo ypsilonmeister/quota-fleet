@@ -188,10 +188,15 @@ type ChainSnapshot struct {
 //   - a step with both job_id and held_id must point at a released hold whose
 //     released_job_id is that job;
 //   - a released hold of a step without job_id must point at an existing job created
-//     from that hold (same request_id) that is unowned or owned by this step.
+//     from that hold (same request_id) that is unowned or owned by this step;
+//   - the step's hold itself must carry chain_run_id = run and chain_seq = step seq
+//     (HeldOwnershipProblem).
 func (s ChainSnapshot) OwnershipProblem() string {
 	if s.Run == nil || s.Step == nil {
 		return ""
+	}
+	if problem := s.HeldOwnershipProblem(); problem != "" {
+		return problem
 	}
 	st := s.Step
 	owned := func(j *Job, allowUnowned bool) bool {
@@ -230,6 +235,19 @@ func (s ChainSnapshot) OwnershipProblem() string {
 		case !owned(s.ReleasedJob, true):
 			return fmt.Sprintf("held %s was released to job #%d of chain run %q seq %d", s.Held.ID, id, s.ReleasedJob.ChainRunID, s.ReleasedJob.ChainSeq)
 		}
+	}
+	return ""
+}
+
+// HeldOwnershipProblem returns a non-empty description when the step's hold row exists
+// but belongs to another run or seq (held_jobs.chain_run_id / chain_seq). CancelChainRun
+// never updates such a hold.
+func (s ChainSnapshot) HeldOwnershipProblem() string {
+	if s.Run == nil || s.Step == nil || s.Held == nil {
+		return ""
+	}
+	if s.Held.ChainRunID != s.Run.ID || s.Held.ChainSeq != s.Step.Seq {
+		return fmt.Sprintf("step %d held %s belongs to chain run %q seq %d", s.Step.Seq, s.Held.ID, s.Held.ChainRunID, s.Held.ChainSeq)
 	}
 	return ""
 }
@@ -392,8 +410,11 @@ type CancelChainRunResult struct {
 	CancelledJobIDs   []int64
 	CancelledHeldID   string
 	CancelledByChange bool
-	// Inconsistency is set when the step's job or hold failed OwnershipProblem; that job
-	// was not touched.
+	// LinkedJobID is set when the current step had a released hold whose job was not yet
+	// linked (R10): the cancel recorded that job on the step and the job's ownership.
+	LinkedJobID *int64
+	// Inconsistency is set when the step's job or hold failed OwnershipProblem; neither
+	// that job nor a hold of another run was touched.
 	Inconsistency string
 }
 

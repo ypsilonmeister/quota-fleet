@@ -267,6 +267,11 @@ func TestDecideRepairTable(t *testing.T) {
 			j.ChainRunID, j.ChainSeq = tRun, sn.Step.Seq
 			sn.Job = &j
 		}
+		if sn.Held != nil && sn.Step != nil {
+			h := *sn.Held
+			h.ChainRunID, h.ChainSeq = tRun, sn.Step.Seq
+			sn.Held = &h
+		}
 		if sn.Held != nil && sn.Held.Status == store.HeldStatusReleased && sn.Step != nil {
 			sn.Held.RequestID = "chain:r:2"
 			sn.ReleasedJob = &store.Job{ID: released, Status: store.StatusQueued, RequestID: "chain:r:2", ChainRunID: tRun, ChainSeq: sn.Step.Seq}
@@ -275,8 +280,12 @@ func TestDecideRepairTable(t *testing.T) {
 	ownJob := func(runID string, seq int) *store.Job {
 		return &store.Job{ID: 7, Status: store.StatusDone, RequestID: "chain:r:2", ChainRunID: runID, ChainSeq: seq}
 	}
-	relHeld := func(jobID *int64) *store.HeldJob {
-		return &store.HeldJob{ID: "h1", RequestID: "chain:r:2", Status: store.HeldStatusReleased, ReleasedJobID: jobID}
+	// relHeld is a released hold owned by tRun at seq.
+	relHeld := func(seq int, jobID *int64) *store.HeldJob {
+		return &store.HeldJob{ID: "h1", RequestID: "chain:r:2", Status: store.HeldStatusReleased, ReleasedJobID: jobID, ChainRunID: tRun, ChainSeq: seq}
+	}
+	foreignHeld := func(runID string, seq int, st store.HeldStatus, jobID *int64) *store.HeldJob {
+		return &store.HeldJob{ID: "h1", RequestID: "chain:r:2", Status: st, ReleasedJobID: jobID, ChainRunID: runID, ChainSeq: seq}
 	}
 	cases = append(cases, []struct {
 		name   string
@@ -286,15 +295,20 @@ func TestDecideRepairTable(t *testing.T) {
 		round  int
 		reason string
 	}{
-		{"ownership: R10 unlinked job is linkable", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusQueued}}, store.ChainActionLink, "", 0, ""},
-		{"ownership: R10 job of another run", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusDone, ChainRunID: "other", ChainSeq: 2}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
-		{"ownership: R10 job of another seq", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusDone, ChainRunID: tRun, ChainSeq: 1}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
-		{"ownership: R10 job with another request_id", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJob: &store.Job{ID: released, RequestID: "x", Status: store.StatusDone}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
-		{"ownership: R10 released job missing", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJobMissing: true}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: R10 unlinked job is linkable", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(2, &released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusQueued}}, store.ChainActionLink, "", 0, ""},
+		{"ownership: R10 job of another run", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(2, &released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusDone, ChainRunID: "other", ChainSeq: 2}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: R10 job of another seq", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(2, &released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusDone, ChainRunID: tRun, ChainSeq: 1}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: R10 job with another request_id", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(2, &released), ReleasedJob: &store.Job{ID: released, RequestID: "x", Status: store.StatusDone}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: R10 released job missing", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(2, &released), ReleasedJobMissing: true}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
 		{"ownership: step job of another run", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), ""), Job: ownJob("other", 1)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
-		{"ownership: job and hold agree", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: relHeld(id(7))}, store.ChainActionAdvance, "review", 1, ""},
-		{"ownership: hold points at another job", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: relHeld(&released)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
-		{"ownership: hold of a linked step not released", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: &store.HeldJob{ID: "h1", Status: store.HeldStatusHeld}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: job and hold agree", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: relHeld(1, id(7))}, store.ChainActionAdvance, "review", 1, ""},
+		{"ownership: hold points at another job", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: relHeld(1, &released)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: hold of a linked step not released", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: &store.HeldJob{ID: "h1", Status: store.HeldStatusHeld, ChainRunID: tRun, ChainSeq: 1}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: held hold of another run", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: foreignHeld("other", 2, store.HeldStatusHeld, nil)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: held hold of another seq", store.ChainSnapshot{Run: run(1, 4), Step: step("review", 4, nil, "h1"), Held: foreignHeld(tRun, 2, store.HeldStatusHeld, nil)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: unowned hold", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: foreignHeld("", 0, store.HeldStatusHeld, nil)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: R10 through another run's released hold", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: foreignHeld("other", 2, store.HeldStatusReleased, &released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusQueued}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: cancelled hold of another run", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: foreignHeld("other", 2, store.HeldStatusCancelled, nil)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
 		{"ownership: hold of a linked step missing", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), HeldMissing: true}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
 	}...)
 	for _, tc := range cases {

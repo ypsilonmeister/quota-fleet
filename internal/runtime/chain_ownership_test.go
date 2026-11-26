@@ -213,3 +213,130 @@ func TestChainOwnershipOfReleasedJobs(t *testing.T) {
 		mustStatus(t, e.run(run.ID), store.ChainRunCancelled, "")
 	})
 }
+
+// TestChainCancelR10ClaimedThenReset: a released hold's job that was never linked
+// (chain_run_id IS NULL, R10) and was claimed before the run was cancelled must not be
+// made claimable again by a later reset (docs/22 §5.2). CancelChainRun records the
+// job's ownership so Reset sees the terminal run.
+func TestChainCancelR10ClaimedThenReset(t *testing.T) {
+	e := newChainEnv(t, config.GateModeEnforce)
+	run, held := heldRun(t, e, "r10-claim-cancel")
+	out, err := e.st.ReleaseHeld(e.ctx, store.ReleaseHeldParams{HeldID: held.ID, SelectedPool: "codex"})
+	if err != nil || !out.Released {
+		t.Fatalf("release: %+v %v", out, err)
+	}
+	e.exec(`UPDATE chain_steps SET job_id = NULL WHERE run_id = ? AND seq = 2`, run.ID)
+	e.exec(`UPDATE jobs SET chain_run_id = NULL, chain_seq = NULL WHERE id = ?`, out.Job.ID)
+
+	// claim → cancel → reset
+	if _, ok, err := e.st.ClaimByID(e.ctx, out.Job.ID, 1000); err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	res, err := e.st.CancelChainRun(e.ctx, run.ID, "stop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RunningJobID == nil || *res.RunningJobID != out.Job.ID || res.Inconsistency != "" {
+		t.Fatalf("cancel result: %+v", res)
+	}
+	j, err := e.st.GetJob(e.ctx, out.Job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.ChainRunID != run.ID || j.ChainSeq != 2 {
+		t.Fatalf("ownership not recorded on cancel: %q %d", j.ChainRunID, j.ChainSeq)
+	}
+	if s := e.snapshot(run.ID); s.Step.JobID == nil || *s.Step.JobID != out.Job.ID {
+		t.Fatalf("step not linked on cancel: %+v", s.Step)
+	}
+	j, err = e.st.Reset(e.ctx, out.Job.ID)
+	if err != nil || j.Status != store.StatusCancelled {
+		t.Fatalf("reset: %+v %v", j, err)
+	}
+	if c, ok, err := e.st.Claim(e.ctx, 10); err != nil || ok {
+		t.Fatalf("job claimable again after cancel: %+v %v", c, err)
+	}
+}
+
+// TestChainHeldOwnership: the step's hold itself must belong to the run's current step
+// (held_jobs.chain_run_id / chain_seq). The Driver stops on a foreign hold and
+// CancelChainRun never updates another run's hold or its released job.
+func TestChainHeldOwnership(t *testing.T) {
+	t.Run("foreign held hold stops the driver", func(t *testing.T) {
+		e := newChainEnv(t, config.GateModeEnforce)
+		run, own := heldRun(t, e, "held-own-a")
+		other, foreign := heldRun(t, e, "held-own-b")
+		e.exec(`UPDATE chain_steps SET held_id = ? WHERE run_id = ? AND seq = 2`, foreign.ID, run.ID)
+		_ = own
+		e.sweep()
+		mustStatus(t, e.run(run.ID), store.ChainRunStopped, store.ChainStopInternalInconsistency)
+		if h, _ := e.st.GetHeldJob(e.ctx, foreign.ID); h.Status != store.HeldStatusHeld {
+			t.Fatalf("foreign hold %s", h.Status)
+		}
+		mustStatus(t, e.run(other.ID), store.ChainRunRunning, "")
+	})
+
+	t.Run("cancel leaves a foreign held hold alone", func(t *testing.T) {
+		e := newChainEnv(t, config.GateModeEnforce)
+		run, _ := heldRun(t, e, "held-cancel-a")
+		other, foreign := heldRun(t, e, "held-cancel-b")
+		e.exec(`UPDATE chain_steps SET held_id = ? WHERE run_id = ? AND seq = 2`, foreign.ID, run.ID)
+		res, err := e.st.CancelChainRun(e.ctx, run.ID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.CancelledHeldID != "" || res.Inconsistency == "" {
+			t.Fatalf("cancel result: %+v", res)
+		}
+		if h, _ := e.st.GetHeldJob(e.ctx, foreign.ID); h.Status != store.HeldStatusHeld {
+			t.Fatalf("foreign hold %s", h.Status)
+		}
+		mustStatus(t, e.run(run.ID), store.ChainRunCancelled, "")
+		mustStatus(t, e.run(other.ID), store.ChainRunRunning, "")
+	})
+
+	t.Run("R10 through another run's released hold is neither linked nor cancelled", func(t *testing.T) {
+		e := newChainEnv(t, config.GateModeEnforce)
+		run, _ := heldRun(t, e, "held-r10-a")
+		_, foreign := heldRun(t, e, "held-r10-b")
+		out, err := e.st.ReleaseHeld(e.ctx, store.ReleaseHeldParams{HeldID: foreign.ID, SelectedPool: "codex"})
+		if err != nil || !out.Released {
+			t.Fatalf("release: %+v %v", out, err)
+		}
+		// The foreign job is unowned and has the foreign hold's request_id, so only the
+		// hold's own ownership can reject it.
+		e.exec(`UPDATE jobs SET chain_run_id = NULL, chain_seq = NULL WHERE id = ?`, out.Job.ID)
+		e.exec(`UPDATE chain_steps SET held_id = ? WHERE run_id = ? AND seq = 2`, foreign.ID, run.ID)
+
+		e.sweep()
+		mustStatus(t, e.run(run.ID), store.ChainRunStopped, store.ChainStopInternalInconsistency)
+		if s := e.snapshot(run.ID); s.Step.JobID != nil {
+			t.Fatalf("foreign job linked: %d", *s.Step.JobID)
+		}
+		if j, _ := e.st.GetJob(e.ctx, out.Job.ID); j.ChainRunID != "" || j.Status != store.StatusQueued {
+			t.Fatalf("foreign job touched: %q %s", j.ChainRunID, j.Status)
+		}
+	})
+
+	t.Run("cancel through another run's released hold leaves its job alone", func(t *testing.T) {
+		e := newChainEnv(t, config.GateModeEnforce)
+		run, _ := heldRun(t, e, "held-r10c-a")
+		_, foreign := heldRun(t, e, "held-r10c-b")
+		out, err := e.st.ReleaseHeld(e.ctx, store.ReleaseHeldParams{HeldID: foreign.ID, SelectedPool: "codex"})
+		if err != nil || !out.Released {
+			t.Fatalf("release: %+v %v", out, err)
+		}
+		e.exec(`UPDATE jobs SET chain_run_id = NULL, chain_seq = NULL WHERE id = ?`, out.Job.ID)
+		e.exec(`UPDATE chain_steps SET held_id = ? WHERE run_id = ? AND seq = 2`, foreign.ID, run.ID)
+		res, err := e.st.CancelChainRun(e.ctx, run.ID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.CancelledJobIDs) != 0 || res.Inconsistency == "" {
+			t.Fatalf("cancel result: %+v", res)
+		}
+		if j, _ := e.st.GetJob(e.ctx, out.Job.ID); j.ChainRunID != "" || j.Status != store.StatusQueued {
+			t.Fatalf("foreign job touched: %q %s", j.ChainRunID, j.Status)
+		}
+	})
+}
