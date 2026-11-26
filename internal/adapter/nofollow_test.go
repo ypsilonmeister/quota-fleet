@@ -4,6 +4,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,27 +188,47 @@ func TestLinuxNoFollowReadCommand(t *testing.T) {
 }
 
 // TestLinuxNoFollowReadRaces runs the remote Linux command with the local sh and changes
-// the file at the race points of the command (shell snippets inserted by the test). The
-// open itself refuses a link and does not block on a FIFO, and a file renamed away and
-// back or replaced during the read is reported as CHANGED.
+// the file at the race points of the command (shell snippets inserted by the test), once
+// per final-component reader (python3 and perl). The open itself refuses a link and does
+// not block on a FIFO, the opened descriptor is checked (regular file, same device and
+// inode as the checked name) before anything is read from it, and no byte of a file
+// that failed a check is ever written to the output.
 func TestLinuxNoFollowReadRaces(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
 	}
+	for _, interp := range []string{"python3", "perl"} {
+		t.Run(interp, func(t *testing.T) {
+			if _, err := exec.LookPath(interp); err != nil {
+				t.Skipf("no %s", interp)
+			}
+			testLinuxNoFollowReadRaces(t, interp)
+		})
+	}
+}
+
+func testLinuxNoFollowReadRaces(t *testing.T, interp string) {
 	parts := strings.Split(nfRel, "/")
 	run := func(t *testing.T, wd string, hooks linuxNoFollowTestHooks) NoFollowRead {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		hooks.interp = interp
 		cmd := exec.CommandContext(ctx, "sh", "-c", linuxNoFollowReadScript(wd, parts, 64, hooks))
 		cmd.Dir = t.TempDir()
-		cmd.WaitDelay = time.Second // a blocked dd child keeps stdout open
+		cmd.WaitDelay = time.Second // a blocked child keeps stdout open
 		out, err := cmd.Output()
 		if ctx.Err() != nil {
 			t.Fatalf("command blocked: %v", ctx.Err())
 		}
 		if err != nil {
 			t.Fatalf("sh: %v", err)
+		}
+		// Bytes of a file that failed a check must never reach the output.
+		for _, bad := range []string{"outside", "swapped", "fifo-data"} {
+			if strings.Contains(string(out), bad) {
+				t.Fatalf("unverified bytes %q written: %q", bad, out)
+			}
 		}
 		rd, err := parseNoFollowRead(string(out), 64)
 		if err != nil {
@@ -287,6 +308,35 @@ func TestLinuxNoFollowReadRaces(t *testing.T) {
 			t.Fatalf("%+v", rd)
 		}
 	})
+	t.Run("regular file swapped in between the check and the open is not read", func(t *testing.T) {
+		wd, _ := nfSetup(t)
+		p := filepath.Join(wd, nfRel)
+		rd := run(t, wd, linuxNoFollowTestHooks{
+			beforeOpen: "mv " + q(p) + " " + q(p+".saved") + " && printf swapped > " + q(p),
+		})
+		if !rd.Changed || rd.Data != nil {
+			t.Fatalf("%+v", rd)
+		}
+	})
+	t.Run("FIFO with a writer swapped in is not read", func(t *testing.T) {
+		wd, _ := nfSetup(t)
+		p := filepath.Join(wd, nfRel)
+		// The writer keeps the FIFO open with data in it, so a read would return bytes.
+		rd := run(t, wd, linuxNoFollowTestHooks{
+			beforeOpen: "rm -f " + q(p) + " && mkfifo " + q(p) + " && { (exec 3<>" + q(p) + "; printf fifo-data >&3; sleep 2) >/dev/null 2>&1 & } && sleep 0.2",
+		})
+		if !rd.Changed || rd.Data != nil {
+			t.Fatalf("%+v", rd)
+		}
+	})
+	t.Run("file content rewritten during the read", func(t *testing.T) {
+		wd, _ := nfSetup(t)
+		p := filepath.Join(wd, nfRel)
+		rd := run(t, wd, linuxNoFollowTestHooks{afterRead: "printf rewritten-and-longer > " + q(p)})
+		if !rd.Changed || rd.Data != nil {
+			t.Fatalf("%+v", rd)
+		}
+	})
 	t.Run("static FIFO is not opened", func(t *testing.T) {
 		wd, _ := nfSetup(t)
 		p := filepath.Join(wd, nfRel)
@@ -308,6 +358,39 @@ func TestLinuxNoFollowReadRaces(t *testing.T) {
 			t.Fatalf("data %q", rd.Data)
 		}
 	})
+}
+
+// TestLinuxNoFollowReadNeedsInterpreter: without python3 and perl the command fails
+// (exit 5) instead of reading the file without the descriptor checks.
+func TestLinuxNoFollowReadNeedsInterpreter(t *testing.T) {
+	envPath, err := exec.LookPath("env")
+	if err != nil {
+		t.Skip("no env")
+	}
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	bin := t.TempDir() // PATH holds only env (used for pwd -P)
+	if err := os.Symlink(envPath, filepath.Join(bin, "env")); err != nil {
+		t.Fatal(err)
+	}
+	if pwdPath, err := exec.LookPath("pwd"); err == nil {
+		if err := os.Symlink(pwdPath, filepath.Join(bin, "pwd")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wd, _ := nfSetup(t)
+	cmd := exec.Command(shPath, "-c", linuxNoFollowReadCommand(wd, strings.Split(nfRel, "/"), 64))
+	cmd.Env = []string{"PATH=" + bin}
+	out, err := cmd.Output()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 {
+		t.Fatalf("want exit 5, got %v (stdout %q)", err, out)
+	}
+	if strings.Contains(string(out), "inside") {
+		t.Fatalf("file read without an interpreter: %q", out)
+	}
 }
 
 func TestParseNoFollowReadEndMarker(t *testing.T) {

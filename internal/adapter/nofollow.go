@@ -169,18 +169,24 @@ func (l *LocalFileAccess) ReadFileNoFollow(ctx context.Context, relPath string, 
 //     requires `env pwd -P` to be the expected physical path, so the directory the file
 //     is read from is pinned (the shell's cwd) and no link was traversed. The external
 //     pwd is used because a builtin `pwd -P` may return the path cached at the last cd
-//     (dash) instead of calling getcwd;
-//   - refuses a final link, a non-regular file and records the file's device, inode,
-//     mode, size, mtime and ctime;
-//   - opens and reads the file with `dd iflag=nofollow,nonblock`: the open itself refuses
-//     a link (O_NOFOLLOW) and cannot block on a FIFO swapped in after the check
-//     (O_NONBLOCK). At most maxBytes+1 bytes are read;
-//   - checks again that the cwd is the expected path and that the file still has the
-//     same device, inode, mode, size, mtime and ctime (a rename away and back changes
-//     ctime), otherwise the result is CHANGED and the data is discarded.
+//     (dash) instead of calling getcwd. The workdir itself is the trusted starting point
+//     (configured by the operator and given by the chain definition), not checked;
+//   - then runs one python3 process (perl when python3 is missing) on the final
+//     component, which does everything on one file descriptor:
+//     lstat the name and refuse a link, a directory and a non-regular file;
+//     open it with O_RDONLY|O_NOFOLLOW|O_NONBLOCK (the open refuses a link swapped in
+//     after the lstat and does not block on a FIFO);
+//     fstat that descriptor and require a regular file with the device and inode of the
+//     lstat, before reading anything;
+//     read at most maxBytes+1 bytes from that same descriptor into memory;
+//     fstat it again (mode, links, size, mtime, ctime must be unchanged), lstat the name
+//     (same device and inode, still a regular file) and require the cwd to still be the
+//     expected path.
+//     Only after all checks pass are the bytes written (READ framing); otherwise the
+//     result is CHANGED and no byte of the file is written.
 //
-// dd must support iflag=nofollow,nonblock (GNU coreutils and uutils do); otherwise the
-// command fails with exit 5 instead of reading without the flags.
+// If neither python3 nor perl exists the command fails with exit 5 (the read is not
+// attempted without the checks).
 func (f *linuxFileAccess) ReadFileNoFollow(ctx context.Context, relPath string, maxBytes int64) (NoFollowRead, error) {
 	if err := ctx.Err(); err != nil {
 		return NoFollowRead{}, err
@@ -210,14 +216,82 @@ func linuxNoFollowReadCommand(wd string, parts []string, maxBytes int64) string 
 	return linuxNoFollowReadScript(wd, parts, maxBytes, linuxNoFollowTestHooks{})
 }
 
-// linuxNoFollowTestHooks are shell snippets that tests insert at the race points.
+// linuxNoFollowTestHooks are shell snippets that tests run at the race points of the
+// final-component reader. interp forces "python3" or "perl" (empty: python3, else perl).
 type linuxNoFollowTestHooks struct {
-	beforeOpen string // after the checks, before dd opens the file
-	afterRead  string // after dd read the file, before the final check
+	beforeOpen string // after the lstat checks, before the open
+	afterRead  string // after the read, before the final checks
+	interp     string
 }
 
-// noFollowEndMarker ends the output of a READ result: "READ\n<data>\n<marker> OK|CHANGED".
+// noFollowEndMarker ends the output of a READ result: "READ\n<data>\n<marker> OK".
 const noFollowEndMarker = "QF-NOFOLLOW-END"
+
+// linuxNoFollowPython is the final-component reader for python3. Arguments: name,
+// maxBytes, expected cwd, then the optional test hooks (before open, after read).
+// Statuses are written only through done, which exits; file bytes are written only
+// after every check passed.
+const linuxNoFollowPython = `import os, sys, stat
+n, mx, e = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+h = sys.argv[4:] + ["", ""]
+o = sys.stdout.buffer
+def done(s):
+    o.write(s); o.flush(); os._exit(0)
+try:
+    l = os.lstat(n)
+except FileNotFoundError:
+    done(b"MISSING\n")
+except OSError:
+    done(b"CHANGED\n")
+if stat.S_ISLNK(l.st_mode): done(b"LINK\n")
+if stat.S_ISDIR(l.st_mode): done(b"DIR\n")
+if not stat.S_ISREG(l.st_mode): done(b"OTHER\n")
+if h[0]: os.system(h[0])
+try:
+    fd = os.open(n, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except OSError:
+    done(b"CHANGED\n")
+def sig(s): return (s.st_dev, s.st_ino, s.st_mode, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+f = os.fstat(fd)
+if not stat.S_ISREG(f.st_mode) or (f.st_dev, f.st_ino) != (l.st_dev, l.st_ino): done(b"CHANGED\n")
+buf = b""
+try:
+    while len(buf) <= mx:
+        r = os.read(fd, mx + 1 - len(buf))
+        if not r: break
+        buf += r
+except OSError:
+    done(b"CHANGED\n")
+if h[1]: os.system(h[1])
+try:
+    g = os.fstat(fd); a = os.lstat(n); c = os.getcwd()
+except OSError:
+    done(b"CHANGED\n")
+if sig(g) != sig(f) or not stat.S_ISREG(a.st_mode) or (a.st_dev, a.st_ino) != (f.st_dev, f.st_ino) or c != e: done(b"CHANGED\n")
+done(b"READ\n" + buf + b"\n` + noFollowEndMarker + ` OK")
+`
+
+// linuxNoFollowPerl is the same reader for perl (Fcntl and Cwd are in perl-base).
+// Time::HiRes, when present, gives sub-second mtime and ctime for the final comparison.
+const linuxNoFollowPerl = `use strict; use Fcntl qw(O_RDONLY O_NOFOLLOW O_NONBLOCK S_ISREG S_ISDIR S_ISLNK); use Cwd qw(getcwd);
+BEGIN { eval { require Time::HiRes; Time::HiRes->import(qw(stat lstat)); 1 } }
+my ($n, $mx, $e, @h) = @ARGV; push @h, "", "";
+binmode STDOUT;
+sub done { print STDOUT $_[0]; close STDOUT; exit 0 }
+my @l = lstat($n); done($!{ENOENT} ? "MISSING\n" : "CHANGED\n") unless @l;
+done("LINK\n") if S_ISLNK($l[2]); done("DIR\n") if S_ISDIR($l[2]); done("OTHER\n") unless S_ISREG($l[2]);
+system($h[0]) if length $h[0];
+sysopen(my $fh, $n, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or done("CHANGED\n");
+my @f = stat($fh);
+done("CHANGED\n") unless @f && S_ISREG($f[2]) && $f[0] == $l[0] && $f[1] == $l[1];
+my $buf = "";
+while (length($buf) <= $mx) { my $r = sysread($fh, $buf, $mx + 1 - length($buf), length($buf)); done("CHANGED\n") unless defined $r; last if $r == 0; }
+system($h[1]) if length $h[1];
+my @g = stat($fh); my @a = lstat($n); my $c = getcwd();
+done("CHANGED\n") unless @g && @a && defined $c && S_ISREG($a[2]) && !S_ISLNK($a[2]) && $a[0] == $f[0] && $a[1] == $f[1] && $c eq $e
+  && join(":", @g[0, 1, 2, 3, 7, 9, 10]) eq join(":", @f[0, 1, 2, 3, 7, 9, 10]);
+done("READ\n" . $buf . "\n` + noFollowEndMarker + ` OK");
+`
 
 func linuxNoFollowReadScript(wd string, parts []string, maxBytes int64, hooks linuxNoFollowTestHooks) string {
 	dirs := make([]string, 0, len(parts)-1)
@@ -228,49 +302,49 @@ func linuxNoFollowReadScript(wd string, parts []string, maxBytes int64, hooks li
 	if dirList == "" {
 		dirList = "''" // never iterated: see the [ -n ] guard
 	}
-	hook := func(s string) string {
-		if s == "" {
-			return ""
-		}
-		return s + "; "
+	args := `"$n" ` + fmt.Sprint(maxBytes) + ` "$e"`
+	if hooks.beforeOpen != "" || hooks.afterRead != "" {
+		args += " " + shellQuote(hooks.beforeOpen) + " " + shellQuote(hooks.afterRead)
 	}
-	const st = `stat -c '%d:%i:%f:%h:%s:%y:%z' -- "$n" 2>/dev/null`
+	py := `python3 -c ` + shellQuote(linuxNoFollowPython) + ` ` + args
+	pl := `perl -e ` + shellQuote(linuxNoFollowPerl) + ` -- ` + args
+	var reader string
+	switch hooks.interp {
+	case "python3":
+		reader = py
+	case "perl":
+		reader = pl
+	default:
+		reader = `if command -v python3 >/dev/null 2>&1; then ` + py + `; ` +
+			`elif command -v perl >/dev/null 2>&1; then ` + pl + `; ` +
+			`else echo 'no-follow read needs python3 or perl' >&2; exit 5; fi`
+	}
 	return fmt.Sprintf(
-		`dd if=/dev/null iflag=nofollow,nonblock,fullblock bs=1 count=0 status=none 2>/dev/null || { echo 'dd lacks iflag=nofollow,nonblock' >&2; exit 5; }; `+
-			`cd %s || exit 3; w=$(env pwd -P) || exit 3; e=${w%%/}; `+
+		`cd %s || exit 3; w=$(env pwd -P) || exit 3; e=${w%%/}; `+
 			`for c in %s; do [ -n "$c" ] || continue; `+
 			`if [ -L "$c" ]; then printf 'LINK\n'; exit 0; fi; `+
 			`if [ ! -e "$c" ]; then printf 'MISSING\n'; exit 0; fi; `+
 			`if [ ! -d "$c" ]; then printf 'OTHER\n'; exit 0; fi; `+
 			`cd -P -- "$c" 2>/dev/null || { printf 'CHANGED\n'; exit 0; }; e="$e/$c"; `+
 			`[ "$(env pwd -P)" = "$e" ] || { printf 'CHANGED\n'; exit 0; }; done; `+
-			`n=%s; `+
-			`if [ -L "$n" ]; then printf 'LINK\n'; exit 0; fi; `+
-			`if [ ! -e "$n" ]; then printf 'MISSING\n'; exit 0; fi; `+
-			`if [ -d "$n" ]; then printf 'DIR\n'; exit 0; fi; `+
-			`if [ ! -f "$n" ]; then printf 'OTHER\n'; exit 0; fi; `+
-			`a=$(%s) || { printf 'CHANGED\n'; exit 0; }; `+
-			`%s`+
-			`printf 'READ\n'; `+
-			`if dd if="$n" iflag=nofollow,nonblock,fullblock bs=%d count=1 status=none 2>/dev/null; then `+
-			`%s`+
-			`b=$(%s) || b=; `+
-			`if [ "$(env pwd -P)" = "$e" ] && [ ! -L "$n" ] && [ -f "$n" ] && [ -n "$b" ] && [ "$a" = "$b" ]; then printf '\n%s OK'; else printf '\n%s CHANGED'; fi; `+
-			`else printf '\n%s CHANGED'; fi`,
-		shellPath(wd), dirList, shellQuote(parts[len(parts)-1]), st,
-		hook(hooks.beforeOpen), maxBytes+1, hook(hooks.afterRead), st,
-		noFollowEndMarker, noFollowEndMarker, noFollowEndMarker,
+			`[ -n "$e" ] || e=/; n=%s; %s`,
+		shellPath(wd), dirList, shellQuote(parts[len(parts)-1]), reader,
 	)
 }
 
 // ReadFileNoFollow implements NoFollowReader on a Windows host. One PowerShell command
 // runs windowsNoFollowSource (C# through Add-Type), which uses CreateFileW directly:
 //
-//   - the workdir and every directory below it are opened and kept open without
-//     FILE_SHARE_DELETE/FILE_SHARE_WRITE, so none of them can be renamed, deleted or
-//     replaced while the file is read; each component is opened with
+//   - the workdir is the trusted starting point, as in the local and Linux
+//     implementations: it is opened (and kept open) without FILE_FLAG_OPEN_REPARSE_POINT
+//     and its attributes are not checked, so a workdir that is itself a symbolic link or
+//     junction is followed, as are reparse points in its ancestors. The workdir path is
+//     operator configuration (host / chain definition); the agent writes below it;
+//   - every component below the workdir (the directories and the file) is opened with
 //     FILE_FLAG_OPEN_REPARSE_POINT, so the open never follows a final reparse point and
-//     a component that is one is reported as LINK;
+//     a component that is one is reported as LINK. These directories are kept open
+//     without FILE_SHARE_DELETE/FILE_SHARE_WRITE, so none of them can be renamed,
+//     deleted or replaced while the file is read;
 //   - the file is opened with FILE_FLAG_OPEN_REPARSE_POINT and FILE_SHARE_READ only; the
 //     handle must not be a reparse point or a directory and must be a disk file
 //     (GetFileType);
