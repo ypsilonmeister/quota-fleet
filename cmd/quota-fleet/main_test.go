@@ -184,6 +184,23 @@ func TestCLIJobCreateListGetCancelRequeue(t *testing.T) {
 	}
 }
 
+// stopServe cancels a runServeContext started by a test and waits for exit code 0.
+// http.DefaultClient can pool a spare connection that never sent a request, and
+// http.Server.Shutdown waits about 5s on such a connection, so it is closed first.
+func stopServe(t *testing.T, cancel context.CancelFunc, doneCh <-chan int, errBuf *bytes.Buffer) {
+	t.Helper()
+	http.DefaultClient.CloseIdleConnections()
+	cancel()
+	select {
+	case code := <-doneCh:
+		if code != 0 {
+			t.Fatalf("serve exit code = %d, want 0; stderr=%s", code, errBuf.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("serve did not shut down gracefully within timeout")
+	}
+}
+
 func TestServeRunsAPIAndRuntimeWithGracefulShutdown(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")
@@ -287,15 +304,7 @@ evaluator:
 	}
 
 	// Trigger graceful shutdown and ensure serve exits cleanly with code 0.
-	cancel()
-	select {
-	case code := <-doneCh:
-		if code != 0 {
-			t.Fatalf("serve exit code = %d, want 0; stderr=%s", code, errBuf.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("serve did not shut down gracefully within timeout")
-	}
+	stopServe(t, cancel, doneCh, &errBuf)
 }
 
 func TestServeWiringWithSSHAdapter(t *testing.T) {
@@ -500,15 +509,7 @@ evaluator:
 		t.Errorf("unexpected ResultText:\n%s", resultText)
 	}
 
-	cancel()
-	select {
-	case code := <-doneCh:
-		if code != 0 {
-			t.Fatalf("serve exit code = %d, want 0; stderr=%s", code, errBuf.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("serve did not shut down gracefully within timeout")
-	}
+	stopServe(t, cancel, doneCh, &errBuf)
 }
 
 func TestCLIGateCheckAndDecisions(t *testing.T) {
@@ -869,15 +870,7 @@ quota:
 	}
 
 	// Stop serve cleanly before testing standalone CLI manual release.
-	cancel()
-	select {
-	case code := <-doneCh:
-		if code != 0 {
-			t.Fatalf("serve exit=%d stderr=%s", code, serveErr.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("serve did not shut down within timeout")
-	}
+	stopServe(t, cancel, doneCh, &serveErr)
 
 	// Part B: Seed a held job directly in DB and manually release it via CLI `gate release <held_id>`.
 	dbPath := filepath.Join(stateDir, "fleet.db")
@@ -1057,13 +1050,5 @@ notifier:
 		t.Fatalf("unexpected webhook payload: %+v", gotPayload)
 	}
 
-	cancel()
-	select {
-	case code := <-doneCh:
-		if code != 0 {
-			t.Fatalf("serve exit code = %d, want 0; stderr=%s", code, errBuf.String())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("serve did not shut down gracefully within timeout")
-	}
+	stopServe(t, cancel, doneCh, &errBuf)
 }
