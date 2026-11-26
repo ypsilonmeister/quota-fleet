@@ -36,6 +36,58 @@ type Report struct {
 	ParentID  *int64    `json:"parent_id,omitempty"`
 	Message   string    `json:"message"`
 	Timestamp time.Time `json:"timestamp"`
+
+	// EventID is the stable delivery key of chain notifications
+	// (chain:<run_id>:<revision>:<kind>, docs/22 §8). Delivery is at-least-once, so
+	// receivers drop duplicates by it.
+	EventID    string          `json:"event_id,omitempty"`
+	ChainRunID string          `json:"chain_run_id,omitempty"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
+}
+
+// CheckedReporter is implemented by notifiers that can report whether a Report actually
+// reached its sink. The Chain Driver commits sent_at only after it returns nil
+// (docs/22 §8); WebhookNotifier.Report itself swallows failures.
+type CheckedReporter interface {
+	ReportChecked(ctx context.Context, report Report) error
+}
+
+// reportChecked sends rep and returns the delivery error when the notifier can tell.
+func reportChecked(ctx context.Context, n Notifier, rep Report) error {
+	if c, ok := n.(CheckedReporter); ok {
+		return c.ReportChecked(ctx, rep)
+	}
+	return n.Report(ctx, rep)
+}
+
+// ReportChecked is Report (the file append already returns its error).
+func (n *FileNotifier) ReportChecked(ctx context.Context, report Report) error {
+	return n.Report(ctx, report)
+}
+
+// ReportChecked is Report but returns the final delivery error after retries.
+func (n *WebhookNotifier) ReportChecked(ctx context.Context, report Report) error {
+	if n == nil || n.url == "" {
+		return nil
+	}
+	if report.Timestamp.IsZero() {
+		report.Timestamp = time.Now().UTC()
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("marshal report: %w", err)
+	}
+	return n.postWithRetry(ctx, fmt.Sprintf("report %q", report.DedupKey), data)
+}
+
+// ReportChecked invokes ReportChecked (or Report) on each notifier, stopping on the first error.
+func (m *MultiNotifier) ReportChecked(ctx context.Context, report Report) error {
+	for _, n := range m.notifiers {
+		if err := reportChecked(ctx, n, report); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Notifier delivers terminal job results and reconciler reports to an external sink.
@@ -259,7 +311,7 @@ func (n *WebhookNotifier) Deliver(ctx context.Context, job *store.Job) error {
 		n.logger.Printf("webhook delivery failed (marshal job #%d): %v", job.ID, err)
 		return nil
 	}
-	n.postWithRetry(ctx, fmt.Sprintf("job #%d", job.ID), data)
+	_ = n.postWithRetry(ctx, fmt.Sprintf("job #%d", job.ID), data)
 	return nil
 }
 
@@ -278,11 +330,11 @@ func (n *WebhookNotifier) Report(ctx context.Context, report Report) error {
 		n.logger.Printf("webhook report failed (marshal %q): %v", report.DedupKey, err)
 		return nil
 	}
-	n.postWithRetry(ctx, fmt.Sprintf("report %q (job #%d)", report.DedupKey, report.JobID), data)
+	_ = n.postWithRetry(ctx, fmt.Sprintf("report %q (job #%d)", report.DedupKey, report.JobID), data)
 	return nil
 }
 
-func (n *WebhookNotifier) postWithRetry(ctx context.Context, targetDesc string, body []byte) {
+func (n *WebhookNotifier) postWithRetry(ctx context.Context, targetDesc string, body []byte) error {
 	maxAttempts := 1 + n.retries
 	backoff := n.initialBackoff
 	var lastErr error
@@ -296,7 +348,7 @@ func (n *WebhookNotifier) postWithRetry(ctx context.Context, targetDesc string, 
 		attemptsRun = attempt
 		err := n.postOnce(ctx, body)
 		if err == nil {
-			return
+			return nil
 		}
 		lastErr = err
 
@@ -312,7 +364,7 @@ func (n *WebhookNotifier) postWithRetry(ctx context.Context, targetDesc string, 
 				lastErr = ctx.Err()
 				n.logger.Printf("webhook delivery failed (%s) to %s after %d/%d attempts: %v",
 					targetDesc, redactWebhookURL(n.url), attemptsRun, maxAttempts, lastErr)
-				return
+				return lastErr
 			case <-timer.C:
 			}
 			if backoff < maxWebhookBackoff {
@@ -326,6 +378,7 @@ func (n *WebhookNotifier) postWithRetry(ctx context.Context, targetDesc string, 
 
 	n.logger.Printf("webhook delivery failed (%s) to %s after %d/%d attempts: %v",
 		targetDesc, redactWebhookURL(n.url), attemptsRun, maxAttempts, lastErr)
+	return lastErr
 }
 
 func (n *WebhookNotifier) postOnce(ctx context.Context, body []byte) error {

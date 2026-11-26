@@ -17,6 +17,7 @@ const (
 		id, request_id, status, pool, alt_pools, payload_json, reason, snapshot_summary,
 		released_job_id, released_pool, released_at, cancelled_at,
 		last_error, error_count, created_at, updated_at, cancel_reason,
+		chain_run_id, chain_seq,
 		(
 			SELECT jobs.status FROM jobs
 			WHERE jobs.id = CASE WHEN json_valid(held_jobs.payload_json)
@@ -39,6 +40,9 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 	}
 	if reqID == "" {
 		return nil, false, fmt.Errorf("%w: request_id must not be empty", ErrInvalidInput)
+	}
+	if IsReservedRequestID(reqID) {
+		return nil, false, fmt.Errorf("%w: request_id prefix %q is reserved for chain runs", ErrInvalidInput, ReservedRequestIDPrefix)
 	}
 	if strings.TrimSpace(p.Payload.Title) == "" {
 		return nil, false, fmt.Errorf("%w: title must not be empty", ErrInvalidInput)
@@ -92,28 +96,7 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 			return err
 		}
 
-		suffix, err := randomHex(8)
-		if err != nil {
-			return fmt.Errorf("generate held_id: %w", err)
-		}
-		heldID := "held-" + suffix
-		nowStr := formatTime(time.Now().UTC())
-
-		_, err = conn.ExecContext(ctx, `
-			INSERT INTO held_jobs (
-				id, request_id, status, pool, alt_pools, payload_json, reason, snapshot_summary,
-				released_job_id, released_pool, released_at, cancelled_at,
-				last_error, error_count, created_at, updated_at
-			) VALUES (
-				?, ?, 'held', ?, ?, ?, ?, ?,
-				NULL, '', NULL, NULL,
-				'', 0, ?, ?
-			)
-		`,
-			heldID, reqID, strings.TrimSpace(p.Pool), altPoolsJSON, string(payloadBytes),
-			strings.TrimSpace(p.Reason), strings.TrimSpace(p.SnapshotSummary),
-			nowStr, nowStr,
-		)
+		heldID, err := insertHeldTx(ctx, conn, reqID, p, altPoolsJSON, string(payloadBytes), "", 0)
 		if err != nil {
 			if isUniqueConstraintError(err) {
 				existing, rerr := queryHeldJobByRequestID(ctx, conn, reqID)
@@ -138,6 +121,42 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 		return result, false, err
 	}
 	return result, created, nil
+}
+
+// insertHeldTx inserts one held_jobs row inside an open write transaction and returns its ID.
+func insertHeldTx(ctx context.Context, conn *sql.Conn, reqID string, p HoldJobParams, altPoolsJSON, payloadJSON, chainRunID string, chainSeq int) (string, error) {
+	suffix, err := randomHex(8)
+	if err != nil {
+		return "", fmt.Errorf("generate held_id: %w", err)
+	}
+	heldID := "held-" + suffix
+	nowStr := formatTime(time.Now().UTC())
+	var chainRunArg, chainSeqArg any
+	if chainRunID != "" {
+		chainRunArg = chainRunID
+		chainSeqArg = chainSeq
+	}
+	_, err = conn.ExecContext(ctx, `
+		INSERT INTO held_jobs (
+			id, request_id, status, pool, alt_pools, payload_json, reason, snapshot_summary,
+			released_job_id, released_pool, released_at, cancelled_at,
+			last_error, error_count, created_at, updated_at,
+			cancel_reason, chain_run_id, chain_seq
+		) VALUES (
+			?, ?, 'held', ?, ?, ?, ?, ?,
+			NULL, '', NULL, NULL,
+			'', 0, ?, ?,
+			'', ?, ?
+		)
+	`,
+		heldID, reqID, strings.TrimSpace(p.Pool), altPoolsJSON, payloadJSON,
+		strings.TrimSpace(p.Reason), strings.TrimSpace(p.SnapshotSummary),
+		nowStr, nowStr, chainRunArg, chainSeqArg,
+	)
+	if err != nil {
+		return "", err
+	}
+	return heldID, nil
 }
 
 // GetHeldJob returns a held_jobs row by ID, or ErrNotFound if absent.
@@ -242,54 +261,6 @@ func (s *Store) ListHeldJobsPage(ctx context.Context, filter ListHeldJobsFilter)
 		page.NextCursor = formatCompositeTimeStringCursor(last.CreatedAt, last.ID)
 	}
 	return page, nil
-}
-
-// CancelHeldJob transitions a held entry from status='held' to status='cancelled' without
-// deleting the row so audit history and request_id uniqueness remain intact.
-// reason is optional; it is stored as cancel_reason, capped at maxHeldErrorBytes.
-func (s *Store) CancelHeldJob(ctx context.Context, heldID, reason string) (*HeldJob, error) {
-	heldID = strings.TrimSpace(heldID)
-	if heldID == "" {
-		return nil, fmt.Errorf("%w: held_id must not be empty", ErrInvalidInput)
-	}
-	reason = strings.TrimSpace(reason)
-	if len(reason) > maxHeldErrorBytes {
-		// Drop a rune split by the cut so the stored text stays valid UTF-8.
-		reason = strings.ToValidUTF8(reason[:maxHeldErrorBytes], "")
-	}
-
-	var out *HeldJob
-	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
-		nowStr := formatTime(time.Now().UTC())
-		res, err := conn.ExecContext(ctx, `
-			UPDATE held_jobs
-			SET status = 'cancelled',
-				cancel_reason = ?,
-				cancelled_at = ?,
-				updated_at = ?
-			WHERE id = ? AND status = 'held'
-		`, reason, nowStr, nowStr, heldID)
-		if err != nil {
-			return err
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if affected == 0 {
-			return classifyHeldConflict(ctx, conn, heldID, "held")
-		}
-		h, err := queryHeldJobByID(ctx, conn, heldID)
-		if err != nil {
-			return err
-		}
-		out = h
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // MarkHeldReleased transitions a held entry from status='held' to status='released',
@@ -438,17 +409,21 @@ func scanHeldJob(s rowScanner) (*HeldJob, error) {
 		cancelledAt   sql.NullString
 		createdAt     string
 		updatedAt     string
+		chainRunID    sql.NullString
+		chainSeq      sql.NullInt64
 		parentStatus  sql.NullString
 	)
 	err := s.Scan(
 		&h.ID, &h.RequestID, &statusStr, &h.Pool, &altPoolsStr, &payloadStr, &h.Reason, &h.SnapshotSummary,
 		&releasedJobID, &h.ReleasedPool, &releasedAt, &cancelledAt,
 		&h.LastError, &h.ErrorCount, &createdAt, &updatedAt, &h.CancelReason,
-		&parentStatus,
+		&chainRunID, &chainSeq, &parentStatus,
 	)
 	if err != nil {
 		return nil, err
 	}
+	h.ChainRunID = chainRunID.String
+	h.ChainSeq = int(chainSeq.Int64)
 	h.Status = HeldStatus(statusStr)
 	h.ParentStatus = Status(parentStatus.String)
 	altPools, err := decodeAltPools(altPoolsStr)
@@ -523,6 +498,8 @@ func ensureHeldJobsColumns(ctx context.Context, db *sql.DB) error {
 		{"last_error", `ALTER TABLE held_jobs ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`},
 		{"error_count", `ALTER TABLE held_jobs ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0`},
 		{"cancel_reason", `ALTER TABLE held_jobs ADD COLUMN cancel_reason TEXT NOT NULL DEFAULT ''`},
+		{"chain_run_id", `ALTER TABLE held_jobs ADD COLUMN chain_run_id TEXT NULL`},
+		{"chain_seq", `ALTER TABLE held_jobs ADD COLUMN chain_seq INTEGER NULL`},
 	}
 	for _, add := range additions {
 		if _, ok := existing[add.name]; ok {

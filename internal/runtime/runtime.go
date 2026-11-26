@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
+	"github.com/ypsilonmeister/quota-fleet/internal/admission"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
@@ -44,6 +45,12 @@ type Options struct {
 	SnapshotLoader      func() (*quota.Snapshot, error)
 	Now                 func() time.Time
 	Logger              *log.Logger
+
+	// SelectorMode feeds the Chain Driver's admission (same as POST /jobs, docs/22 §4.4).
+	SelectorMode string
+	// ChainSweepInterval / ChainStallAfter configure the Chain Driver (docs/22 §6).
+	ChainSweepInterval time.Duration
+	ChainStallAfter    time.Duration
 }
 
 // Runtime bundles and coordinates the lifecycle of all resident components.
@@ -55,6 +62,7 @@ type Runtime struct {
 	GateChecker  *GateChecker
 	AgentChecker *AgentVersionChecker
 	ModelProber  *AgentModelProber
+	ChainDriver  *ChainDriver
 
 	notifyCh chan struct{}
 	logger   *log.Logger
@@ -158,15 +166,39 @@ func New(opts Options) (*Runtime, error) {
 		MaxEvalRetries: opts.MaxEvalRetries,
 		Logger:         logger,
 	})
+	chainInterval := opts.ChainSweepInterval
+	if chainInterval <= 0 {
+		chainInterval = shepherdInterval
+	}
+	chainDriver := NewChainDriver(ChainDriverOptions{
+		Store: opts.Store,
+		Admission: admission.New(admission.Options{
+			GateMode:     opts.GateMode,
+			SelectorMode: opts.SelectorMode,
+			Pools:        opts.Pools,
+			StaleAfter:   opts.QuotaStaleAfter,
+			UsageFile:    opts.QuotaUsageFile,
+			Now:          opts.Now,
+			LoadSnapshot: opts.SnapshotLoader,
+			GetJob:       opts.Store.GetJob,
+		}),
+		Notifier:       notifier,
+		LauncherNotify: notifyCh,
+		Interval:       chainInterval,
+		StallAfter:     opts.ChainStallAfter,
+		Now:            opts.Now,
+		Logger:         logger,
+	})
 	reconciler := NewReconciler(ReconcilerOptions{
-		Store:             opts.Store,
-		Adapter:           opts.Adapter,
-		Notifier:          notifier,
-		Interval:          reconcileInterval,
-		StaleClaimedAfter: staleAfter,
-		AttemptsCap:       attemptsCap,
-		Now:               opts.Now,
-		Logger:            logger,
+		Store:                 opts.Store,
+		Adapter:               opts.Adapter,
+		Notifier:              notifier,
+		Interval:              reconcileInterval,
+		StaleClaimedAfter:     staleAfter,
+		AttemptsCap:           attemptsCap,
+		Now:                   opts.Now,
+		Logger:                logger,
+		ChainDriverStaleAfter: 3 * chainInterval,
 	})
 	gateChecker := NewGateChecker(GateCheckerOptions{
 		Store:          opts.Store,
@@ -210,6 +242,7 @@ func New(opts Options) (*Runtime, error) {
 		GateChecker:  gateChecker,
 		AgentChecker: agentChecker,
 		ModelProber:  modelProber,
+		ChainDriver:  chainDriver,
 		notifyCh:     notifyCh,
 		logger:       logger,
 	}, nil
@@ -236,6 +269,12 @@ func (r *Runtime) Start(ctx context.Context) error {
 		{"launcher", r.Launcher.Run},
 		{"shepherd", r.Shepherd.Run},
 		{"reconciler", r.Reconciler.Run},
+	}
+	if r.ChainDriver != nil {
+		components = append(components, struct {
+			name string
+			fn   func(context.Context) error
+		}{"chain-driver", r.ChainDriver.Run})
 	}
 	if r.GateChecker != nil && r.GateChecker.Enabled() {
 		components = append(components, struct {

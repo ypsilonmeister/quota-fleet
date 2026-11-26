@@ -100,6 +100,11 @@ type Job struct {
 
 	// Effort is the per-job reasoning effort (docs/21). Empty means the agent's default.
 	Effort string
+
+	// ChainRunID / ChainSeq identify the chain run step this job belongs to (docs/22).
+	// Empty / 0 for jobs outside a chain run.
+	ChainRunID string
+	ChainSeq   int
 }
 
 // CreateJobParams holds input fields for CreateJob.
@@ -299,11 +304,15 @@ type HeldJob struct {
 	ErrorCount      int
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
-	// CancelReason is the optional reason given when the entry was cancelled.
+	// CancelReason is the optional reason given when the entry was cancelled (the gate
+	// API body, or "chain cancelled" for a chain run cancel, docs/22 §5).
 	CancelReason string
 	// ParentStatus is the status of the job named by Payload.ParentID at read time.
 	// It is not stored on the held row; empty when there is no parent or no such job.
 	ParentStatus Status
+	// ChainRunID / ChainSeq identify the chain run step this hold belongs to (docs/22).
+	ChainRunID string
+	ChainSeq   int
 }
 
 // HoldJobParams holds input fields for HoldJob.

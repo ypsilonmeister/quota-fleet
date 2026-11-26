@@ -43,6 +43,9 @@ type Store struct {
 	events     jobEventHub
 	// afterJobCommit, set only by tests, runs between a job commit and its publication.
 	afterJobCommit func()
+	// chainFault, set only by tests (SetChainFaultHookForTest), runs at named points inside
+	// chain transactions after rows were written; a non-nil error aborts the transaction.
+	chainFault func(stage string) error
 }
 
 // Open opens (or creates) the SQLite database at dbPath, enables WAL mode and
@@ -113,9 +116,17 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs.effort: %w", err)
 	}
+	if err := ensureChainColumns(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate chain columns: %w", err)
+	}
 	if err := ensureHeldJobsColumns(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate held_jobs: %w", err)
+	}
+	if err := ensureHeldChainPrefixFree(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate held_jobs chain prefix: %w", err)
 	}
 	if err := ensureGateDecisionsSchema(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
@@ -295,6 +306,9 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 	if strings.TrimSpace(p.RequestID) == "" {
 		return nil, false, fmt.Errorf("%w: request_id must not be empty", ErrInvalidInput)
 	}
+	if IsReservedRequestID(p.RequestID) {
+		return nil, false, fmt.Errorf("%w: request_id prefix %q is reserved for chain runs", ErrInvalidInput, ReservedRequestIDPrefix)
+	}
 	if strings.TrimSpace(p.Title) == "" {
 		return nil, false, fmt.Errorf("%w: title must not be empty", ErrInvalidInput)
 	}
@@ -329,65 +343,7 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 			return err
 		}
 
-		// Determine initial status based on parent_id / Draft.
-		var status Status
-		if p.ParentID == nil {
-			if p.Draft {
-				status = StatusDraft
-			} else {
-				status = StatusQueued
-			}
-		} else {
-			var parentStatusStr string
-			err := conn.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, *p.ParentID).Scan(&parentStatusStr)
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("%w: parent_id=%d", ErrParentNotFound, *p.ParentID)
-			}
-			if err != nil {
-				return err
-			}
-			parentStatus := Status(parentStatusStr)
-			switch parentStatus {
-			case StatusFailed, StatusCancelled:
-				return fmt.Errorf("%w: parent_id=%d has status %s", ErrParentTerminal, *p.ParentID, parentStatus)
-			case StatusDone:
-				status = StatusQueued
-			default:
-				status = StatusWaiting
-			}
-		}
-
-		now := time.Now().UTC()
-		nowStr := formatTime(now)
-
-		var parentArg any
-		if p.ParentID != nil {
-			parentArg = *p.ParentID
-		}
-
-		res, err := conn.ExecContext(ctx, `
-			INSERT INTO jobs (
-				request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
-				instructions, acceptance_criteria, parent_id,
-				claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
-				created_at, updated_at, model, pool, alt_pools, session_id, created_by,
-				selected_agent, selected_model, selected_pool, selection_reason, selection_mode,
-				effort
-			) VALUES (
-				?, ?, ?, ?, ?, ?, ?, ?,
-				?, ?, ?,
-				'', NULL, 0, '', '', NULL,
-				?, ?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?, ?,
-				?
-			)
-		`,
-			p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
-			p.Instructions, p.AcceptanceCriteria, parentArg,
-			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy),
-			p.SelectedAgent, p.SelectedModel, p.SelectedPool, p.SelectionReason, p.SelectionMode,
-			effort,
-		)
+		job, err := s.insertJobTx(ctx, conn, changes, p, altPoolsJSON, worktreeSpecJSON, effort, "", 0)
 		if err != nil {
 			if isUniqueConstraintError(err) {
 				existing, rerr := queryJobByRequestID(ctx, conn, p.RequestID)
@@ -399,31 +355,113 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 			}
 			return err
 		}
-
-		jobID, err := res.LastInsertId()
-		if err != nil {
-			return err
-		}
-
-		if status == StatusQueued {
-			if err := s.insertOutboxTx(ctx, conn, jobID, "create", "queued", nowStr); err != nil {
-				return err
-			}
-		}
-
-		job, err := queryJobByID(ctx, conn, jobID)
-		if err != nil {
-			return err
-		}
 		result = job
 		created = true
-		*changes = append(*changes, statusChange{jobID: jobID, next: status})
 		return nil
 	})
 	if err != nil {
 		return nil, false, err
 	}
 	return result, created, nil
+}
+
+// insertJobTx inserts one jobs row inside an open write transaction. The initial status
+// follows the parent (F1): none → queued (or draft), done → queued, failed/cancelled →
+// ErrParentTerminal, otherwise waiting. chainRunID/chainSeq are set only for chain steps
+// (docs/22). The caller has already checked request_id idempotency.
+func (s *Store) insertJobTx(
+	ctx context.Context,
+	conn *sql.Conn,
+	changes *[]statusChange,
+	p CreateJobParams,
+	altPoolsJSON, worktreeSpecJSON, effort string,
+	chainRunID string,
+	chainSeq int,
+) (*Job, error) {
+	var status Status
+	if p.ParentID == nil {
+		if p.Draft {
+			status = StatusDraft
+		} else {
+			status = StatusQueued
+		}
+	} else {
+		var parentStatusStr string
+		err := conn.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, *p.ParentID).Scan(&parentStatusStr)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: parent_id=%d", ErrParentNotFound, *p.ParentID)
+		}
+		if err != nil {
+			return nil, err
+		}
+		parentStatus := Status(parentStatusStr)
+		switch parentStatus {
+		case StatusFailed, StatusCancelled:
+			return nil, fmt.Errorf("%w: parent_id=%d has status %s", ErrParentTerminal, *p.ParentID, parentStatus)
+		case StatusDone:
+			status = StatusQueued
+		default:
+			status = StatusWaiting
+		}
+	}
+
+	now := time.Now().UTC()
+	nowStr := formatTime(now)
+
+	var parentArg any
+	if p.ParentID != nil {
+		parentArg = *p.ParentID
+	}
+	var chainRunArg, chainSeqArg any
+	if chainRunID != "" {
+		chainRunArg = chainRunID
+		chainSeqArg = chainSeq
+	}
+
+	res, err := conn.ExecContext(ctx, `
+		INSERT INTO jobs (
+			request_id, title, status, agent, host, workdir, worktree_spec, target_ref,
+			instructions, acceptance_criteria, parent_id,
+			claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
+			created_at, updated_at, model, pool, alt_pools, session_id, created_by,
+			selected_agent, selected_model, selected_pool, selection_reason, selection_mode,
+			effort, chain_run_id, chain_seq
+		) VALUES (
+			?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?,
+			'', NULL, 0, '', '', NULL,
+			?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?,
+			?, ?, ?
+		)
+	`,
+		p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
+		p.Instructions, p.AcceptanceCriteria, parentArg,
+		nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy),
+		p.SelectedAgent, p.SelectedModel, p.SelectedPool, p.SelectionReason, p.SelectionMode,
+		effort, chainRunArg, chainSeqArg,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	jobID, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+
+	if status == StatusQueued {
+		if err := s.insertOutboxTx(ctx, conn, jobID, "create", "queued", nowStr); err != nil {
+			return nil, err
+		}
+	}
+
+	job, err := queryJobByID(ctx, conn, jobID)
+	if err != nil {
+		return nil, err
+	}
+	*changes = append(*changes, statusChange{jobID: jobID, next: status})
+	return job, nil
 }
 
 // Claim atomically checks that claimed count < maxClaimed and claims the oldest queued job
@@ -585,9 +623,16 @@ func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Jo
 // Complete marks a claimed job as done (verifying claimToken) and promotes its direct
 // waiting children to queued (recording signal_outbox rows) in the same transaction.
 func (s *Store) Complete(ctx context.Context, jobID int64, claimToken, resultText string) (*CompleteResult, error) {
+	return s.complete(ctx, jobID, claimToken, resultText, nil)
+}
+
+// complete is Complete with an optional extra write (the chain verdict artifact) that
+// runs inside the same transaction after the job became done.
+func (s *Store) complete(ctx context.Context, jobID int64, claimToken, resultText string, extra func(conn *sql.Conn) error) (*CompleteResult, error) {
 	var out CompleteResult
 
 	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
+		out = CompleteResult{}
 		nowStr := formatTime(time.Now().UTC())
 
 		res, err := conn.ExecContext(ctx, `
@@ -613,6 +658,12 @@ func (s *Store) Complete(ctx context.Context, jobID int64, claimToken, resultTex
 		}
 
 		*changes = append(*changes, statusChange{jobID: jobID, prev: StatusClaimed, next: StatusDone})
+
+		if extra != nil {
+			if err := extra(conn); err != nil {
+				return err
+			}
+		}
 
 		// Promote direct waiting children to queued.
 		childIDs, err := listDirectWaitingChildren(ctx, conn, jobID)
@@ -833,6 +884,11 @@ func (s *Store) Requeue(ctx context.Context, jobID int64) (*Job, error) {
 			return err
 		}
 
+		var chainRun sql.NullString
+		if err := conn.QueryRowContext(ctx, `SELECT chain_run_id FROM jobs WHERE id = ?`, jobID).Scan(&chainRun); err == nil && chainRun.Valid && chainRun.String != "" {
+			return fmt.Errorf("%w: %w: job %d belongs to chain run %s", ErrConflict, ErrChainManaged, jobID, chainRun.String)
+		}
+
 		res, err := conn.ExecContext(ctx, `
 			UPDATE jobs
 			SET status = 'queued',
@@ -874,11 +930,26 @@ func (s *Store) Requeue(ctx context.Context, jobID int64) (*Job, error) {
 
 // Reset moves a claimed job back to queued while preserving attempts,
 // clears claim ownership/leases, and emits a signal_outbox row.
+//
+// A step job of a chain run that is no longer running (cancelled, stopped or completed)
+// is never made claimable again (docs/22 §5.2): inside the same transaction it moves
+// claimed → cancelled instead, and the returned job has status cancelled.
 func (s *Store) Reset(ctx context.Context, jobID int64) (*Job, error) {
 	var job *Job
 
 	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
+
+		if terminal, runStatus, err := jobChainRunTerminal(ctx, conn, jobID); err != nil {
+			return err
+		} else if terminal {
+			j, err := cancelClaimedChainJobTx(ctx, conn, changes, jobID, runStatus, nowStr)
+			if err != nil {
+				return err
+			}
+			job = j
+			return nil
+		}
 
 		res, err := conn.ExecContext(ctx, `
 			UPDATE jobs
@@ -1569,7 +1640,7 @@ const jobColumns = `
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
 	created_at, updated_at, model, pool, alt_pools, session_id, created_by,
 	selected_agent, selected_model, selected_pool, selection_reason, selection_mode,
-	effort
+	effort, chain_run_id, chain_seq
 `
 
 func queryJobByID(ctx context.Context, q queryRower, jobID int64) (*Job, error) {
@@ -1601,6 +1672,8 @@ func scanJob(s rowScanner) (*Job, error) {
 		createdAt       string
 		updatedAt       string
 		altPoolsStr     string
+		chainRunID      sql.NullString
+		chainSeq        sql.NullInt64
 	)
 	err := s.Scan(
 		&j.ID, &j.RequestID, &j.Title, &statusStr,
@@ -1609,12 +1682,14 @@ func scanJob(s rowScanner) (*Job, error) {
 		&j.ClaimedBy, &claimedAt, &j.Attempts, &j.ResultText, &j.LastError, &deliveredAt,
 		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy,
 		&j.SelectedAgent, &j.SelectedModel, &j.SelectedPool, &j.SelectionReason, &j.SelectionMode,
-		&j.Effort,
+		&j.Effort, &chainRunID, &chainSeq,
 	)
 	if err != nil {
 		return nil, err
 	}
 	j.Status = Status(statusStr)
+	j.ChainRunID = chainRunID.String
+	j.ChainSeq = int(chainSeq.Int64)
 	if parentID.Valid {
 		v := parentID.Int64
 		j.ParentID = &v

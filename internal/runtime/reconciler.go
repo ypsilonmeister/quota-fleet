@@ -22,6 +22,9 @@ type ReconcilerOptions struct {
 	AttemptsCap       int
 	Now               func() time.Time
 	Logger            *log.Logger
+	// ChainDriverStaleAfter reports a Chain Driver whose last sweep is older than this
+	// (3 × chains.sweep_interval, docs/22 §6). Zero disables the check.
+	ChainDriverStaleAfter time.Duration
 }
 
 // Reconciler periodically checks for:
@@ -37,6 +40,7 @@ type Reconciler struct {
 	attemptsCap       int
 	now               func() time.Time
 	logger            *log.Logger
+	chainStaleAfter   time.Duration
 }
 
 // NewReconciler constructs a Reconciler.
@@ -66,6 +70,7 @@ func NewReconciler(opts ReconcilerOptions) *Reconciler {
 		attemptsCap:       opts.AttemptsCap,
 		now:               nowFn,
 		logger:            logger,
+		chainStaleAfter:   opts.ChainDriverStaleAfter,
 	}
 }
 
@@ -89,6 +94,8 @@ func (r *Reconciler) Run(ctx context.Context) error {
 // ReconcileOnce performs one reconciliation pass. When all active Store counts
 // (claimed, queued, waiting, undelivered done/failed) are zero, detailed checks are skipped.
 func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
+	r.checkChainDriver(ctx)
+
 	counts, hasUndel, err := checkActiveWork(ctx, r.store)
 	if err != nil {
 		return err
@@ -172,11 +179,24 @@ func (r *Reconciler) reconcileStaleClaimed(ctx context.Context) error {
 			continue
 		}
 
-		if _, err := r.store.Reset(ctx, job.ID); err != nil {
+		reset, err := r.store.Reset(ctx, job.ID)
+		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
 				continue
 			}
 			r.logger.Printf("reconciler reset job #%d error: %v", job.ID, err)
+			continue
+		}
+		if reset != nil && reset.Status == store.StatusCancelled {
+			// A step of a chain run that is no longer running: Reset cancelled it instead.
+			r.logger.Printf("reconciler cancelled missing claimed job #%d: %s", job.ID, reset.LastError)
+			r.reportOnce(ctx, Report{
+				DedupKey:  fmt.Sprintf("stale-claimed-chain-cancelled:%d", job.ID),
+				Kind:      "stale_claimed_cancelled",
+				JobID:     job.ID,
+				Message:   fmt.Sprintf("job #%d (%q) missing on worker after %s; %s", job.ID, job.Title, r.staleClaimedAfter, reset.LastError),
+				Timestamp: now,
+			})
 			continue
 		}
 		r.logger.Printf("reconciler reset missing claimed job #%d back to queued (attempts=%d)", job.ID, job.Attempts)
@@ -255,4 +275,34 @@ func (r *Reconciler) reportOnce(ctx context.Context, rep Report) {
 			r.logger.Printf("reconciler report error for %q: %v", rep.DedupKey, err)
 		}
 	}
+}
+
+// checkChainDriver reports, once per last-sweep value, a Chain Driver whose last sweep is
+// older than chainStaleAfter while chain runs are running (docs/22 §6).
+func (r *Reconciler) checkChainDriver(ctx context.Context) {
+	if r.chainStaleAfter <= 0 {
+		return
+	}
+	counts, err := r.store.CountChainRunsByStatus(ctx)
+	if err != nil || counts[store.ChainRunRunning] == 0 {
+		return
+	}
+	now := r.now().UTC()
+	last := "never"
+	raw, err := r.store.GetMeta(ctx, store.MetaKeyChainDriverLastSweep)
+	if err == nil {
+		t, perr := time.Parse(time.RFC3339Nano, raw)
+		if perr == nil && now.Sub(t) <= r.chainStaleAfter {
+			return
+		}
+		last = raw
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return
+	}
+	r.reportOnce(ctx, Report{
+		DedupKey:  "chain-driver-stale:" + last,
+		Kind:      "chain_driver_stale",
+		Message:   fmt.Sprintf("chain driver has not swept since %s (threshold %s) while %d chain runs are running", last, r.chainStaleAfter, counts[store.ChainRunRunning]),
+		Timestamp: now,
+	})
 }

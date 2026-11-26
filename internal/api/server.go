@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ypsilonmeister/quota-fleet/internal/selector"
 	"io"
 	"log"
 	"net/http"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
+	"github.com/ypsilonmeister/quota-fleet/internal/admission"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentmodels"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentver"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
@@ -104,6 +104,17 @@ type Options struct {
 	Now func() time.Time
 	// SnapshotLoader optionally overrides loading usage snapshots from QuotaUsageFile in tests.
 	SnapshotLoader func() (*quota.Snapshot, error)
+	// Chains configures the chain run endpoints (docs/22).
+	Chains ChainOptions
+}
+
+// ChainOptions configures the chain run endpoints and their GET /status section.
+type ChainOptions struct {
+	// MaxRoundsCap rejects max_rounds above it (chains.max_rounds_cap, default 10).
+	MaxRoundsCap int
+	// DriverStaleAfter marks the Chain Driver stale in GET /status when its last sweep is
+	// older (3 × chains.sweep_interval). Zero disables the flag.
+	DriverStaleAfter time.Duration
 }
 
 type apiToken struct {
@@ -178,6 +189,8 @@ type Server struct {
 	eventsHeartbeat  time.Duration
 	webPushPublicKey string
 	handler          http.Handler
+	adm              *admission.Admission
+	chains           ChainOptions
 }
 
 // NewServer constructs an HTTP API server backed by st.
@@ -274,7 +287,18 @@ func NewServer(st *store.Store, opts Options) *Server {
 		snapshotLoader:   opts.SnapshotLoader,
 		eventsHeartbeat:  eventsHeartbeat,
 		webPushPublicKey: opts.WebPushPublicKey,
+		chains:           opts.Chains,
 	}
+	s.adm = admission.New(admission.Options{
+		GateMode:     gateMode,
+		SelectorMode: selectorMode,
+		Pools:        opts.Pools,
+		StaleAfter:   staleAfter,
+		UsageFile:    strings.TrimSpace(opts.QuotaUsageFile),
+		Now:          nowFn,
+		LoadSnapshot: opts.SnapshotLoader,
+		GetJob:       st.GetJob,
+	})
 
 	if len(s.tokens) == 0 && !s.requireAuth {
 		s.logger.Printf("WARNING: api.token and api.tokens are empty; HTTP API is running without authentication (intended for localhost only)")
@@ -293,6 +317,11 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("POST /jobs/{id}/reset", s.requireScope(config.ScopeOperate, s.handleResetJob))
 	mux.HandleFunc("POST /jobs/{id}/reject-invalid", s.requireScope(config.ScopeWorker, s.handleRejectInvalidJob))
 	mux.HandleFunc("POST /jobs/{id}/deliver", s.requireScope(config.ScopeOperate, s.handleDeliverJob))
+	mux.HandleFunc("POST /chains", s.requireScope(config.ScopeRegister, s.handleCreateChain))
+	mux.HandleFunc("GET /chains", s.requireScope(config.ScopeRead, s.handleListChains))
+	mux.HandleFunc("GET /chains/{id}", s.requireScope(config.ScopeRead, s.handleGetChain))
+	// operate, or the token that registered the run (checked in the handler, docs/22 §9).
+	mux.HandleFunc("POST /chains/{id}/cancel", s.handleCancelChain)
 	mux.HandleFunc("GET /status", s.requireScope(config.ScopeRead, s.handleStatus))
 	mux.HandleFunc("GET /meta", s.requireScope(config.ScopeRead, s.handleMeta))
 	mux.HandleFunc("GET /deliveries", s.requireScope(config.ScopeRead, s.handleDeliveries))
@@ -429,45 +458,49 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	if s.selectorMode != config.SelectorModeOff && !selector.ValidRole(strings.TrimSpace(req.Role)) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: role %q is not supported (implement|review|judge|fix|publish|misc)", store.ErrInvalidInput, req.Role))
+	if store.IsReservedRequestID(req.RequestID) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: request_id prefix %q is reserved for chain runs (docs/22)", store.ErrInvalidInput, store.ReservedRequestIDPrefix))
 		return
 	}
-	if s.selectorMode != config.SelectorModeOff && !selector.ValidWeight(strings.TrimSpace(req.Weight)) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("%v: weight %q is not supported (light|standard|heavy)", store.ErrInvalidInput, req.Weight))
-		return
-	}
-
-	resolvedPool := s.resolveRequestPool(req)
 
 	createdBy := ""
 	if p, ok := authPrincipalFromContext(r.Context()); ok {
 		createdBy = p.name
 	}
-	params := store.CreateJobParams{
-		RequestID:          req.RequestID,
-		Title:              req.Title,
-		Draft:              req.Draft,
-		Agent:              req.Agent,
-		Host:               req.Host,
-		Workdir:            req.Workdir,
-		WorktreeSpec:       req.WorktreeSpec,
-		TargetRef:          req.TargetRef,
-		Instructions:       req.Instructions,
-		AcceptanceCriteria: req.AcceptanceCriteria,
-		ParentID:           req.ParentID,
-		Model:              req.Model,
-		Pool:               resolvedPool,
-		AltPools:           req.AltPools,
-		SessionID:          req.SessionID,
-		CreatedBy:          createdBy,
-		Effort:             strings.TrimSpace(req.Effort),
+	admReq := admission.Request{
+		Params: store.CreateJobParams{
+			RequestID:          req.RequestID,
+			Title:              req.Title,
+			Draft:              req.Draft,
+			Agent:              req.Agent,
+			Host:               req.Host,
+			Workdir:            req.Workdir,
+			WorktreeSpec:       req.WorktreeSpec,
+			TargetRef:          req.TargetRef,
+			Instructions:       req.Instructions,
+			AcceptanceCriteria: req.AcceptanceCriteria,
+			ParentID:           req.ParentID,
+			Model:              req.Model,
+			Pool:               req.Pool,
+			AltPools:           req.AltPools,
+			SessionID:          req.SessionID,
+			CreatedBy:          createdBy,
+			Effort:             strings.TrimSpace(req.Effort),
+		},
+		Role:   req.Role,
+		Weight: req.Weight,
+	}
+	if err := s.adm.ValidateRequest(admReq); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
+	params := admReq.Params
+	params.Pool = s.adm.ResolvePool(req.Agent, req.Model, req.Pool)
+
 	// One usage snapshot per request, shared by the Selector and the Gate.
-	usage := &requestUsage{load: s.loadSnapshotForSelector}
-	s.applySelector(&params, req, usage)
+	usage := s.adm.NewUsage()
+	s.adm.Select(r.Context(), &params, admReq, usage)
 
 	// docs/21: effort is checked against the agent the job will actually run on (after the
 	// Selector filled it), before the Gate may hold the payload. Never silently dropped.
@@ -492,7 +525,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if created && s.gateMode == config.GateModeDryRun {
-		s.recordDryRunGateDecision(r.Context(), job, params.Pool, req.AltPools, usage)
+		s.recordDryRunGateDecision(r.Context(), job, params, req.AltPools, usage)
 	}
 
 	status := http.StatusOK
@@ -505,7 +538,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, req CreateJobRequest, params store.CreateJobParams, usage *requestUsage) {
+func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, req CreateJobRequest, params store.CreateJobParams, usage *admission.Usage) {
 	ctx := r.Context()
 
 	reqID := strings.TrimSpace(req.RequestID)
@@ -570,37 +603,19 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Gate input is the pool the job will actually run on (after the Selector).
-	reqPool := params.Pool
-	if reqPool == "" && len(req.AltPools) == 0 {
-		job, created, err := s.store.CreateJob(ctx, params)
-		if err != nil {
-			s.writeCreateJobError(w, err)
-			return
-		}
-		status := http.StatusOK
-		if created {
-			status = http.StatusCreated
-		}
-		writeJSON(w, status, CreateJobResponse{
-			Job:     toJobDTO(job),
-			Created: created,
-		})
-		return
+	dec := s.adm.Gate(params, req.AltPools, usage)
+	if dec.SnapshotErr != nil {
+		s.logger.Printf("WARNING: quota gate enforce evaluation for request_id=%s failed to load snapshot: %v", reqID, dec.SnapshotErr)
 	}
 
-	eval, evalErr := s.evaluateGate(reqPool, req.AltPools, usage)
-	if evalErr != nil {
-		s.logger.Printf("WARNING: quota gate enforce evaluation for request_id=%s failed to load snapshot: %v", reqID, evalErr)
-	}
-
-	if quota.ShouldHoldOnEnforce(eval) {
+	if dec.Kind == admission.KindHold {
 		held, heldCreated, err := s.store.HoldJob(ctx, store.HoldJobParams{
 			RequestID:       reqID,
-			Pool:            reqPool,
-			AltPools:        eval.AltPools,
+			Pool:            dec.HoldPool,
+			AltPools:        dec.HoldAltPools,
 			Payload:         params,
-			Reason:          quota.FormatHoldReason(eval),
-			SnapshotSummary: quota.SummarizeEvaluation(eval),
+			Reason:          dec.HoldReason,
+			SnapshotSummary: dec.HoldSummary,
 		})
 		if err != nil {
 			switch {
@@ -628,21 +643,10 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 
-		if heldCreated {
-			if _, derr := s.store.RecordGateDecision(ctx, store.GateDecision{
-				HeldID:        held.ID,
-				Held:          true,
-				Mode:          config.GateModeEnforce,
-				RequestedPool: eval.RequestedPool,
-				AltPools:      eval.AltPools,
-				Decision:      string(eval.Decision),
-				BlockedBy:     eval.BlockedBy,
-				SelectedPool:  eval.SelectedPool,
-				Bypassed:      eval.Bypassed,
-				Reason:        eval.Reason,
-				MeasuredAt:    eval.MeasuredAt,
-				DecidedAt:     eval.DecidedAt,
-			}); derr != nil {
+		if heldCreated && dec.Gate != nil {
+			rec := *dec.Gate
+			rec.HeldID = held.ID
+			if _, derr := s.store.RecordGateDecision(ctx, rec); derr != nil {
 				s.logger.Printf("WARNING: failed to record enforce hold gate decision for held %s: %v", held.ID, derr)
 			}
 		}
@@ -656,32 +660,17 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Not held (healthy pool selected, unmeasured bypass, or provisional unknown only).
-	// When a healthy/bypassed pool is selected, assign it to the created job.
-	if eval.Decision == quota.DecisionWouldPass && eval.SelectedPool != "" {
-		params.Pool = eval.SelectedPool
-	}
-
-	job, created, err := s.store.CreateJob(ctx, params)
+	// When a healthy/bypassed pool is selected, Gate already assigned it to the job.
+	job, created, err := s.store.CreateJob(ctx, dec.Params)
 	if err != nil {
 		s.writeCreateJobError(w, err)
 		return
 	}
 
-	if created {
-		if _, derr := s.store.RecordGateDecision(ctx, store.GateDecision{
-			JobID:         job.ID,
-			Held:          false,
-			Mode:          config.GateModeEnforce,
-			RequestedPool: eval.RequestedPool,
-			AltPools:      eval.AltPools,
-			Decision:      string(eval.Decision),
-			BlockedBy:     eval.BlockedBy,
-			SelectedPool:  eval.SelectedPool,
-			Bypassed:      eval.Bypassed,
-			Reason:        eval.Reason,
-			MeasuredAt:    eval.MeasuredAt,
-			DecidedAt:     eval.DecidedAt,
-		}); derr != nil {
+	if created && dec.Gate != nil {
+		rec := *dec.Gate
+		rec.JobID = job.ID
+		if _, derr := s.store.RecordGateDecision(ctx, rec); derr != nil {
 			s.logger.Printf("WARNING: failed to record enforce pass gate decision for job #%d: %v", job.ID, derr)
 		}
 	}
@@ -707,214 +696,17 @@ func (s *Server) writeCreateJobError(w http.ResponseWriter, err error) {
 	}
 }
 
-// applySelector runs the Selector in front of the Gate (docs/19). Explicit agent/model/pool
-// values are never overwritten; only empty fields are filled, and only in apply mode with
-// the selection (record mode fills them with the documented defaults instead).
-func (s *Server) applySelector(params *store.CreateJobParams, req CreateJobRequest, usage *requestUsage) {
-	if s.selectorMode == config.SelectorModeOff {
+func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, params store.CreateJobParams, altPools []string, usage *admission.Usage) {
+	dec := s.adm.Gate(params, altPools, usage)
+	if dec.Gate == nil {
 		return
 	}
-	agent := strings.TrimSpace(req.Agent)
-	model := strings.TrimSpace(req.Model)
-	explicitPool := strings.TrimSpace(req.Pool)
-	resolve := func(a, m string) string { return quota.ResolvePoolByAppliesTo(s.pools, a, m) }
-
-	if agent != "" && model != "" {
-		if params.Pool == "" {
-			// Known table pair: fill the pool so the Gate sees it (apply mode only fills).
-			if p := selector.PoolFor(agent, model); p != "" && s.selectorMode == config.SelectorModeApply {
-				params.Pool = p
-			}
-		}
-		params.SelectedAgent, params.SelectedModel, params.SelectedPool = agent, model, params.Pool
-		params.SelectionMode = selector.ModeExplicit
-		params.SelectionReason = "agent and model explicitly specified; selector not consulted"
-		return
+	if dec.SnapshotErr != nil {
+		s.logger.Printf("WARNING: quota gate dry-run evaluation for job #%d failed to load snapshot: %v", job.ID, dec.SnapshotErr)
 	}
-
-	reqAgent, reqModel := agent, model // what the client sent; record mode executes with these + defaults
-	var parentNote string
-	var parentJob selector.Candidate // the followed parent, with the pool it actually runs on
-	parentFollowed := false
-	if strings.TrimSpace(req.Role) == selector.RoleFix && req.ParentID != nil && agent == "" && model == "" {
-		// docs/10 §4: fix runs on the same implementer as the parent job.
-		if parent, err := s.store.GetJob(context.Background(), *req.ParentID); err == nil && parent.Agent != "" {
-			agent, model = parent.Agent, parent.Model
-			parentNote = fmt.Sprintf("fix follows parent job #%d (%s/%s); ", parent.ID, agent, model)
-			parentFollowed = true
-			parentJob = selector.Candidate{Agent: parent.Agent, Model: parent.Model, Pool: parent.Pool}
-			if parentJob.Pool == "" {
-				// No pool stored on the parent: derive it from the parent's own agent/model.
-				parentJob.Pool = resolve(parent.Agent, parent.Model)
-			}
-			if parentJob.Pool == "" {
-				parentJob.Pool = selector.PoolFor(parent.Agent, parent.Model)
-			}
-		}
-	}
-
-	snap, snapErr := usage.get()
-	evalOpts := quota.EvalOptions{Now: s.nowFn(), StaleAfter: s.quotaStaleAfter, Pools: s.pools}
-	res := selector.Select(selector.Input{
-		Role:        strings.TrimSpace(req.Role),
-		Weight:      strings.TrimSpace(req.Weight),
-		Agent:       agent,
-		Model:       model,
-		Pool:        explicitPool,
-		Usage:       snap,
-		UsageErr:    snapErr,
-		Eval:        evalOpts,
-		ResolvePool: resolve,
-	})
-	if parentFollowed && !res.Abstain && snap != nil {
-		// docs/10 §4: when the parent's pool is exhausted and another pool is healthy,
-		// propose switching to another line (the proposal is recorded only).
-		// The parent's own pool is judged, not the pool of this job's candidate.
-		if ev := quota.EvaluatePool(parentJob.Pool, snap, evalOpts); ev.Status == quota.PoolExhausted {
-			if alt, ok := selector.SwitchTarget(selector.RoleFix, strings.TrimSpace(req.Weight), parentJob, snap, evalOpts); ok {
-				parentNote += fmt.Sprintf("parent pool %s is exhausted and pool %s is healthy: proposing a switch to another line %s/%s (docs/10 §4); ", parentJob.Pool, alt.Pool, alt.Agent, alt.Model)
-			}
-		}
-	}
-	if parentFollowed && res.Abstain {
-		parentNote = fmt.Sprintf("parent job target %s/%s not followed; ", agent, model)
-	}
-	// res.Candidate is empty on abstain, so no selected_* value is recorded then.
-	params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Agent, res.Model, res.Pool
-	params.SelectionReason = parentNote + res.Reason
-
-	if s.selectorMode == config.SelectorModeApply && !res.Abstain {
-		params.SelectionMode = selector.ModeApplied
-		if reqAgent == "" {
-			params.Agent = res.Agent
-		}
-		if reqModel == "" {
-			params.Model = res.Model
-		}
-		if explicitPool == "" && res.Pool != "" {
-			params.Pool = res.Pool
-		}
-		return
-	}
-
-	// Record mode and abstain both execute explicit values plus the documented defaults.
-	def := selector.Defaults(reqAgent, reqModel, explicitPool, resolve)
-	if reqAgent == "" {
-		params.Agent = def.Agent
-	}
-	if reqModel == "" {
-		params.Model = def.Model
-	}
-	if explicitPool == "" {
-		params.Pool = def.Pool
-	}
-	if res.Abstain {
-		params.SelectionMode = selector.ModeAbstained
-		params.SelectionReason += fmt.Sprintf("; registered with %s %s %s",
-			executedField("agent", params.Agent, reqAgent),
-			executedField("model", params.Model, reqModel),
-			executedField("pool", params.Pool, explicitPool))
-		return
-	}
-	params.SelectionMode = selector.ModeRecorded
-	params.SelectionReason += fmt.Sprintf("; record mode executes with defaults %s/%s on pool %s", params.Agent, params.Model, params.Pool)
-}
-
-// executedField describes an executed value and whether the client specified it.
-func executedField(name, executed, requested string) string {
-	switch {
-	case requested != "":
-		return fmt.Sprintf("%s=%s(explicit)", name, executed)
-	case executed != "":
-		return fmt.Sprintf("%s=%s(default)", name, executed)
-	}
-	return name + "=(unset)"
-}
-
-// loadSnapshotForSelector reads the usage snapshot through the same path as the Gate.
-func (s *Server) loadSnapshotForSelector() (*quota.Snapshot, error) {
-	if s.snapshotLoader != nil {
-		return s.snapshotLoader()
-	}
-	if s.quotaUsageFile == "" {
-		return nil, errors.New("quota.usage_file is not configured")
-	}
-	return quota.LoadUsageFile(s.quotaUsageFile)
-}
-
-func (s *Server) resolveRequestPool(req CreateJobRequest) string {
-	reqPool := strings.TrimSpace(req.Pool)
-	if reqPool == "" {
-		reqPool = quota.ResolvePoolByAppliesTo(s.pools, req.Agent, req.Model)
-	}
-	return reqPool
-}
-
-// requestUsage loads the usage snapshot at most once per request so the Selector and the
-// Gate judge the same data.
-type requestUsage struct {
-	load func() (*quota.Snapshot, error)
-	done bool
-	snap *quota.Snapshot
-	err  error
-}
-
-func (u *requestUsage) get() (*quota.Snapshot, error) {
-	if !u.done {
-		u.snap, u.err = u.load()
-		u.done = true
-	}
-	return u.snap, u.err
-}
-
-func (s *Server) evaluateGate(primaryPool string, altPools []string, usage *requestUsage) (quota.GateEvaluation, error) {
-	opts := quota.EvalOptions{
-		Now:        s.nowFn(),
-		StaleAfter: s.quotaStaleAfter,
-		Pools:      s.pools,
-	}
-	primaryPool = strings.TrimSpace(primaryPool)
-	if primaryPool != "" {
-		if cfg, ok := s.pools[primaryPool]; ok && cfg.Unmeasured {
-			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-		}
-	}
-	snap, err := usage.get()
-	if err != nil {
-		eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
-		if !eval.Bypassed {
-			eval.Decision = quota.DecisionUnknown
-			eval.Reason = fmt.Sprintf("%s: %v", quota.ReasonSnapshotError, err)
-		}
-		return eval, err
-	}
-	return quota.EvaluateGate(primaryPool, altPools, snap, opts), nil
-}
-
-func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, reqPool string, altPools []string, usage *requestUsage) {
-	if reqPool == "" && len(altPools) == 0 {
-		return
-	}
-
-	eval, evalErr := s.evaluateGate(reqPool, altPools, usage)
-	if evalErr != nil {
-		s.logger.Printf("WARNING: quota gate dry-run evaluation for job #%d failed to load snapshot: %v", job.ID, evalErr)
-	}
-
-	_, err := s.store.RecordGateDecision(ctx, store.GateDecision{
-		JobID:         job.ID,
-		Mode:          config.GateModeDryRun,
-		RequestedPool: eval.RequestedPool,
-		AltPools:      eval.AltPools,
-		Decision:      string(eval.Decision),
-		BlockedBy:     eval.BlockedBy,
-		SelectedPool:  eval.SelectedPool,
-		Bypassed:      eval.Bypassed,
-		Reason:        eval.Reason,
-		MeasuredAt:    eval.MeasuredAt,
-		DecidedAt:     eval.DecidedAt,
-	})
-	if err != nil {
+	rec := *dec.Gate
+	rec.JobID = job.ID
+	if _, err := s.store.RecordGateDecision(ctx, rec); err != nil {
 		s.logger.Printf("WARNING: failed to record dry-run gate decision for job #%d: %v", job.ID, err)
 	}
 }
@@ -1434,6 +1226,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		InstanceID: instanceID,
 		Counts:     out,
 		Total:      total,
+		Chains:     s.chainStatus(r.Context()),
 	})
 }
 
