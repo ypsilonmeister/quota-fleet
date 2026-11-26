@@ -574,14 +574,22 @@ func TestSanitizeCollectorErrorAndEndToEnd(t *testing.T) {
 	}{
 		{"empty", "", ""},
 		{"whitespace only", "  \t\n ", ""},
-		{"clean code", "probe_timeout", "probe_timeout"},
-		{"clean punctuated code", "provider.api:http-503", "provider.api:http-503"},
+		{"known probe_timeout", "probe_timeout", "probe_timeout"},
+		{"known probe_auth_expired", "probe_auth_expired", "probe_auth_expired"},
+		{"known probe_parse_failed", "probe_parse_failed", "probe_parse_failed"},
+		{"known sample_probe_error", "sample_probe_error", "sample_probe_error"},
+		{"single-line dummy api key", "sk-proj-DummySecretToken1234567890", RedactedCollectorError},
+		{"single-line dummy pat", "ghp_1234567890abcdef1234567890abcdef", RedactedCollectorError},
+		{"single-line unknown code", "provider.api:http-503", RedactedCollectorError},
+		{"single-line padded known code", " probe_timeout ", RedactedCollectorError},
+		{"single-line wrong case", "PROBE_TIMEOUT", RedactedCollectorError},
 		{"newline raw upstream", "probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE", RedactedCollectorError},
 		{"crlf credential", "probe_timeout\r\nAuthorization: Bearer sk-secret", RedactedCollectorError},
 		{"single line raw upstream text", "HTTP 502 Bad Gateway: <html>raw body</html>", RedactedCollectorError},
 		{"key value secret", "token=secret123", RedactedCollectorError},
 		{"ansi escape", "\x1b[31mprobe_timeout\x1b[0m", RedactedCollectorError},
-		{"oversized", strings.Repeat("a", MaxCollectorErrorLen+1), RedactedCollectorError},
+		{"oversized", strings.Repeat("a", 128), RedactedCollectorError},
+		{"already redacted idempotent", RedactedCollectorError, RedactedCollectorError},
 	}
 	for _, tc := range cases {
 		if got := SanitizeCollectorError(tc.raw); got != tc.want {
@@ -591,6 +599,7 @@ func TestSanitizeCollectorErrorAndEndToEnd(t *testing.T) {
 
 	dir := t.TempDir()
 	now := time.Date(2026, 11, 26, 21, 0, 0, 0, time.UTC)
+	const dummySingleLineCred = "sk-proj-DummySecretToken1234567890"
 	rawJSON := `{
 		"schema_version": 1,
 		"generated_at": "2026-11-26T20:55:00Z",
@@ -608,6 +617,13 @@ func TestSanitizeCollectorErrorAndEndToEnd(t *testing.T) {
 				"measured_at": "2026-11-26T20:54:00Z",
 				"weekly": {"remaining_percent": 80},
 				"short": {"remaining_percent": 60}
+			},
+			"cred-single": {
+				"status": "error",
+				"error": "` + dummySingleLineCred + `",
+				"measured_at": "2026-11-26T20:54:00Z",
+				"weekly": {"remaining_percent": 80},
+				"short": {"remaining_percent": 60}
 			}
 		}
 	}`
@@ -620,40 +636,46 @@ func TestSanitizeCollectorErrorAndEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseUsageJSONWithFormat: %v", err)
 	}
-	for _, name := range []string{"demo-pool", "raw-single"} {
+	for _, name := range []string{"demo-pool", "raw-single", "cred-single"} {
 		if got := snap.Pools[name].Error; got != RedactedCollectorError {
 			t.Errorf("parsed %s.Error = %q, want %q", name, got, RedactedCollectorError)
 		}
 	}
 
-	// Gate evaluation preserves ReasonCollectorError and never leaks raw text, even if Snapshot was built directly.
-	rawSnap := &Snapshot{
-		Format:      FormatV1,
-		GeneratedAt: now.Add(-1 * time.Minute),
-		Pools: map[string]PoolSnapshot{
-			"demo-pool": {
-				Status:                 PoolEntryStatusError,
-				Error:                  "probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE",
-				MeasuredAt:             now.Add(-2 * time.Minute),
-				WeeklyRemainingPercent: 80,
-				ShortRemainingPercent:  intPtr(60),
+	// Gate evaluation preserves ReasonCollectorError and never leaks raw text or single-line credentials,
+	// even if Snapshot was built directly in memory.
+	for _, rawVal := range []string{"probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE", dummySingleLineCred} {
+		rawSnap := &Snapshot{
+			Format:      FormatV1,
+			GeneratedAt: now.Add(-1 * time.Minute),
+			Pools: map[string]PoolSnapshot{
+				"demo-pool": {
+					Status:                 PoolEntryStatusError,
+					Error:                  rawVal,
+					MeasuredAt:             now.Add(-2 * time.Minute),
+					WeeklyRemainingPercent: 80,
+					ShortRemainingPercent:  intPtr(60),
+				},
 			},
-		},
-	}
-	ev := EvaluateGate("demo-pool", nil, rawSnap, EvalOptions{Now: now, StaleAfter: 45 * time.Minute, Format: FormatV1})
-	if ev.Decision != DecisionUnknown || ev.Reason != ReasonCollectorError || ev.PoolError != RedactedCollectorError || ev.Detail != RedactedCollectorError {
-		t.Fatalf("EvaluateGate unsanitized collector error = %+v", ev)
-	}
-	for label, s := range map[string]string{
-		"HoldReason":     FormatHoldReason(ev),
-		"DecisionReason": FormatDecisionReason(ev),
-		"Summary":        SummarizeEvaluation(ev),
-	} {
-		if strings.Contains(s, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(s, "\n") {
-			t.Errorf("%s leaked raw error: %q", label, s)
 		}
-		if !strings.Contains(s, RedactedCollectorError) {
-			t.Errorf("%s missing %q: %q", label, RedactedCollectorError, s)
+		ev := EvaluateGate("demo-pool", nil, rawSnap, EvalOptions{Now: now, StaleAfter: 45 * time.Minute, Format: FormatV1})
+		if ev.Decision != DecisionUnknown || ev.Reason != ReasonCollectorError || ev.PoolError != RedactedCollectorError || ev.Detail != RedactedCollectorError {
+			t.Fatalf("EvaluateGate unsanitized collector error (%q) = %+v", rawVal, ev)
+		}
+		if len(ev.Pools) != 1 || ev.Pools[0].Snapshot == nil || ev.Pools[0].Snapshot.Error != RedactedCollectorError {
+			t.Fatalf("EvaluateGate pool snapshot copy leaked raw error (%q): %+v", rawVal, ev.Pools)
+		}
+		for label, s := range map[string]string{
+			"HoldReason":     FormatHoldReason(ev),
+			"DecisionReason": FormatDecisionReason(ev),
+			"Summary":        SummarizeEvaluation(ev),
+		} {
+			if strings.Contains(s, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(s, dummySingleLineCred) || strings.Contains(s, "\n") {
+				t.Errorf("%s leaked raw error (%q): %q", label, rawVal, s)
+			}
+			if !strings.Contains(s, RedactedCollectorError) {
+				t.Errorf("%s missing %q: %q", label, RedactedCollectorError, s)
+			}
 		}
 	}
 
@@ -672,7 +694,10 @@ func TestSanitizeCollectorErrorAndEndToEnd(t *testing.T) {
 			t.Errorf("ValidateUsageFile(%s) exit=%d, want %d", tc.name, res.ExitCode, tc.wantExit)
 		}
 		for _, ps := range res.Pools {
-			if strings.Contains(ps.PoolError, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(ps.PoolError, "sk-raw-upstream-secret") || strings.Contains(ps.PoolError, "\n") {
+			if strings.Contains(ps.PoolError, "REVIEW_TEST_RAW_UPSTREAM_LINE") ||
+				strings.Contains(ps.PoolError, "sk-raw-upstream-secret") ||
+				strings.Contains(ps.PoolError, dummySingleLineCred) ||
+				strings.Contains(ps.PoolError, "\n") {
 				t.Errorf("ValidateUsageFile(%s) pool %s leaked raw error: %q", tc.name, ps.Pool, ps.PoolError)
 			}
 			if ps.Reason != ReasonCollectorError || ps.PoolError != RedactedCollectorError {
@@ -680,7 +705,10 @@ func TestSanitizeCollectorErrorAndEndToEnd(t *testing.T) {
 			}
 		}
 		for _, d := range res.Diagnostics {
-			if strings.Contains(d.Message, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(d.Message, "sk-raw-upstream-secret") || strings.Contains(d.Message, "\n") {
+			if strings.Contains(d.Message, "REVIEW_TEST_RAW_UPSTREAM_LINE") ||
+				strings.Contains(d.Message, "sk-raw-upstream-secret") ||
+				strings.Contains(d.Message, dummySingleLineCred) ||
+				strings.Contains(d.Message, "\n") {
 				t.Errorf("ValidateUsageFile(%s) diagnostic leaked raw error: %+v", tc.name, d)
 			}
 		}

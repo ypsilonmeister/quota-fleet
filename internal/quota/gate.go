@@ -107,6 +107,7 @@ func evaluatePoolLegacy(pool string, snap *Snapshot, opts EvalOptions) PoolEvalu
 	}
 
 	psCopy := ps
+	psCopy.Error = SanitizeCollectorError(ps.Error)
 	eval := PoolEvaluation{
 		Pool:     pool,
 		Snapshot: &psCopy,
@@ -221,6 +222,7 @@ func evaluatePoolV1(pool string, snap *Snapshot, opts EvalOptions) PoolEvaluatio
 		}
 		if ps, ok := snap.Pools[pool]; ok {
 			psCopy := ps
+			psCopy.Error = SanitizeCollectorError(ps.Error)
 			ev.Snapshot = &psCopy
 		}
 		return ev
@@ -237,6 +239,7 @@ func evaluatePoolV1(pool string, snap *Snapshot, opts EvalOptions) PoolEvaluatio
 	}
 
 	psCopy := ps
+	psCopy.Error = SanitizeCollectorError(ps.Error)
 	eval := PoolEvaluation{
 		Pool:     pool,
 		Snapshot: &psCopy,

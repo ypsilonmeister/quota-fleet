@@ -146,42 +146,52 @@ func TestUsageV1EnforceDryRunUndefinedAndChainDriver(t *testing.T) {
 		t.Fatalf("mixed exhausted+missing+unmeasured: status=%d body=%q, want 202 short_window_missing", status, body)
 	}
 
-	// 3b. Unsanitized collector error with newline & raw upstream text -> Hold with collector_error and sanitized summary/log (no raw line leak).
-	logBuf.Reset()
-	writeV1(`{
+	// 3b. Unsanitized collector errors (multiline raw upstream text and single-line dummy credential)
+	// -> Hold with collector_error and sanitized summary/log/decision (no raw leak).
+	for _, tc := range []struct {
+		reqID  string
+		rawErr string
+		secret string
+	}{
+		{"raw-err-1", `probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE`, "REVIEW_TEST_RAW_UPSTREAM_LINE"},
+		{"raw-err-cred-1", "sk-proj-DummySecretToken1234567890", "sk-proj-DummySecretToken1234567890"},
+	} {
+		logBuf.Reset()
+		writeV1(`{
 		"schema_version": 1,
 		"generated_at": "2026-11-26T20:56:00Z",
 		"pools": {
-			"demo-pool": {"status":"error","error":"probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE","measured_at":"2026-11-26T20:55:50Z","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}}
+			"demo-pool": {"status":"error","error":"` + tc.rawErr + `","measured_at":"2026-11-26T20:55:50Z","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}}
 		}
 	}`)
-	status, body = postJob(`{"request_id":"raw-err-1","title":"Raw Collector Error","pool":"demo-pool"}`)
-	if status != http.StatusAccepted || !strings.Contains(body, quota.ReasonCollectorError) {
-		t.Fatalf("unsanitized collector error hold: status=%d body=%q, want 202 collector_error", status, body)
-	}
-	if strings.Contains(body, "REVIEW_TEST_RAW_UPSTREAM_LINE") {
-		t.Errorf("HTTP hold response leaked raw collector error: %q", body)
-	}
-	var rawErrHoldResp struct {
-		HeldID string `json:"held_id"`
-	}
-	_ = json.Unmarshal([]byte(body), &rawErrHoldResp)
-	heldRawErr, err := st.GetHeldJob(context.Background(), rawErrHoldResp.HeldID)
-	if err != nil {
-		t.Fatalf("GetHeldJob raw-err: %v", err)
-	}
-	if strings.Contains(heldRawErr.Reason, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(heldRawErr.Reason, "\n") || !strings.Contains(heldRawErr.Reason, quota.RedactedCollectorError) {
-		t.Errorf("held_jobs.reason not sanitized: %q", heldRawErr.Reason)
-	}
-	if strings.Contains(heldRawErr.SnapshotSummary, "REVIEW_TEST_RAW_UPSTREAM_LINE") || !strings.Contains(heldRawErr.SnapshotSummary, quota.RedactedCollectorError) {
-		t.Errorf("held_jobs.snapshot_summary not sanitized: %q", heldRawErr.SnapshotSummary)
-	}
-	if strings.Contains(logBuf.String(), "REVIEW_TEST_RAW_UPSTREAM_LINE") || !strings.Contains(logBuf.String(), "pool_error="+quota.RedactedCollectorError) {
-		t.Errorf("operational log leaked raw collector error or missed sanitized summary:\n%s", logBuf.String())
-	}
-	rawDecs, err := st.ListGateDecisions(context.Background(), 1)
-	if err != nil || len(rawDecs) == 0 || strings.Contains(rawDecs[0].Reason, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(rawDecs[0].Reason, "\n") || !strings.Contains(rawDecs[0].Reason, quota.RedactedCollectorError) {
-		t.Errorf("gate_decisions.reason not sanitized: %+v (err=%v)", rawDecs, err)
+		status, body = postJob(`{"request_id":"` + tc.reqID + `","title":"Raw Collector Error","pool":"demo-pool"}`)
+		if status != http.StatusAccepted || !strings.Contains(body, quota.ReasonCollectorError) {
+			t.Fatalf("unsanitized collector error (%s) hold: status=%d body=%q, want 202 collector_error", tc.reqID, status, body)
+		}
+		if strings.Contains(body, tc.secret) {
+			t.Errorf("HTTP hold response (%s) leaked raw collector error: %q", tc.reqID, body)
+		}
+		var rawErrHoldResp struct {
+			HeldID string `json:"held_id"`
+		}
+		_ = json.Unmarshal([]byte(body), &rawErrHoldResp)
+		heldRawErr, err := st.GetHeldJob(context.Background(), rawErrHoldResp.HeldID)
+		if err != nil {
+			t.Fatalf("GetHeldJob (%s): %v", tc.reqID, err)
+		}
+		if strings.Contains(heldRawErr.Reason, tc.secret) || strings.Contains(heldRawErr.Reason, "\n") || !strings.Contains(heldRawErr.Reason, quota.RedactedCollectorError) {
+			t.Errorf("held_jobs.reason (%s) not sanitized: %q", tc.reqID, heldRawErr.Reason)
+		}
+		if strings.Contains(heldRawErr.SnapshotSummary, tc.secret) || !strings.Contains(heldRawErr.SnapshotSummary, quota.RedactedCollectorError) {
+			t.Errorf("held_jobs.snapshot_summary (%s) not sanitized: %q", tc.reqID, heldRawErr.SnapshotSummary)
+		}
+		if strings.Contains(logBuf.String(), tc.secret) || !strings.Contains(logBuf.String(), "pool_error="+quota.RedactedCollectorError) {
+			t.Errorf("operational log (%s) leaked raw collector error or missed sanitized summary:\n%s", tc.reqID, logBuf.String())
+		}
+		rawDecs, err := st.ListGateDecisions(context.Background(), 1)
+		if err != nil || len(rawDecs) == 0 || strings.Contains(rawDecs[0].Reason, tc.secret) || strings.Contains(rawDecs[0].Reason, "\n") || !strings.Contains(rawDecs[0].Reason, quota.RedactedCollectorError) {
+			t.Errorf("gate_decisions.reason (%s) not sanitized: %+v (err=%v)", tc.reqID, rawDecs, err)
+		}
 	}
 
 	// 4. Write recovered healthy v1 -> periodic release releases held job!
@@ -642,4 +652,152 @@ func TestHeldJobReleaseConfigChangesAndLegacyCompatItemA(t *testing.T) {
 		t.Errorf("expected format_mismatch warning in legacy log, got:\n%s", legLog.String())
 	}
 	_ = fmt.Sprint(hLegManualU.ID)
+}
+
+func TestLegacyPeriodicReleaseUnmeasuredPrimaryPreservesMeasuredAtAndWarning(t *testing.T) {
+	now := time.Date(2026, 11, 26, 21, 0, 0, 0, time.UTC)
+	snapTime := time.Date(2026, 11, 26, 20, 55, 0, 0, time.UTC)
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	// Case 1: Healthy Legacy snapshot + held job whose primary pool became unmeasured: true.
+	// Periodic CheckOnce must still load the snapshot and record gate_decisions.measured_at.
+	stOK, err := store.Open(ctx, filepath.Join(dir, "legacy-ok.db"), store.Options{InstanceID: "legacy-unm-ok"})
+	if err != nil {
+		t.Fatalf("store.Open legacy-ok: %v", err)
+	}
+	defer stOK.Close()
+
+	legacyOKPath := filepath.Join(dir, "legacy-ok.json")
+	legacyOKJSON := `{"updatedAt":"` + snapTime.Format(time.RFC3339) + `","services":{"claude":{"fiveHour":{"remainingPercent":0},"sevenDay":{"remainingPercent":0}},"codex":{"fiveHour":{"remainingPercent":0},"sevenDay":{"remainingPercent":0}}}}`
+	if err := os.WriteFile(legacyOKPath, []byte(legacyOKJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile legacy-ok: %v", err)
+	}
+
+	// Hold a measured job (codex, exhausted) alongside a job whose primary pool (claude) became unmeasured: true,
+	// confirming both single-sweep snapshot reuse and measured_at preservation on the unmeasured-primary release.
+	hExhausted, _, err := stOK.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "leg-exh-1",
+		Pool:      "codex",
+		Payload:   store.CreateJobParams{RequestID: "leg-exh-1", Title: "Legacy Exhausted", Pool: "codex"},
+		Reason:    "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob leg-exh-1: %v", err)
+	}
+	hUnmOK, _, err := stOK.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "leg-unm-ok",
+		Pool:      "claude",
+		Payload:   store.CreateJobParams{RequestID: "leg-unm-ok", Title: "Legacy Primary Unmeasured OK", Pool: "claude"},
+		Reason:    "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob leg-unm-ok: %v", err)
+	}
+
+	okLoadCalls := 0
+	var okLog bytes.Buffer
+	checkerOK := runtime.NewGateChecker(runtime.GateCheckerOptions{
+		Store:       stOK,
+		GateMode:    config.GateModeEnforce,
+		UsageFile:   legacyOKPath,
+		UsageFormat: config.UsageFormatLegacy,
+		Pools: map[string]config.PoolConfig{
+			"claude": {Unmeasured: true},
+			"codex":  {},
+		},
+		Now:    func() time.Time { return now },
+		Logger: log.New(&okLog, "", 0),
+		SnapshotLoader: func() (*quota.Snapshot, error) {
+			okLoadCalls++
+			return quota.LoadUsageFileWithFormat(legacyOKPath, config.UsageFormatLegacy)
+		},
+	})
+
+	if err := checkerOK.CheckOnce(ctx); err != nil {
+		t.Fatalf("CheckOnce legacy ok: %v", err)
+	}
+	if okLoadCalls != 1 {
+		t.Fatalf("legacy CheckOnce loadCalls=%d, want 1", okLoadCalls)
+	}
+	gotExh, err := stOK.GetHeldJob(ctx, hExhausted.ID)
+	if err != nil || gotExh.Status != store.HeldStatusHeld {
+		t.Fatalf("exhausted held job = %+v (err=%v), want still held", gotExh, err)
+	}
+	gotUnmOK, err := stOK.GetHeldJob(ctx, hUnmOK.ID)
+	if err != nil || gotUnmOK.Status != store.HeldStatusReleased || gotUnmOK.ReleasedPool != "claude" || gotUnmOK.ReleasedJobID == nil {
+		t.Fatalf("legacy unmeasured-primary held job = %+v (err=%v), want released/claude", gotUnmOK, err)
+	}
+	decsOK, err := stOK.ListGateDecisions(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListGateDecisions legacy ok: %v", err)
+	}
+	var foundMeasured bool
+	for _, d := range decsOK {
+		if d.HeldID == hUnmOK.ID && d.SelectedPool == "claude" && d.Bypassed {
+			if d.MeasuredAt == nil || !d.MeasuredAt.Equal(snapTime) {
+				t.Fatalf("legacy periodic release gate_decisions.measured_at = %v, want %s", d.MeasuredAt, snapTime.Format(time.RFC3339))
+			}
+			foundMeasured = true
+		}
+	}
+	if !foundMeasured {
+		t.Fatalf("legacy periodic release missing gate_decision for held %s: %+v", hUnmOK.ID, decsOK)
+	}
+
+	// Case 2: Broken Legacy snapshot + ONLY a held job whose primary pool became unmeasured: true.
+	// Periodic CheckOnce must still load the snapshot, release to claude, and emit the bypass WARNING.
+	stErr, err := store.Open(ctx, filepath.Join(dir, "legacy-err.db"), store.Options{InstanceID: "legacy-unm-err"})
+	if err != nil {
+		t.Fatalf("store.Open legacy-err: %v", err)
+	}
+	defer stErr.Close()
+
+	legacyBrokenPath := filepath.Join(dir, "legacy-broken.json")
+	if err := os.WriteFile(legacyBrokenPath, []byte(`{corrupt-json`), 0o600); err != nil {
+		t.Fatalf("WriteFile legacy-broken: %v", err)
+	}
+
+	hUnmErr, _, err := stErr.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "leg-unm-err",
+		Pool:      "claude",
+		Payload:   store.CreateJobParams{RequestID: "leg-unm-err", Title: "Legacy Primary Unmeasured SnapErr", Pool: "claude"},
+		Reason:    "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob leg-unm-err: %v", err)
+	}
+
+	errLoadCalls := 0
+	var errLog bytes.Buffer
+	checkerErr := runtime.NewGateChecker(runtime.GateCheckerOptions{
+		Store:       stErr,
+		GateMode:    config.GateModeEnforce,
+		UsageFile:   legacyBrokenPath,
+		UsageFormat: config.UsageFormatLegacy,
+		Pools: map[string]config.PoolConfig{
+			"claude": {Unmeasured: true},
+		},
+		Now:    func() time.Time { return now },
+		Logger: log.New(&errLog, "", 0),
+		SnapshotLoader: func() (*quota.Snapshot, error) {
+			errLoadCalls++
+			return quota.LoadUsageFileWithFormat(legacyBrokenPath, config.UsageFormatLegacy)
+		},
+	})
+
+	if err := checkerErr.CheckOnce(ctx); err != nil {
+		t.Fatalf("CheckOnce legacy err: %v", err)
+	}
+	if errLoadCalls != 1 {
+		t.Fatalf("legacy CheckOnce (broken snapshot) loadCalls=%d, want 1", errLoadCalls)
+	}
+	gotUnmErr, err := stErr.GetHeldJob(ctx, hUnmErr.ID)
+	if err != nil || gotUnmErr.Status != store.HeldStatusReleased || gotUnmErr.ReleasedPool != "claude" {
+		t.Fatalf("legacy unmeasured-primary held job on broken snapshot = %+v (err=%v), want released/claude", gotUnmErr, err)
+	}
+	wantWarn := "WARNING: gate release for held " + hUnmErr.ID + " bypassed to claude despite usage snapshot error:"
+	if !strings.Contains(errLog.String(), wantWarn) {
+		t.Errorf("legacy periodic release missing bypass snapshot-error warning %q, got log:\n%s", wantWarn, errLog.String())
+	}
 }

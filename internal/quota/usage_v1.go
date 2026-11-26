@@ -13,40 +13,42 @@ import (
 )
 
 const (
-	// MaxCollectorErrorLen bounds sanitized collector error codes/summaries emitted to
-	// diagnostics, operational logs, and persisted hold summaries.
-	MaxCollectorErrorLen = 64
-
-	// RedactedCollectorError is substituted when a collector supplies a non-conforming
-	// error string (e.g., containing newlines, control characters, whitespace/raw upstream text,
-	// or exceeding MaxCollectorErrorLen).
+	// RedactedCollectorError is substituted when a collector supplies a non-empty error
+	// string that is not in the receiver's allowlist of known diagnostic codes.
 	RedactedCollectorError = "unsanitized_error_redacted"
 )
 
-// SanitizeCollectorError ensures a collector-supplied pool error string is a short,
-// single-line sanitized code (ASCII [A-Za-z0-9._:-], length <= MaxCollectorErrorLen,
-// starting with an alphanumeric character). Empty or whitespace-only input returns "".
-// Any non-conforming input (newlines, control chars, spaces, raw upstream text, etc.) is
-// replaced with RedactedCollectorError so raw CLI output, upstream bodies, or credentials
-// never leak into CLI diagnostics, operational logs, or persisted hold summaries.
+// knownCollectorErrorCodes is the strict receiver allowlist of sanitized collector diagnostic
+// codes that may be surfaced verbatim in CLI diagnostics, operational logs, and hold summaries.
+var knownCollectorErrorCodes = map[string]struct{}{
+	"collector_error":         {},
+	"probe_auth_expired":      {},
+	"probe_command_failed":    {},
+	"probe_failed":            {},
+	"probe_http_error":        {},
+	"probe_invalid_output":    {},
+	"probe_invalid_timestamp": {},
+	"probe_missing_pool":      {},
+	"probe_network_error":     {},
+	"probe_parse_failed":      {},
+	"probe_rate_limited":      {},
+	"probe_timeout":           {},
+	"sample_probe_error":      {},
+}
+
+// SanitizeCollectorError restricts collector-supplied pool error strings to known diagnostic
+// codes. Empty or whitespace-only input returns "". Any unknown value (including single-line
+// credentials, tokens, arbitrary identifiers, newlines, or raw upstream text) is replaced with
+// RedactedCollectorError so raw CLI output, upstream bodies, or credentials never leak into
+// CLI diagnostics, operational logs, or persisted hold summaries.
 func SanitizeCollectorError(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""
 	}
-	if len(raw) > MaxCollectorErrorLen {
-		return RedactedCollectorError
+	if _, ok := knownCollectorErrorCodes[raw]; ok {
+		return raw
 	}
-	for i := 0; i < len(raw); i++ {
-		c := raw[i]
-		isAlphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-		if i == 0 && !isAlphaNum {
-			return RedactedCollectorError
-		}
-		if !isAlphaNum && c != '_' && c != '-' && c != '.' && c != ':' {
-			return RedactedCollectorError
-		}
-	}
-	return raw
+	return RedactedCollectorError
 }
 
 // ParseError classifies usage snapshot read/parse/schema failures so callers and CLI tools

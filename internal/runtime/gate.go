@@ -157,7 +157,11 @@ func (g *GateChecker) CheckOnce(ctx context.Context) error {
 				heldSnap    *quota.Snapshot
 				heldSnapErr error
 			)
-			if !g.shouldSkipSnapshotForHeld(held) {
+			// Periodic snapshot skip is scoped to Schema v1 (§4.2.C); Legacy periodic sweeps
+			// always load the snapshot once when any held job exists so unmeasured-primary
+			// releases keep recording gate_decisions.measured_at and snapshot-error bypass warnings.
+			skipSnap := g.usageFormat == config.UsageFormatV1 && g.shouldSkipSnapshotForHeld(held)
+			if !skipSnap {
 				if !snapRead {
 					snap, snapErr = g.loadSnapshot()
 					snapRead = true

@@ -165,9 +165,11 @@ quota:
 		t.Fatalf("atomic_deploy moved files into destination directory: %v", entries)
 	}
 
-	// Unsanitized collector error containing newline / raw upstream text is sanitized in CLI text & JSON outputs while preserving collector_error and exit codes.
+	// Unsanitized collector error containing newline / raw upstream text / single-line dummy credential
+	// is sanitized in CLI text & JSON outputs while preserving collector_error and exit codes.
+	const dummySingleLineCred = "sk-proj-DummySecretToken1234567890"
 	vRawErr := filepath.Join(dir, "v_raw_err.json")
-	write(vRawErr, `{"schema_version":1,"generated_at":"`+tPart+`","pools":{"demo-pool":{"status":"error","error":"probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE","measured_at":"`+tNew+`","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}},"demo-alt":{"status":"error","error":"HTTP 502: Bearer sk-raw-upstream","measured_at":"`+tNew+`","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}}}}`)
+	write(vRawErr, `{"schema_version":1,"generated_at":"`+tPart+`","pools":{"demo-pool":{"status":"error","error":"probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE","measured_at":"`+tNew+`","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}},"demo-alt":{"status":"error","error":"`+dummySingleLineCred+`","measured_at":"`+tNew+`","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}}}}`)
 
 	outBuf.Reset()
 	errBuf.Reset()
@@ -175,11 +177,24 @@ quota:
 		t.Fatalf("usage validate unsanitized collector error exit=%d, want 2; out=%s err=%s", code, outBuf.String(), errBuf.String())
 	}
 	valOut := outBuf.String()
-	if strings.Contains(valOut, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(valOut, "sk-raw-upstream") {
+	if strings.Contains(valOut, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(valOut, dummySingleLineCred) {
 		t.Errorf("usage validate leaked raw collector error:\n%s", valOut)
 	}
 	if !strings.Contains(valOut, "collector_error") || !strings.Contains(valOut, quota.RedactedCollectorError) {
 		t.Errorf("usage validate missing collector_error/%s:\n%s", quota.RedactedCollectorError, valOut)
+	}
+
+	outBuf.Reset()
+	errBuf.Reset()
+	if code := run([]string{"usage", "validate", "--file", vRawErr, "--format", "v1", "--json"}, &outBuf, &errBuf); code != 2 {
+		t.Fatalf("usage validate --json single-line credential exit=%d, want 2; out=%s err=%s", code, outBuf.String(), errBuf.String())
+	}
+	valJSON := outBuf.String()
+	if strings.Contains(valJSON, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(valJSON, dummySingleLineCred) {
+		t.Errorf("usage validate --json leaked raw collector error:\n%s", valJSON)
+	}
+	if !strings.Contains(valJSON, `"code": "collector_error"`) || !strings.Contains(valJSON, `"pool_error": "`+quota.RedactedCollectorError+`"`) {
+		t.Errorf("usage validate --json missing sanitized collector_error fields:\n%s", valJSON)
 	}
 
 	outBuf.Reset()
@@ -199,6 +214,20 @@ quota:
 	}
 	if !strings.Contains(gateOut, "reason:        collector_error") || !strings.Contains(gateOut, "pool_error:    "+quota.RedactedCollectorError) {
 		t.Errorf("gate check missing sanitized collector_error fields:\n%s", gateOut)
+	}
+
+	// Single-line dummy credential in gate check --json also redacts pool_error/detail/snapshot while preserving collector_error and exit 0.
+	outBuf.Reset()
+	errBuf.Reset()
+	if code := run([]string{"gate", "check", "--config", cfgPath, "--usage-file", vRawErr, "--format", "v1", "--pool", "demo-alt", "--json"}, &outBuf, &errBuf); code != 0 {
+		t.Fatalf("gate check --json single-line credential exit=%d, want 0; out=%s err=%s", code, outBuf.String(), errBuf.String())
+	}
+	gateJSON := outBuf.String()
+	if strings.Contains(gateJSON, dummySingleLineCred) {
+		t.Errorf("gate check --json leaked single-line dummy credential:\n%s", gateJSON)
+	}
+	if !strings.Contains(gateJSON, `"reason": "collector_error"`) || !strings.Contains(gateJSON, `"pool_error": "`+quota.RedactedCollectorError+`"`) {
+		t.Errorf("gate check --json missing sanitized collector_error fields:\n%s", gateJSON)
 	}
 }
 
