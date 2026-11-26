@@ -41,6 +41,11 @@ const (
 	// GateModeEnforce evaluates Quota Gate, holds jobs when pools are exhausted/stale, and releases them when recovered.
 	GateModeEnforce = "enforce"
 
+	// UsageFormatLegacy reads the legacy muse-widget usage.json format with legacy gate compatibility.
+	UsageFormatLegacy = "legacy"
+	// UsageFormatV1 reads the normalized Schema v1 usage snapshot format (docs/23-usage-snapshot.md) with fail-closed gate rules.
+	UsageFormatV1 = "v1"
+
 	// PromptStyleStdin passes prompt.txt to the agent via stdin redirection (`< prompt.txt`).
 	PromptStyleStdin = "stdin"
 	// PromptStyleArgument passes prompt.txt contents as a command-line argument (`"$(cat prompt.txt)"`).
@@ -365,9 +370,19 @@ func (s SelectorConfig) EffectiveMode() string {
 // QuotaConfig holds Quota Gate and usage snapshot settings.
 type QuotaConfig struct {
 	UsageFile         string `yaml:"usage_file"`
+	UsageFormat       string `yaml:"usage_format"`
 	StaleAfter        string `yaml:"stale_after"`
 	GateMode          string `yaml:"gate_mode"`
 	GateCheckInterval string `yaml:"gate_check_interval"`
+}
+
+// EffectiveUsageFormat returns the configured usage snapshot format, defaulting to "legacy".
+func (q QuotaConfig) EffectiveUsageFormat() string {
+	v := strings.TrimSpace(q.UsageFormat)
+	if v == "" {
+		return UsageFormatLegacy
+	}
+	return v
 }
 
 // EffectiveStaleAfter returns the configured staleness threshold or DefaultQuotaStaleAfter (45m).
@@ -694,9 +709,58 @@ type AgentConfig struct {
 
 // PoolConfig defines a quota pool.
 type PoolConfig struct {
-	Provider   string       `yaml:"provider"`
-	Unmeasured bool         `yaml:"unmeasured"`
-	AppliesTo  []PoolTarget `yaml:"applies_to"`
+	Provider    string       `yaml:"provider"`
+	Unmeasured  bool         `yaml:"unmeasured"`
+	ShortWindow *bool        `yaml:"short_window"`
+	AppliesTo   []PoolTarget `yaml:"applies_to"`
+}
+
+// EffectiveShortWindow reports whether this pool enforces a short rolling window check (defaults to true).
+func (p PoolConfig) EffectiveShortWindow() bool {
+	if p.ShortWindow == nil {
+		return true
+	}
+	return *p.ShortWindow
+}
+
+// HasMeasuredPools reports whether at least one configured pool is measured (unmeasured: false).
+func (c *Config) HasMeasuredPools() bool {
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Pools {
+		if !p.Unmeasured {
+			return true
+		}
+	}
+	return false
+}
+
+// UnmappedAgents returns the sorted list of configured agents that are not referenced by any
+// pool's applies_to rules.
+func (c *Config) UnmappedAgents() []string {
+	if c == nil {
+		return nil
+	}
+	all := c.AllAgents()
+	if len(all) == 0 {
+		return nil
+	}
+	mapped := make(map[string]struct{})
+	for _, p := range c.Pools {
+		for _, target := range p.AppliesTo {
+			if a := strings.ToLower(strings.TrimSpace(target.Agent)); a != "" {
+				mapped[a] = struct{}{}
+			}
+		}
+	}
+	var unmapped []string
+	for _, a := range all {
+		if _, ok := mapped[strings.ToLower(a)]; !ok {
+			unmapped = append(unmapped, a)
+		}
+	}
+	return unmapped
 }
 
 // PoolTarget maps an agent and model family to a quota pool.
@@ -829,6 +893,15 @@ func (c *Config) Validate() error {
 	}
 	if mode := strings.TrimSpace(c.Quota.GateMode); mode != "" && mode != GateModeOff && mode != GateModeDryRun && mode != GateModeEnforce {
 		errs = append(errs, fmt.Errorf("quota.gate_mode %q is not supported (allowed: %q, %q, %q)", mode, GateModeOff, GateModeDryRun, GateModeEnforce))
+	}
+	if format := strings.TrimSpace(c.Quota.UsageFormat); format != "" && format != UsageFormatLegacy && format != UsageFormatV1 {
+		errs = append(errs, fmt.Errorf("quota.usage_format %q is not supported (allowed: %q, %q)", format, UsageFormatLegacy, UsageFormatV1))
+	}
+	if c.Quota.EffectiveUsageFormat() == UsageFormatV1 {
+		gateMode := c.Quota.EffectiveGateMode()
+		if (gateMode == GateModeDryRun || gateMode == GateModeEnforce) && c.HasMeasuredPools() && strings.TrimSpace(c.Quota.UsageFile) == "" {
+			errs = append(errs, fmt.Errorf("quota.usage_file must not be empty when quota.usage_format is %q and quota.gate_mode is %q with measured pools", UsageFormatV1, gateMode))
+		}
 	}
 
 	if mode := strings.TrimSpace(c.Selector.Mode); mode != "" && mode != SelectorModeOff && mode != SelectorModeRecord && mode != SelectorModeApply {

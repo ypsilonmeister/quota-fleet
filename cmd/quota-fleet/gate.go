@@ -45,10 +45,16 @@ func runGate(args []string, stdout, stderr io.Writer) int {
 
 func printGateUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  quota-fleet gate check --pool <name> [--alt-pools a,b] [--usage-file path] [--stale-after 45m] [--json] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet gate check [--pool <name>] [--alt-pools a,b] [--usage-file path] [--format legacy|v1] [--stale-after 45m] [--now RFC3339] [--json] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate decisions [--limit N] [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate held [--status held|released|cancelled|all] [--limit N] [--json] [--db path] [--config fleet.yaml]")
-	fmt.Fprintln(w, "  quota-fleet gate release <held_id> [--usage-file path] [--stale-after 45m] [--json] [--db path] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet gate release <held_id> [--usage-file path] [--format legacy|v1] [--stale-after 45m] [--json] [--db path] [--config fleet.yaml]")
+}
+
+type gateCheckJSONOutput struct {
+	quota.GateEvaluation
+	Error       string   `json:"error,omitempty"`
+	LegacyDiffs []string `json:"legacy_diffs,omitempty"`
 }
 
 func runGateCheck(args []string, stdout, stderr io.Writer) int {
@@ -58,16 +64,20 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 	var (
 		cfgPath       string
 		usageFileFlag string
+		formatFlag    string
 		staleAfterRaw string
+		nowRaw        string
 		pool          string
 		altPoolsRaw   string
 		asJSON        bool
 	)
 	fs.StringVar(&cfgPath, "config", resolveDefaultConfigPath(), "path to fleet.yaml")
 	fs.StringVar(&cfgPath, "c", resolveDefaultConfigPath(), "path to fleet.yaml (shorthand)")
-	fs.StringVar(&usageFileFlag, "usage-file", "", "override usage.json path")
+	fs.StringVar(&usageFileFlag, "usage-file", "", "override usage snapshot path")
+	fs.StringVar(&formatFlag, "format", "", "override usage format (legacy|v1)")
 	fs.StringVar(&staleAfterRaw, "stale-after", "", "override staleness duration (e.g. 45m)")
-	fs.StringVar(&pool, "pool", "", "primary quota pool name (required)")
+	fs.StringVar(&nowRaw, "now", "", "override evaluation time (RFC3339, for replay/comparison)")
+	fs.StringVar(&pool, "pool", "", "primary quota pool name (optional if --alt-pools is specified)")
 	fs.StringVar(&altPoolsRaw, "alt-pools", "", "comma-separated alternative pool names")
 	fs.BoolVar(&asJSON, "json", false, "output result as JSON")
 
@@ -76,20 +86,34 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 	}
 
 	pool = strings.TrimSpace(pool)
-	if pool == "" {
-		fmt.Fprintln(stderr, "gate check failed: --pool is required")
+	altPools := parseCommaList(altPoolsRaw)
+	if pool == "" && len(altPools) == 0 {
+		fmt.Fprintln(stderr, "gate check failed: --pool or --alt-pools is required")
 		return 1
 	}
 
+	formatFlag = strings.TrimSpace(formatFlag)
+	if formatFlag != "" {
+		if _, err := quota.NormalizeUsageFormat(formatFlag); err != nil {
+			fmt.Fprintf(stderr, "gate check failed: %v\n", err)
+			return 1
+		}
+	}
+
 	var (
-		usageFile  = strings.TrimSpace(usageFileFlag)
-		staleAfter = config.DefaultQuotaStaleAfter
-		poolsCfg   map[string]config.PoolConfig
+		usageFile   = strings.TrimSpace(usageFileFlag)
+		usageFormat = config.UsageFormatLegacy
+		staleAfter  = config.DefaultQuotaStaleAfter
+		poolsCfg    map[string]config.PoolConfig
+		cfgLoaded   bool
+		nowTime     time.Time
 	)
 
 	if cfg, err := config.Load(cfgPath); err == nil {
+		cfgLoaded = true
 		poolsCfg = cfg.Pools
 		staleAfter = cfg.Quota.EffectiveStaleAfter()
+		usageFormat = cfg.Quota.EffectiveUsageFormat()
 		if usageFile == "" {
 			usageFile = strings.TrimSpace(cfg.Quota.UsageFile)
 		}
@@ -101,6 +125,11 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	// Format precedence (Item E): --format > --config quota.usage_format > legacy.
+	if formatFlag != "" {
+		usageFormat = formatFlag
+	}
+
 	if strings.TrimSpace(staleAfterRaw) != "" {
 		d, err := time.ParseDuration(strings.TrimSpace(staleAfterRaw))
 		if err != nil || d <= 0 {
@@ -110,23 +139,58 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 		staleAfter = d
 	}
 
-	altPools := parseCommaList(altPoolsRaw)
-	eval, evalErr := quota.EvaluateFromFile(usageFile, pool, altPools, quota.EvalOptions{
-		StaleAfter: staleAfter,
-		Pools:      poolsCfg,
-	})
+	if strings.TrimSpace(nowRaw) != "" {
+		t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(nowRaw))
+		if err != nil {
+			fmt.Fprintf(stderr, "gate check failed: invalid --now %q: %v\n", nowRaw, err)
+			return 1
+		}
+		nowTime = t.UTC()
+	}
+
+	evalOpts := quota.EvalOptions{
+		Now:             nowTime,
+		StaleAfter:      staleAfter,
+		Pools:           poolsCfg,
+		Format:          usageFormat,
+		CheckPoolConfig: cfgLoaded && usageFormat == config.UsageFormatV1,
+	}
+	eval, evalErr := quota.EvaluateFromFile(usageFile, pool, altPools, evalOpts)
+
+	var legacyDiffs []string
+	if usageFormat == config.UsageFormatLegacy && evalErr == nil && !eval.Bypassed && usageFile != "" {
+		if snap, serr := quota.LoadUsageFileWithFormat(usageFile, config.UsageFormatLegacy); serr == nil {
+			legacyDiffs = quota.CompareLegacyWithV1(pool, altPools, snap, evalOpts, eval)
+		}
+	}
+
+	// Decision 9: exit 1 on snapshot read/parse/format/generated_at-future errors.
+	exitCode := 0
+	if evalErr != nil || eval.Reason == quota.ReasonSnapshotError {
+		exitCode = 1
+	}
 
 	if asJSON {
+		out := gateCheckJSONOutput{
+			GateEvaluation: eval,
+			LegacyDiffs:    legacyDiffs,
+		}
+		if evalErr != nil {
+			out.Error = evalErr.Error()
+		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(eval); err != nil {
+		if err := enc.Encode(out); err != nil {
 			fmt.Fprintf(stderr, "gate check failed: encode json: %v\n", err)
 			return 1
 		}
-		return 0
+		return exitCode
 	}
 
 	fmt.Fprintf(stdout, "decision:      %s\n", eval.Decision)
+	if eval.Format != "" {
+		fmt.Fprintf(stdout, "format:        %s\n", eval.Format)
+	}
 	fmt.Fprintf(stdout, "pool:          %s\n", eval.RequestedPool)
 	if len(eval.AltPools) > 0 {
 		fmt.Fprintf(stdout, "alt_pools:     %s\n", strings.Join(eval.AltPools, ", "))
@@ -143,12 +207,27 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 	if eval.Reason != "" {
 		fmt.Fprintf(stdout, "reason:        %s\n", eval.Reason)
 	}
+	if eval.Detail != "" {
+		fmt.Fprintf(stdout, "detail:        %s\n", eval.Detail)
+	}
+	if eval.PoolError != "" {
+		fmt.Fprintf(stdout, "pool_error:    %s\n", eval.PoolError)
+	}
+	if eval.AgeSeconds != nil {
+		fmt.Fprintf(stdout, "age:           %s\n", (time.Duration(*eval.AgeSeconds) * time.Second).String())
+	}
 	if eval.MeasuredAt != nil {
 		fmt.Fprintf(stdout, "measured_at:   %s\n", eval.MeasuredAt.Format(time.RFC3339))
 	}
 	fmt.Fprintf(stdout, "decided_at:    %s\n", eval.DecidedAt.Format(time.RFC3339))
 	if evalErr != nil {
 		fmt.Fprintf(stdout, "error:         %v\n", evalErr)
+	}
+	if len(legacyDiffs) > 0 {
+		fmt.Fprintln(stdout, "legacy_compat_diff:")
+		for _, diff := range legacyDiffs {
+			fmt.Fprintf(stdout, "  - %s\n", diff)
+		}
 	}
 	if len(eval.Pools) > 0 {
 		fmt.Fprintln(stdout, "candidates:")
@@ -161,10 +240,20 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 			if p.Reason != "" {
 				parts = append(parts, "reason="+p.Reason)
 			}
+			if p.PoolError != "" {
+				parts = append(parts, "error="+p.PoolError)
+			}
+			if p.AgeSeconds != nil {
+				parts = append(parts, fmt.Sprintf("age=%s", (time.Duration(*p.AgeSeconds)*time.Second).String()))
+			}
 			if p.Snapshot != nil {
-				parts = append(parts, fmt.Sprintf("weekly=%d%%", p.Snapshot.WeeklyRemainingPercent))
+				if !p.Snapshot.WeeklyAbsent {
+					parts = append(parts, fmt.Sprintf("weekly=%d%%", p.Snapshot.WeeklyRemainingPercent))
+				}
 				if p.Snapshot.ShortRemainingPercent != nil {
 					parts = append(parts, fmt.Sprintf("short=%d%%", *p.Snapshot.ShortRemainingPercent))
+				} else if p.Snapshot.ShortApplicable != nil && !*p.Snapshot.ShortApplicable {
+					parts = append(parts, "short=n/a")
 				} else {
 					parts = append(parts, "short=null")
 				}
@@ -175,7 +264,7 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "  %-12s %s\n", p.Pool, strings.Join(parts, " "))
 		}
 	}
-	return 0
+	return exitCode
 }
 
 func runGateDecisions(args []string, stdout, stderr io.Writer) int {
@@ -362,13 +451,15 @@ func runGateRelease(args []string, stdout, stderr io.Writer) int {
 		cfgPath       string
 		dbPath        string
 		usageFileFlag string
+		formatFlag    string
 		staleAfterRaw string
 		asJSON        bool
 	)
 	fs.StringVar(&cfgPath, "config", resolveDefaultConfigPath(), "path to fleet.yaml")
 	fs.StringVar(&cfgPath, "c", resolveDefaultConfigPath(), "path to fleet.yaml (shorthand)")
 	fs.StringVar(&dbPath, "db", "", "override SQLite database path")
-	fs.StringVar(&usageFileFlag, "usage-file", "", "override usage.json path")
+	fs.StringVar(&usageFileFlag, "usage-file", "", "override usage snapshot path")
+	fs.StringVar(&formatFlag, "format", "", "override usage format (legacy|v1)")
 	fs.StringVar(&staleAfterRaw, "stale-after", "", "override staleness duration (e.g. 45m)")
 	fs.BoolVar(&asJSON, "json", false, "output result as JSON")
 
@@ -378,15 +469,25 @@ func runGateRelease(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	formatFlag = strings.TrimSpace(formatFlag)
+	if formatFlag != "" {
+		if _, err := quota.NormalizeUsageFormat(formatFlag); err != nil {
+			fmt.Fprintf(stderr, "gate release failed: %v\n", err)
+			return 1
+		}
+	}
+
 	var (
-		usageFile  = strings.TrimSpace(usageFileFlag)
-		staleAfter = config.DefaultQuotaStaleAfter
-		poolsCfg   map[string]config.PoolConfig
+		usageFile   = strings.TrimSpace(usageFileFlag)
+		usageFormat = config.UsageFormatLegacy
+		staleAfter  = config.DefaultQuotaStaleAfter
+		poolsCfg    map[string]config.PoolConfig
 	)
 
 	if cfg, err := config.Load(cfgPath); err == nil {
 		poolsCfg = cfg.Pools
 		staleAfter = cfg.Quota.EffectiveStaleAfter()
+		usageFormat = cfg.Quota.EffectiveUsageFormat()
 		if usageFile == "" {
 			usageFile = strings.TrimSpace(cfg.Quota.UsageFile)
 		}
@@ -395,6 +496,9 @@ func runGateRelease(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gate release failed: %v\n", err)
 			return 1
 		}
+	}
+	if formatFlag != "" {
+		usageFormat = formatFlag
 	}
 
 	if strings.TrimSpace(staleAfterRaw) != "" {
@@ -415,12 +519,13 @@ func runGateRelease(args []string, stdout, stderr io.Writer) int {
 	defer st.Close()
 
 	checker := runtime.NewGateChecker(runtime.GateCheckerOptions{
-		Store:      st,
-		GateMode:   config.GateModeEnforce,
-		UsageFile:  usageFile,
-		StaleAfter: staleAfter,
-		Pools:      poolsCfg,
-		Logger:     log.New(io.Discard, "", 0),
+		Store:       st,
+		GateMode:    config.GateModeEnforce,
+		UsageFile:   usageFile,
+		UsageFormat: usageFormat,
+		StaleAfter:  staleAfter,
+		Pools:       poolsCfg,
+		Logger:      log.New(io.Discard, "", 0),
 	})
 
 	res, relErr := checker.ReleaseByID(ctx, heldID)

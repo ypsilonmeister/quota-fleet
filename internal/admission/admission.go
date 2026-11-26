@@ -1,5 +1,5 @@
 // Package admission is the write-free admission decision shared by POST /jobs and the
-// Chain Driver (docs/22 §4.4): Selector (docs/19) then Quota Gate (docs/03). Callers
+// Chain Driver (docs/22 §4.4): Selector (docs/19) then Quota Gate (docs/03, docs/23). Callers
 // write the result themselves — POST /jobs through CreateJob/HoldJob, the Chain Driver
 // inside AdvanceChain — so there is one decision path and no "CreateJob directly" bypass.
 package admission
@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -24,11 +25,14 @@ type Options struct {
 	Pools        map[string]config.PoolConfig
 	StaleAfter   time.Duration
 	// UsageFile is read when LoadSnapshot is nil.
-	UsageFile    string
+	UsageFile string
+	// UsageFormat selects "legacy" (default) or "v1" parsing and gate rules.
+	UsageFormat  string
 	Now          func() time.Time
 	LoadSnapshot func() (*quota.Snapshot, error)
 	// GetJob looks up a parent for the fix-follows-parent rule (docs/10 §4).
 	GetJob func(ctx context.Context, id int64) (*store.Job, error)
+	Logger *log.Logger
 }
 
 // Admission evaluates job requests against the Selector and the Gate.
@@ -38,9 +42,11 @@ type Admission struct {
 	pools        map[string]config.PoolConfig
 	staleAfter   time.Duration
 	usageFile    string
+	usageFormat  string
 	now          func() time.Time
 	loadSnapshot func() (*quota.Snapshot, error)
 	getJob       func(ctx context.Context, id int64) (*store.Job, error)
+	logger       *log.Logger
 }
 
 // New constructs an Admission with the same defaults as the API server.
@@ -51,15 +57,20 @@ func New(opts Options) *Admission {
 		pools:        opts.Pools,
 		staleAfter:   opts.StaleAfter,
 		usageFile:    strings.TrimSpace(opts.UsageFile),
+		usageFormat:  strings.TrimSpace(opts.UsageFormat),
 		now:          opts.Now,
 		loadSnapshot: opts.LoadSnapshot,
 		getJob:       opts.GetJob,
+		logger:       opts.Logger,
 	}
 	if a.gateMode == "" {
 		a.gateMode = config.GateModeOff
 	}
 	if a.selectorMode == "" {
 		a.selectorMode = config.SelectorModeOff
+	}
+	if a.usageFormat == "" {
+		a.usageFormat = config.UsageFormatLegacy
 	}
 	if a.staleAfter <= 0 {
 		a.staleAfter = config.DefaultQuotaStaleAfter
@@ -75,6 +86,9 @@ func (a *Admission) GateMode() string { return a.gateMode }
 
 // SelectorMode returns the configured selector mode.
 func (a *Admission) SelectorMode() string { return a.selectorMode }
+
+// UsageFormat returns the configured usage snapshot format ("legacy" or "v1").
+func (a *Admission) UsageFormat() string { return a.usageFormat }
 
 // Request is a job request as the client sent it.
 type Request struct {
@@ -113,7 +127,7 @@ func (a *Admission) LoadSnapshot() (*quota.Snapshot, error) {
 	if a.usageFile == "" {
 		return nil, errors.New("quota.usage_file is not configured")
 	}
-	return quota.LoadUsageFile(a.usageFile)
+	return quota.LoadUsageFileWithFormat(a.usageFile, a.usageFormat)
 }
 
 // ResolvePool returns the explicit pool or the pool whose applies_to matches agent/model.
@@ -134,6 +148,43 @@ func (a *Admission) ValidateRequest(req Request) error {
 		return fmt.Errorf("%w: weight %q is not supported (light|standard|heavy)", store.ErrInvalidInput, req.Weight)
 	}
 	return nil
+}
+
+// ValidateExplicitPools verifies that explicitly specified pool and alt_pools are defined in
+// fleet.yaml before the Selector runs when usage_format=v1 and gate_mode=enforce (§4.2.A.1).
+// In dry-run, off, or legacy mode, it returns nil.
+func (a *Admission) ValidateExplicitPools(pool string, altPools []string) error {
+	if a.usageFormat != config.UsageFormatV1 || a.gateMode != config.GateModeEnforce {
+		return nil
+	}
+	missing := a.findUndefinedPools(pool, altPools)
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: unknown_pool: %s", store.ErrInvalidInput, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func (a *Admission) findUndefinedPools(primary string, altPools []string) []string {
+	seen := make(map[string]struct{})
+	var missing []string
+	check := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		if _, defined := a.pools[p]; !defined {
+			missing = append(missing, p)
+		}
+	}
+	check(primary)
+	for _, alt := range altPools {
+		check(alt)
+	}
+	return missing
 }
 
 // Select runs the Selector in front of the Gate (docs/19). Explicit agent/model/pool
@@ -174,7 +225,6 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 			parentFollowed = true
 			parentJob = selector.Candidate{Agent: parent.Agent, Model: parent.Model, Pool: parent.Pool}
 			if parentJob.Pool == "" {
-				// No pool stored on the parent: derive it from the parent's own agent/model.
 				parentJob.Pool = resolve(parent.Agent, parent.Model)
 			}
 			if parentJob.Pool == "" {
@@ -184,7 +234,12 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 	}
 
 	snap, snapErr := usage.Get()
-	evalOpts := quota.EvalOptions{Now: a.now(), StaleAfter: a.staleAfter, Pools: a.pools}
+	evalOpts := quota.EvalOptions{
+		Now:        a.now(),
+		StaleAfter: a.staleAfter,
+		Pools:      a.pools,
+		Format:     a.usageFormat,
+	}
 	res := selector.Select(selector.Input{
 		Role:        strings.TrimSpace(req.Role),
 		Weight:      strings.TrimSpace(req.Weight),
@@ -197,9 +252,6 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 		ResolvePool: resolve,
 	})
 	if parentFollowed && !res.Abstain && snap != nil {
-		// docs/10 §4: when the parent's pool is exhausted and another pool is healthy,
-		// propose switching to another line (the proposal is recorded only).
-		// The parent's own pool is judged, not the pool of this job's candidate.
 		if ev := quota.EvaluatePool(parentJob.Pool, snap, evalOpts); ev.Status == quota.PoolExhausted {
 			if alt, ok := selector.SwitchTarget(selector.RoleFix, strings.TrimSpace(req.Weight), parentJob, snap, evalOpts); ok {
 				parentNote += fmt.Sprintf("parent pool %s is exhausted and pool %s is healthy: proposing a switch to another line %s/%s (docs/10 §4); ", parentJob.Pool, alt.Pool, alt.Agent, alt.Model)
@@ -209,7 +261,6 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 	if parentFollowed && res.Abstain {
 		parentNote = fmt.Sprintf("parent job target %s/%s not followed; ", agent, model)
 	}
-	// res.Candidate is empty on abstain, so no selected_* value is recorded then.
 	params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Agent, res.Model, res.Pool
 	params.SelectionReason = parentNote + res.Reason
 
@@ -227,7 +278,6 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 		return
 	}
 
-	// Record mode and abstain both execute explicit values plus the documented defaults.
 	def := selector.Defaults(reqAgent, reqModel, explicitPool, resolve)
 	if reqAgent == "" {
 		params.Agent = def.Agent
@@ -250,7 +300,6 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 	params.SelectionReason += fmt.Sprintf("; record mode executes with defaults %s/%s on pool %s", params.Agent, params.Model, params.Pool)
 }
 
-// executedField describes an executed value and whether the client specified it.
 func executedField(name, executed, requested string) string {
 	switch {
 	case requested != "":
@@ -265,11 +314,56 @@ func executedField(name, executed, requested string) string {
 // turns a measured evaluation into unknown and is returned alongside.
 func (a *Admission) EvaluateGate(primaryPool string, altPools []string, usage *Usage) (quota.GateEvaluation, error) {
 	opts := quota.EvalOptions{
-		Now:        a.now(),
-		StaleAfter: a.staleAfter,
-		Pools:      a.pools,
+		Now:             a.now(),
+		StaleAfter:      a.staleAfter,
+		Pools:           a.pools,
+		Format:          a.usageFormat,
+		CheckPoolConfig: a.usageFormat == config.UsageFormatV1,
 	}
 	primaryPool = strings.TrimSpace(primaryPool)
+
+	if a.usageFormat == config.UsageFormatV1 {
+		// Step 1: check ALL candidates exist in fleet.yaml BEFORE bypass or snapshot load (Item B).
+		if missing := a.findUndefinedPools(primaryPool, altPools); len(missing) > 0 {
+			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+		}
+		// Step 2: bypass if primary is unmeasured OR (primary empty and all alts are defined & unmeasured).
+		if primaryPool != "" {
+			if cfg, ok := a.pools[primaryPool]; ok && cfg.Unmeasured {
+				return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+			}
+		} else if len(altPools) > 0 {
+			allUnmeasured := true
+			anyCand := false
+			for _, alt := range altPools {
+				p := strings.TrimSpace(alt)
+				if p == "" {
+					continue
+				}
+				anyCand = true
+				cfg, ok := a.pools[p]
+				if !ok || !cfg.Unmeasured {
+					allUnmeasured = false
+					break
+				}
+			}
+			if anyCand && allUnmeasured {
+				return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+			}
+		}
+
+		snap, err := usage.Get()
+		if err != nil {
+			eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
+			eval.Decision = quota.DecisionUnknown
+			eval.Reason = quota.ReasonSnapshotError
+			eval.Detail = err.Error()
+			return eval, err
+		}
+		return quota.EvaluateGate(primaryPool, altPools, snap, opts), nil
+	}
+
+	// Legacy mode (Decision 2 & Item A): preserve exact existing behavior.
 	if primaryPool != "" {
 		if cfg, ok := a.pools[primaryPool]; ok && cfg.Unmeasured {
 			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
@@ -284,7 +378,13 @@ func (a *Admission) EvaluateGate(primaryPool string, altPools []string, usage *U
 		}
 		return eval, err
 	}
-	return quota.EvaluateGate(primaryPool, altPools, snap, opts), nil
+	eval := quota.EvaluateGate(primaryPool, altPools, snap, opts)
+	if a.logger != nil {
+		if diffs := quota.CompareLegacyWithV1(primaryPool, altPools, snap, opts, eval); len(diffs) > 0 {
+			a.logger.Printf("INFO: legacy_compat_diff pool=%s alt=%v: %s", primaryPool, altPools, strings.Join(diffs, "; "))
+		}
+	}
+	return eval, nil
 }
 
 // Kind is the outcome of Decide.
@@ -312,8 +412,7 @@ type Decision struct {
 	Gate *store.GateDecision
 	// Reject is set when Kind is reject: the request itself is wrong.
 	Reject error
-	// SnapshotErr reports a usage snapshot read failure (a transient condition: enforce
-	// treats it as unknown and holds, like POST /jobs).
+	// SnapshotErr reports a usage snapshot read failure.
 	SnapshotErr error
 }
 
@@ -326,16 +425,19 @@ func gateRecord(mode string, eval quota.GateEvaluation) *store.GateDecision {
 		BlockedBy:     eval.BlockedBy,
 		SelectedPool:  eval.SelectedPool,
 		Bypassed:      eval.Bypassed,
-		Reason:        eval.Reason,
+		Reason:        quota.FormatDecisionReason(eval),
 		MeasuredAt:    eval.MeasuredAt,
 		DecidedAt:     eval.DecidedAt,
 	}
 }
 
-// Prepare validates the request, resolves the pool, runs the Selector and checks the
-// effort against the agent the job will run on. An error means reject.
+// Prepare validates the request, checks explicit pools in v1 enforce, resolves the pool,
+// runs the Selector, and checks the effort against the agent the job will run on.
 func (a *Admission) Prepare(ctx context.Context, req Request, usage *Usage) (store.CreateJobParams, error) {
 	if err := a.ValidateRequest(req); err != nil {
+		return store.CreateJobParams{}, err
+	}
+	if err := a.ValidateExplicitPools(req.Params.Pool, req.Params.AltPools); err != nil {
 		return store.CreateJobParams{}, err
 	}
 	params := req.Params
@@ -348,24 +450,44 @@ func (a *Admission) Prepare(ctx context.Context, req Request, usage *Usage) (sto
 	return params, nil
 }
 
-// Gate applies the Quota Gate to prepared params (docs/03): off → create; dry-run →
-// create with a would-* record; enforce → hold when ShouldHoldOnEnforce, otherwise create
-// on the selected pool. altPools are the client's alternative pools.
+// Gate applies the Quota Gate to prepared params (docs/03, docs/23): off → create; dry-run →
+// create with a would-* record; enforce → reject undefined pools (v1), hold when
+// ShouldHoldOnEnforce, otherwise create on the selected pool.
 func (a *Admission) Gate(params store.CreateJobParams, altPools []string, usage *Usage) Decision {
 	d := Decision{Kind: KindCreate, Params: params}
-	reqPool := params.Pool
-	if reqPool == "" && len(altPools) == 0 {
+	reqPool := strings.TrimSpace(params.Pool)
+	hasAlt := false
+	for _, p := range altPools {
+		if strings.TrimSpace(p) != "" {
+			hasAlt = true
+			break
+		}
+	}
+	if reqPool == "" && !hasAlt {
+		if a.gateMode != config.GateModeOff && a.logger != nil {
+			a.logger.Printf("INFO: gate skipped: no matching pool for agent=%q model=%q", params.Agent, params.Model)
+		}
 		return d
 	}
+
 	switch a.gateMode {
 	case config.GateModeDryRun:
 		eval, err := a.EvaluateGate(reqPool, altPools, usage)
 		d.SnapshotErr = err
 		d.Gate = gateRecord(config.GateModeDryRun, eval)
+		a.logEvaluationWarning("dry-run", eval, err)
 	case config.GateModeEnforce:
 		eval, err := a.EvaluateGate(reqPool, altPools, usage)
 		d.SnapshotErr = err
+		if a.usageFormat == config.UsageFormatV1 && eval.Reason == quota.ReasonPoolNotConfigured {
+			rejErr := fmt.Errorf("%w: unknown_pool: %s", store.ErrInvalidInput, strings.Join(eval.UndefinedPools, ", "))
+			if a.logger != nil {
+				a.logger.Printf("WARNING: quota gate enforce rejected request (format=v1): %v", rejErr)
+			}
+			return Decision{Kind: KindReject, Reject: rejErr}
+		}
 		if quota.ShouldHoldOnEnforce(eval) {
+			a.logEvaluationWarning("enforce-hold", eval, err)
 			d.Kind = KindHold
 			d.HoldPool = reqPool
 			d.HoldAltPools = eval.AltPools
@@ -376,13 +498,47 @@ func (a *Admission) Gate(params store.CreateJobParams, altPools []string, usage 
 			d.Gate = g
 			return d
 		}
-		// Not held (healthy pool selected, unmeasured bypass, or provisional unknown only).
+		if eval.Decision == quota.DecisionUnknown {
+			a.logEvaluationWarning("enforce-pass", eval, err)
+		}
 		if eval.Decision == quota.DecisionWouldPass && eval.SelectedPool != "" {
 			d.Params.Pool = eval.SelectedPool
 		}
 		d.Gate = gateRecord(config.GateModeEnforce, eval)
 	}
 	return d
+}
+
+func (a *Admission) logEvaluationWarning(phase string, eval quota.GateEvaluation, snapErr error) {
+	if a.logger == nil {
+		return
+	}
+	if eval.Decision != quota.DecisionUnknown && snapErr == nil {
+		return
+	}
+	var parts []string
+	parts = append(parts, fmt.Sprintf("format=%s", eval.Format))
+	if eval.RequestedPool != "" {
+		parts = append(parts, "pool="+eval.RequestedPool)
+	}
+	if len(eval.AltPools) > 0 {
+		parts = append(parts, "alt="+strings.Join(eval.AltPools, ","))
+	}
+	if eval.Reason != "" {
+		parts = append(parts, "reason="+eval.Reason)
+	}
+	if eval.Reason == quota.ReasonStale && eval.AgeSeconds != nil {
+		parts = append(parts, quota.FormatStaleUnarrivedMessage(time.Duration(*eval.AgeSeconds)*time.Second, a.staleAfter))
+	} else if eval.Detail != "" {
+		parts = append(parts, "detail="+eval.Detail)
+	}
+	if eval.PoolError != "" {
+		parts = append(parts, "pool_error="+eval.PoolError)
+	}
+	if snapErr != nil && !strings.Contains(eval.Detail, snapErr.Error()) && !strings.Contains(eval.Reason, snapErr.Error()) {
+		parts = append(parts, "snapshot_err="+snapErr.Error())
+	}
+	a.logger.Printf("WARNING: quota gate %s (%s)", phase, strings.Join(parts, " "))
 }
 
 // Decide is Prepare followed by Gate. The Chain Driver uses it; POST /jobs calls the two

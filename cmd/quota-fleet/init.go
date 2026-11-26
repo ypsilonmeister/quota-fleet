@@ -75,6 +75,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  instance_id: %s\n", instanceID)
 	fmt.Fprintf(stdout, "  api.token:   generated and written to %s (not printed)\n", cfgPath)
 	fmt.Fprintf(stdout, "  next:        quota-fleet serve --config %s\n", cfgPath)
+	fmt.Fprintf(stdout, "  quota_gate:  optional — uncomment pools/quota in %s and see docs/23-usage-snapshot.md\n", cfgPath)
 	return 0
 }
 
@@ -135,5 +136,17 @@ agents:
     preflight: "agy --version"
     launch: "agy --model {model} --print"
     prompt_style: argument
+
+# Optional: Quota Gate (see docs/23-usage-snapshot.md)
+# pools:
+#   my-pool:
+#     applies_to: [{ agent: claude }]
+#     # short_window: false   # set false only for pools without a short rolling window
+#
+# quota:
+#   usage_file: "./usage.json"
+#   usage_format: "v1"        # legacy (default) | v1
+#   stale_after: "45m"        # tune from measured collect + sync latency
+#   gate_mode: "dry-run"      # off | dry-run | enforce
 `, instanceID, config.DefaultAPIListen, apiToken, config.RuntimeAdapterSSH, config.DefaultMaxClaimed, config.DefaultAttemptsCap)
 }

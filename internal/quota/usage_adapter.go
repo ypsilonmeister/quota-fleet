@@ -34,45 +34,51 @@ type rawUsageService struct {
 }
 
 // LoadUsageFile reads a usage.json file from path (expanding a leading "~/" if present)
-// and converts it into a normalized Snapshot.
+// and converts it into a normalized Legacy Snapshot.
 func LoadUsageFile(path string) (*Snapshot, error) {
-	resolved, err := expandHomePath(strings.TrimSpace(path))
-	if err != nil {
-		return nil, fmt.Errorf("resolve usage_file %q: %w", path, err)
-	}
-	if resolved == "" {
-		return nil, errors.New("usage_file path is empty")
-	}
-	data, err := os.ReadFile(resolved)
-	if err != nil {
-		return nil, fmt.Errorf("read usage_file %q: %w", resolved, err)
-	}
-	snap, err := ParseUsageJSON(data)
-	if err != nil {
-		return nil, fmt.Errorf("parse usage_file %q: %w", resolved, err)
-	}
-	return snap, nil
+	return LoadUsageFileWithFormat(path, FormatLegacy)
 }
 
 // ParseUsageJSON parses the legacy muse-widget usage.json format and normalizes
 // services.claude, services.codex, and services.antigravity (primary + alt) into
 // the canonical pools: claude, codex, agy-gemini, and agy-3p.
+// JSON containing a top-level "schema_version" key is rejected without falling back.
 func ParseUsageJSON(data []byte) (*Snapshot, error) {
+	return parseLegacyUsageJSON(data)
+}
+
+func parseLegacyUsageJSON(data []byte) (*Snapshot, error) {
+	// Decision 3 & §3.6: if top-level "schema_version" key is present, NEVER fall back
+	// to the Legacy parser, regardless of its value (valid v1, null, string, unknown number).
+	if info, err := inspectTopLevelJSON(data); err == nil && info.isObject && info.hasSchemaVersion {
+		if info.schemaVersionRaw == "1" {
+			return nil, &ParseError{
+				Code: ReasonFormatMismatch,
+				Err:  errors.New("format_mismatch: expected legacy, got v1 (schema_version=1)"),
+			}
+		}
+		return nil, &ParseError{
+			Code: ReasonFormatMismatch,
+			Err:  fmt.Errorf("format_mismatch: expected legacy, got json with schema_version=%s (fallback forbidden)", info.schemaVersionRaw),
+		}
+	}
+
 	var raw rawUsageFile
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("unmarshal usage json: %w", err)
+		return nil, &ParseError{Code: "invalid_json", Err: fmt.Errorf("unmarshal usage json: %w", err)}
 	}
 
 	updatedAtStr := strings.TrimSpace(raw.UpdatedAt)
 	if updatedAtStr == "" {
-		return nil, errors.New("usage json missing updatedAt")
+		return nil, &ParseError{Code: "schema_violation", Err: errors.New("usage json missing updatedAt")}
 	}
 	measuredAt, err := time.Parse(time.RFC3339Nano, updatedAtStr)
 	if err != nil {
-		return nil, fmt.Errorf("parse updatedAt %q: %w", updatedAtStr, err)
+		return nil, &ParseError{Code: "schema_violation", Err: fmt.Errorf("parse updatedAt %q: %w", updatedAtStr, err)}
 	}
 
 	snap := &Snapshot{
+		Format:     FormatLegacy,
 		MeasuredAt: measuredAt,
 		Pools:      make(map[string]PoolSnapshot),
 	}
