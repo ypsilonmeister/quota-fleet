@@ -1392,3 +1392,25 @@ func TestAPIWebPushSubject(t *testing.T) {
 		}
 	}
 }
+
+func TestChainsConfigDefaultsAndValidation(t *testing.T) {
+	cfg, err := Parse([]byte("instance_id: x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Chains.EffectiveStallAfter() != 24*time.Hour || cfg.Chains.EffectiveMaxRoundsCap() != 10 ||
+		cfg.EffectiveChainSweepInterval() != cfg.Runtime.EffectiveShepherdInterval() {
+		t.Fatalf("defaults: stall=%s cap=%d sweep=%s", cfg.Chains.EffectiveStallAfter(), cfg.Chains.EffectiveMaxRoundsCap(), cfg.EffectiveChainSweepInterval())
+	}
+	cfg, err = Parse([]byte("instance_id: x\nchains:\n  sweep_interval: 2s\n  stall_after: 1h\n  max_rounds_cap: 5\n"))
+	if err != nil || cfg.Validate() != nil {
+		t.Fatalf("valid chains config: %v %v", err, cfg.Validate())
+	}
+	if cfg.EffectiveChainSweepInterval() != 2*time.Second || cfg.Chains.EffectiveStallAfter() != time.Hour || cfg.Chains.EffectiveMaxRoundsCap() != 5 {
+		t.Fatal("configured values not applied")
+	}
+	cfg, _ = Parse([]byte("instance_id: x\nchains:\n  stall_after: nope\n  max_rounds_cap: -1\n"))
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "chains.stall_after") || !strings.Contains(err.Error(), "chains.max_rounds_cap") {
+		t.Fatalf("invalid chains config accepted: %v", err)
+	}
+}

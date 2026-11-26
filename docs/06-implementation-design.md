@@ -30,12 +30,13 @@
 | 3 | **Signal Dispatcher** | 信号（Outbox／JSONL）の配送、厳格パース、起床通知、heartbeat、信号ローテーション | ジョブの中身を読まない（ヒントだけ扱う） |
 | 4 | **Host/Agent Adapter** | SSH／ローカル接続、workdir 用意、OS 別デタッチ起動、生存・終了判定、セッションID抽出、resume 起動 | ジョブの状態遷移はしない（Store 経由のみ） |
 | 5 | **Launcher** | queued の最古を claim → **トークンを Store に永続化** → 仮リース設定 → Adapter で起動 → 仮リース解除、までを行って即終了 | 見回り・評価はしない（Q6(b) の分離を維持） |
-| 6 | **Shepherd** | claimed ジョブの見回り、Evaluator の呼び出し、complete/fail、納品、空き枠の信号補充 | PR 作成・後続ジョブ登録はしない（Coordinator の責務。§7-3） |
+| 6 | **Shepherd** | claimed ジョブの見回り、Evaluator の呼び出し、チェーン工程が宣言した成果物（review の verdict）の取り込み、complete/fail、納品、空き枠の信号補充 | PR 作成・後続ジョブ登録はしない（Chain Driver または Coordinator の責務。§7-4） |
 | 7 | **Reconciler** | 信号ロスト復旧、停滞 claimed の検出、未納品回収、waiting 孤児検出、Dispatcher の heartbeat 監視（停止検知）、重複抑制つき報告 | 正常稼働中のジョブに触れない。claimed への介入（サルベージ）は設定で切替（§7-4） |
 | 8 | **Quota Collector** | プールごとの残量・リセット時刻を実測し、正規化スナップショットを発行 | ゲート判定はしない。資格情報はプローブ先ホストから外へ出さない |
 | 9 | **Quota Gate** | 登録前の保持／解放判定、失効の近いプール優先、使い切り調査の発火。保持状態は Store に永続化 | 代替プールを勝手に発明しない（登録時に宣言されたものだけ） |
 | 10 | **Verification Suite** | モック Host/Agent/Quota／Evaluator での E2E、CAS 並行テスト、チェーン・キャンセル・hold→release の検証 | 本番データに触れない |
 | 11 | **Evaluator** | 受け入れ条件の評価。入力: ジョブの `acceptance_criteria`（1行1条件の自然言語）、Adapter 経由で集めた証跡（差分の有無、指定コマンドの実行結果、成果物ファイルの有無・内容、エージェントの最終報告）。出力: 条件ごとの PASS/FAIL＋根拠、および `result_text` の素材 | ジョブの状態遷移はしない（判定を返すだけ。遷移は Shepherd）。評価方式の選択は §7-1 |
+| 12 | **Chain Driver** | running のチェーン実行の巡回、前工程の結果による分岐、次工程の原子的な生成、理由付き停止と通知の送信（docs/22） | ワーカーのファイルを読まない。実行中のジョブに触れない。失敗した工程を自動で再実行しない |
 
 補助部品:
 
@@ -280,7 +281,11 @@ Quota Gate 側の修正もここに含める: 全体の `updated_at` だけで�
 1. **Evaluator の評価方式**: **確定（2026-11-23 ゆうや決定）**。(A) を採る: 決定論の型つきチェック（`file_exists:`／`file_nonempty:`／`contains:`／`command:`）を基本とし、型で書けない条件の意味判定には生成型 LLM ではなく判定専用モデル **Gemini Decision 1**（`gemini-decision-1`、Decisions API の noul 質問、確率しきい値で合否）を使う。Decision 1 は yui-social の validation で実績があり、安価で利用枠を食わない。API 不通・キー未設定時は合格にも不合格にもせず再評価し、連続失敗で理由つき Fail にする（silent fallback 禁止）。実装は Phase 3-1 の後に完了（`internal/evaluator`）。
 2. **実装言語**: 本書は Go を推奨。Python での試作先行を望む場合は Phase 1 の範囲が変わる。
 3. **`submit` アクション（draft → queued）の要否**: 現行は未実装で困っていない。参照実装でも draft は「登録前の下書き置き場」としてだけ残し、submit を持たない選択肢がある。
-4. **Shepherd の責務範囲**: 仕様 01 は「PR 作成・後続ジョブ登録」を Shepherd に含めるが、現行は Coordinator（つむぎ）が担い、Shepherd は禁止されている。本書は現行どおり「Shepherd は評価と納品まで、PR と後続登録は Coordinator」を推奨するが、仕様側の記述とどちらに寄せるか。
+4. **Shepherd の責務範囲**: **確定（2026-11-26 ゆうや決定、Issue #26）**。Shepherd は「評価、チェーン工程が宣言した成果物（review の verdict）の取り込み、complete/fail、納品」までとし、後続ジョブは登録しない。後続の登録は次のどちらかが行う。
+   - **チェーン実行（`POST /chains`）**: 新しい部品 **Chain Driver**（§1 部品 12）が、前工程が終端になった後に、分岐の確定・工程履歴・ジョブまたは保持の挿入・ポインタ更新を 1 トランザクションで行う。起動契機は定期スイープだけ。分岐は Shepherd が完了と同じトランザクションで保存した verdict だけで決める（docs/22）。
+   - **手動の `parent_id` チェーン**: Coordinator が登録する（分岐のない単発の後続に限る運用とする）。
+
+   PR の作成は、チェーンの publish 工程（エージェントのジョブ）または Coordinator が行い、Shepherd は行わない。
 5. **Reconciler の claimed 介入の既定値**: 検証レポートは仕様準拠の `report-only` を既定に提案し、v1 の本書は現行実績を尊重して `salvage` を既定に提案した。OSS の既定としては誤判定・勝手な reset のリスクが小さい **`report-only` を既定とし、自宅運用の `fleet.yaml` で `salvage` を有効にする**案を推奨に改める。どちらにするか。
 6. **short 窓が null（リセット直後）の健全判定**: 「満額として健全」とみなすか、「未測定として解放しない」か。実測の意味づけの問題なので、Collector の実挙動を見て決めたい。
 7. **部品間通信**: Shepherd 等を同一プロセス内の goroutine にするか、HTTP API 経由の別プロセスにするか。前者は単純、後者は部品単位の再起動と差し替えが効く。本書は同一プロセスを既定としつつ、Store アクセスを API 互換の内部インターフェースに寄せておくことを提案。
@@ -296,7 +301,7 @@ Quota Gate 側の修正もここに含める: 全体の `updated_at` だけで�
 
 ## 付録A: 材料間の矛盾・仕様の穴（検証で見つけたもの）
 
-- 仕様 01 の Shepherd 記述と、仕様 02／04 の「チェーンは初回登録時に一括登録」前提の間に齟齬がある（§7-4 と連動）。
+- 仕様 01 の Shepherd 記述と、仕様 02／04 の「チェーンは初回登録時に一括登録」前提の間に齟齬がある（§7-4 と連動）。→ §7-4 で解消。一括登録は手動 `parent_id` チェーンにだけ残る。
 - 現行 DESIGN.md の初期節（title 任意、host の列挙、単一ロック等）は時系列追記で上書きされた旧世代の記述が残っており、正本として読むときは後の節が優先する。参照実装の設計では本書 §1.1 の確定事項を正とする。
 - Quota Gate の解放経路（held → createjob）は現行でも実地未検証（発火実績なし）。Phase 3 の dry-run 突合で初めて実証される想定で計画に織り込んだ。
 

@@ -1073,6 +1073,16 @@ func cancelJobTx(ctx context.Context, conn *sql.Conn, changes *[]statusChange, j
 // CancelOrphanChainHolds cancels holds still 'held' whose run is no longer running
 // (docs/22 §6 T1). It returns the IDs it cancelled.
 func (s *Store) CancelOrphanChainHolds(ctx context.Context) ([]string, error) {
+	var pending int
+	if err := s.readDB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM held_jobs h JOIN chain_runs r ON r.id = h.chain_run_id
+		WHERE h.status = 'held' AND r.status != 'running'
+	`).Scan(&pending); err != nil {
+		return nil, err
+	}
+	if pending == 0 {
+		return nil, nil // no write transaction on an idle sweep
+	}
 	var ids []string
 	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
 		ids = ids[:0]
