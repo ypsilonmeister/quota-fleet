@@ -154,6 +154,30 @@ func TestChainDoubleDriveCounterexamples(t *testing.T) {
 		}
 	})
 
+	t.Run("the verdict bytes change with the same verdict value", func(t *testing.T) {
+		// Only the fingerprint (raw_sha256) differs; the re-evaluated branch would be the
+		// same, so this isolates the fingerprint check.
+		e := newChainEnv(t, config.GateModeOff)
+		run := e.createRun("dd-sha", 0, "")
+		e.finishCurrent(run.ID, "")
+		e.sweep()
+		review := e.finishCurrent(run.ID, "ok_to_merge")
+		e.drv.beforeAdvance = func(string) {
+			e.exec(`UPDATE chain_artifacts SET raw_sha256 = 'rewritten' WHERE job_id = ?`, review.ID)
+		}
+		if err := e.drv.ProcessRun(e.ctx, run.ID); err != nil {
+			t.Fatal(err)
+		}
+		e.drv.beforeAdvance = nil
+		if n := len(e.steps(run.ID)); n != 2 {
+			t.Fatalf("committed on a changed fingerprint (steps=%d)", n)
+		}
+		e.sweep()
+		if n := len(e.steps(run.ID)); n != 3 {
+			t.Fatalf("did not proceed on the next sweep (steps=%d)", n)
+		}
+	})
+
 	t.Run("a failure inside the transaction leaves neither pointer nor step", func(t *testing.T) {
 		e := newChainEnv(t, config.GateModeOff)
 		run := e.createRun("dd-atomic", 0, "")

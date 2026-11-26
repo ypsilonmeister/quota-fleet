@@ -60,10 +60,12 @@ Driver は 1 run について:
 | 反例（v2 §4.3） | 固定したテスト |
 |---|---|
 | 2 つの実行が同じ完了を読み、片方は保持、片方は実ジョブを作る | `TestChainDoubleDriveCounterexamples/one execution holds, the other creates a job`（両方の順序。負けた側の行は無く、Launcher も claim できない。再起動後も工程は増えない） |
-| 2 つの実行が異なる verdict を読む | `.../the verdict changes between read and commit`（`raw_sha256` の照合で負け、次のスイープは DB の値で分岐） |
+| 2 つの実行が異なる verdict を読む | `.../the verdict changes between read and commit`（照合で負け、次のスイープは DB の値で分岐）。`.../the verdict bytes change with the same verdict value` は分岐が同じで `raw_sha256` だけが変わる場合で、指紋の照合だけを外すと落ちる |
 | ポインタだけ進んで工程が欠落する | `.../a failure inside the transaction leaves neither pointer nor step`（同じキーの保持行を割り込ませると、ポインタも工程もジョブも残らない。行を消すと収束） |
 | cancel の後に古い実行が進める | `.../cancel between read and commit` |
 | 初回作成で run だけ・ジョブだけが残る | `.../initial registration is one transaction and idempotent` |
+
+指紋の照合とトランザクション内の再判定は二重の歯止めで、片方だけを外しても上の多くの反例は他方で止まる。両方を外すと保持/実ジョブの二重駆動と verdict の反例が落ちることを確認した。
 
 ## 5. 保持の解放と取消（`Store.ReleaseHeld` ほか）
 
