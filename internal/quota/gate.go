@@ -868,6 +868,7 @@ type poolSnapshotSummary struct {
 	WeeklyResetAtApprox    bool             `json:"weekly_reset_at_approx,omitempty"`
 	ShortRemainingPercent  *int             `json:"short_remaining_percent,omitempty"`
 	ShortResetAt           *time.Time       `json:"short_reset_at,omitempty"`
+	ShortResetAtApprox     bool             `json:"short_reset_at_approx,omitempty"`
 	ShortWindow            string           `json:"short_window,omitempty"`
 	MeasuredAt             *time.Time       `json:"measured_at,omitempty"`
 	ServiceStale           bool             `json:"service_stale,omitempty"`
@@ -931,6 +932,7 @@ func SummarizeEvaluation(eval GateEvaluation) string {
 				ps.WeeklyResetAtApprox = p.Snapshot.WeeklyResetAtApprox
 				ps.ShortRemainingPercent = p.Snapshot.ShortRemainingPercent
 				ps.ShortResetAt = p.Snapshot.ShortResetAt
+				ps.ShortResetAtApprox = p.Snapshot.ShortResetAtApprox
 				ps.ShortWindow = p.Snapshot.ShortWindow
 				if !p.Snapshot.MeasuredAt.IsZero() {
 					mt := p.Snapshot.MeasuredAt

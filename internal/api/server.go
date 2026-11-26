@@ -1279,11 +1279,17 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			Reason:     ev.Reason,
 		}
 		if ev.Snapshot != nil {
-			w := ev.Snapshot.WeeklyRemainingPercent
-			summary.WeeklyRemainingPercent = &w
+			if !ev.Snapshot.WeeklyAbsent {
+				w := ev.Snapshot.WeeklyRemainingPercent
+				summary.WeeklyRemainingPercent = &w
+			}
 			summary.WeeklyResetAt = ev.Snapshot.WeeklyResetAt
+			summary.WeeklyResetAtApprox = ev.Snapshot.WeeklyResetAtApprox
+			summary.ShortApplicable = ev.Snapshot.ShortApplicable
 			summary.ShortRemainingPercent = ev.Snapshot.ShortRemainingPercent
 			summary.ShortResetAt = ev.Snapshot.ShortResetAt
+			summary.ShortResetAtApprox = ev.Snapshot.ShortResetAtApprox
+			summary.ShortWindow = ev.Snapshot.ShortWindow
 			if !ev.Snapshot.MeasuredAt.IsZero() {
 				mt := ev.Snapshot.MeasuredAt
 				summary.MeasuredAt = &mt

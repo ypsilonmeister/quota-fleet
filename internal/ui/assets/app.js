@@ -762,6 +762,127 @@
     return t("form.derivedPoolNone");
   }
 
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function formatUtcOffset(date) {
+    const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+    const offsetMin = -d.getTimezoneOffset();
+    if (offsetMin === 0) {
+      return "UTC";
+    }
+    const sign = offsetMin > 0 ? "+" : "-";
+    const abs = Math.abs(offsetMin);
+    return "UTC" + sign + pad2(Math.floor(abs / 60)) + ":" + pad2(abs % 60);
+  }
+
+  function getDisplayTimeZone(refDate) {
+    try {
+      if (typeof Intl !== "undefined" && Intl && typeof Intl.DateTimeFormat === "function") {
+        const resolved = Intl.DateTimeFormat().resolvedOptions();
+        if (resolved && typeof resolved.timeZone === "string" && resolved.timeZone.trim() !== "") {
+          const tz = resolved.timeZone.trim();
+          if (tz === "Etc/UTC" || tz === "Etc/GMT" || tz === "GMT" || tz === "+00:00" || tz === "-00:00") {
+            return "UTC";
+          }
+          if (tz.indexOf("Etc/GMT") === 0 || /^[+-]\d{2}:\d{2}$/.test(tz)) {
+            return formatUtcOffset(refDate);
+          }
+          return tz;
+        }
+      }
+    } catch (_err) {
+      // Fall through to numeric UTC offset below.
+    }
+    return formatUtcOffset(refDate);
+  }
+
+  function parseValidDate(iso) {
+    if (typeof iso !== "string" || iso.trim() === "") {
+      return null;
+    }
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function formatWeeklyResetTime(iso) {
+    const d = parseValidDate(iso);
+    if (!d) {
+      return "";
+    }
+    return (d.getMonth() + 1) + "/" + d.getDate() + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  function formatShortResetTime(iso) {
+    const d = parseValidDate(iso);
+    if (!d) {
+      return "";
+    }
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  function formatPoolResetLabels(ps) {
+    const item = ps && typeof ps === "object" ? ps : {};
+    const shortWindow = (typeof item.short_window === "string" && item.short_window.trim())
+      ? item.short_window.trim()
+      : "5h";
+    const weeklyRaw = typeof item.weekly_reset_at === "string" ? item.weekly_reset_at.trim() : "";
+    const shortRaw = typeof item.short_reset_at === "string" ? item.short_reset_at.trim() : "";
+
+    const weeklyDate = parseValidDate(weeklyRaw);
+    const shortDate = parseValidDate(shortRaw);
+    const weeklyFormatted = weeklyDate ? formatWeeklyResetTime(weeklyRaw) : "";
+    const shortFormatted = shortDate ? formatShortResetTime(shortRaw) : "";
+
+    const weeklyTz = weeklyDate ? getDisplayTimeZone(weeklyDate) : "";
+    const shortTz = shortDate ? getDisplayTimeZone(shortDate) : "";
+    const hasMixedTimeZones = Boolean(weeklyTz && shortTz && weeklyTz !== shortTz);
+    const timeZone = hasMixedTimeZones ? "" : (weeklyTz || shortTz);
+
+    let weeklyText;
+    let weeklyMissing = false;
+    if (weeklyFormatted) {
+      const wt = (item.weekly_reset_at_approx ? ("~" + weeklyFormatted) : weeklyFormatted)
+        + (hasMixedTimeZones ? (" (" + weeklyTz + ")") : "");
+      weeklyText = t("dashboard.weeklyReset", { time: wt });
+    } else {
+      weeklyText = t("dashboard.weeklyResetMissing");
+      weeklyMissing = true;
+    }
+
+    let shortText;
+    let shortMissing = false;
+    if (shortFormatted) {
+      const st = (item.short_reset_at_approx ? ("~" + shortFormatted) : shortFormatted)
+        + (hasMixedTimeZones ? (" (" + shortTz + ")") : "");
+      shortText = t("dashboard.shortReset", { window: shortWindow, time: st });
+    } else if (item.short_applicable === false) {
+      shortText = t("dashboard.shortResetNotApplicable", { window: shortWindow });
+      shortMissing = true;
+    } else {
+      shortText = t("dashboard.shortResetMissing", { window: shortWindow });
+      shortMissing = true;
+    }
+
+    const labelText = timeZone
+      ? t("dashboard.resetLabelWithTz", { tz: timeZone })
+      : t("dashboard.resetLabel");
+
+    return {
+      labelText: labelText,
+      timeZone: timeZone,
+      weeklyTimeZone: weeklyTz,
+      shortTimeZone: shortTz,
+      weeklyText: weeklyText,
+      weeklyMissing: weeklyMissing,
+      weeklyRaw: weeklyFormatted ? weeklyRaw : "",
+      shortText: shortText,
+      shortMissing: shortMissing,
+      shortRaw: shortFormatted ? shortRaw : ""
+    };
+  }
+
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       detectPreferredDirection: detectPreferredDirection,
@@ -783,7 +904,11 @@
       deriveModelFamily: deriveModelFamily,
       matchesModelFamily: matchesModelFamily,
       derivePoolForSelection: derivePoolForSelection,
-      formatDerivedPoolLabel: formatDerivedPoolLabel
+      formatDerivedPoolLabel: formatDerivedPoolLabel,
+      getDisplayTimeZone: getDisplayTimeZone,
+      formatWeeklyResetTime: formatWeeklyResetTime,
+      formatShortResetTime: formatShortResetTime,
+      formatPoolResetLabels: formatPoolResetLabels
     };
   }
 
@@ -1343,6 +1468,10 @@
         const lines = [];
         if (ps.unmeasured) {
           lines.push(el("div", { className: "small muted", text: L("dashboard.unmeasured") }));
+          lines.push(el("div", { className: "pool-resets small" }, [
+            el("span", { className: "pool-reset-label", text: L("dashboard.resetLabel") }),
+            el("span", { className: "pool-reset-item is-missing", text: L("dashboard.resetNone") })
+          ]));
         } else {
           if (ps.weekly_remaining_percent !== undefined && ps.weekly_remaining_percent !== null) {
             lines.push(el("div", { className: "small", text: L("dashboard.weeklyRemaining", { percent: ps.weekly_remaining_percent }) }));
@@ -1350,6 +1479,23 @@
           if (ps.short_remaining_percent !== undefined && ps.short_remaining_percent !== null) {
             lines.push(el("div", { className: "small", text: L("dashboard.shortRemaining", { percent: ps.short_remaining_percent }) }));
           }
+          const resets = formatPoolResetLabels(ps);
+          lines.push(el("div", { className: "pool-resets small" }, [
+            el("span", {
+              className: "pool-reset-label",
+              text: function () { return formatPoolResetLabels(ps).labelText; }
+            }),
+            el("span", {
+              className: resets.weeklyMissing ? "pool-reset-item is-missing" : "pool-reset-item mono",
+              title: resets.weeklyRaw || null,
+              text: function () { return formatPoolResetLabels(ps).weeklyText; }
+            }),
+            el("span", {
+              className: resets.shortMissing ? "pool-reset-item is-missing" : "pool-reset-item mono",
+              title: resets.shortRaw || null,
+              text: function () { return formatPoolResetLabels(ps).shortText; }
+            })
+          ]));
           if (ps.measured_at) {
             lines.push(el("div", { className: "small muted" }, [
               L("dashboard.measuredAt"),

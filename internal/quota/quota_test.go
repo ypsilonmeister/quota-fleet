@@ -549,3 +549,89 @@ func TestShouldHoldOnEnforceAndSummary(t *testing.T) {
 		}
 	})
 }
+
+func TestParseUsageJSONLegacyResetTimesAndEmptyAltShort(t *testing.T) {
+	fixture := `{
+		"updatedAt": "2026-11-27T08:00:00+09:00",
+		"services": {
+			"claude": {
+				"remainingPercent": 80,
+				"resetAt": "2026-12-03T20:00:00+09:00",
+				"subText": "5h 90%",
+				"subResetAt": "2026-11-27T12:30:00+09:00"
+			},
+			"codex": {
+				"remainingPercent": 60,
+				"resetAt": "2026-12-01T14:51:23+09:00",
+				"subText": "5h 75%",
+				"subResetAt": "2026-11-27T11:15:00+09:00"
+			},
+			"antigravity": {
+				"remainingPercent": 94,
+				"resetAt": "2026-12-03T18:29:03+09:00",
+				"subText": "5h 79%",
+				"subResetAt": "2026-11-27T08:29:03+09:00",
+				"altPercent": 48,
+				"altResetAt": "2026-12-02T17:24:03+09:00",
+				"altSubText": "5h 100%",
+				"altSubResetAt": ""
+			}
+		}
+	}`
+
+	snap, err := ParseUsageJSON([]byte(fixture))
+	if err != nil {
+		t.Fatalf("ParseUsageJSON: %v", err)
+	}
+
+	assertExactRFC3339 := func(label string, got *time.Time, want string) {
+		t.Helper()
+		if got == nil {
+			t.Fatalf("%s = nil, want %s", label, want)
+		}
+		if gotStr := got.Format(time.RFC3339); gotStr != want {
+			t.Errorf("%s = %q, want verbatim %q", label, gotStr, want)
+		}
+	}
+
+	assertExactRFC3339("claude.WeeklyResetAt", snap.Pools[PoolClaude].WeeklyResetAt, "2026-12-03T20:00:00+09:00")
+	assertExactRFC3339("claude.ShortResetAt", snap.Pools[PoolClaude].ShortResetAt, "2026-11-27T12:30:00+09:00")
+	assertExactRFC3339("codex.WeeklyResetAt", snap.Pools[PoolCodex].WeeklyResetAt, "2026-12-01T14:51:23+09:00")
+	assertExactRFC3339("codex.ShortResetAt", snap.Pools[PoolCodex].ShortResetAt, "2026-11-27T11:15:00+09:00")
+	assertExactRFC3339("agy-gemini.WeeklyResetAt", snap.Pools[PoolAgyGemini].WeeklyResetAt, "2026-12-03T18:29:03+09:00")
+	assertExactRFC3339("agy-gemini.ShortResetAt", snap.Pools[PoolAgyGemini].ShortResetAt, "2026-11-27T08:29:03+09:00")
+	assertExactRFC3339("agy-3p.WeeklyResetAt", snap.Pools[PoolAgy3P].WeeklyResetAt, "2026-12-02T17:24:03+09:00")
+	if snap.Pools[PoolAgy3P].ShortResetAt != nil {
+		t.Errorf("agy-3p.ShortResetAt = %v, want nil when altSubResetAt is empty", snap.Pools[PoolAgy3P].ShortResetAt)
+	}
+
+	// Null and omitted reset fields in Legacy also stay nil (never guessed).
+	fixtureNull := `{
+		"updatedAt": "2026-11-27T08:00:00+09:00",
+		"services": {
+			"claude": { "remainingPercent": 80, "resetAt": null, "subText": "5h 90%", "subResetAt": null },
+			"antigravity": { "remainingPercent": 90, "subText": "5h 80%", "altPercent": 50, "altResetAt": "2026-12-02T17:24:03+09:00", "altSubText": "5h 50%" }
+		}
+	}`
+	snapNull, err := ParseUsageJSON([]byte(fixtureNull))
+	if err != nil {
+		t.Fatalf("ParseUsageJSON(null): %v", err)
+	}
+	if snapNull.Pools[PoolClaude].WeeklyResetAt != nil || snapNull.Pools[PoolClaude].ShortResetAt != nil {
+		t.Errorf("claude null reset fields = weekly:%v short:%v, want both nil", snapNull.Pools[PoolClaude].WeeklyResetAt, snapNull.Pools[PoolClaude].ShortResetAt)
+	}
+	if snapNull.Pools[PoolAgyGemini].WeeklyResetAt != nil || snapNull.Pools[PoolAgyGemini].ShortResetAt != nil {
+		t.Errorf("agy-gemini omitted reset fields = weekly:%v short:%v, want both nil", snapNull.Pools[PoolAgyGemini].WeeklyResetAt, snapNull.Pools[PoolAgyGemini].ShortResetAt)
+	}
+	assertExactRFC3339("agy-3p(omitted altSub).WeeklyResetAt", snapNull.Pools[PoolAgy3P].WeeklyResetAt, "2026-12-02T17:24:03+09:00")
+	if snapNull.Pools[PoolAgy3P].ShortResetAt != nil {
+		t.Errorf("agy-3p(omitted altSub).ShortResetAt = %v, want nil", snapNull.Pools[PoolAgy3P].ShortResetAt)
+	}
+
+	// Legacy Gate behavior (selection by soonest weekly reset) remains unchanged.
+	now := mustTime(t, "2026-11-27T08:10:00+09:00")
+	ev := EvaluateGate(PoolClaude, []string{PoolAgy3P, PoolCodex}, snap, EvalOptions{Now: now})
+	if ev.Decision != DecisionWouldPass || ev.SelectedPool != PoolCodex {
+		t.Fatalf("EvaluateGate legacy = %+v, want would_pass selected=codex", ev)
+	}
+}
