@@ -1356,14 +1356,14 @@ func TestHeldJobsLifecycleIdempotencyAndErrorDedup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HoldJob 2: %v", err)
 	}
-	cancelled, err := st.CancelHeldJob(ctx, h2.ID)
+	cancelled, err := st.CancelHeldJob(ctx, h2.ID, "")
 	if err != nil {
 		t.Fatalf("CancelHeldJob: %v", err)
 	}
 	if cancelled.Status != HeldStatusCancelled || cancelled.CancelledAt == nil {
 		t.Fatalf("cancelled = %+v", cancelled)
 	}
-	if _, err := st.CancelHeldJob(ctx, h2.ID); !errors.Is(err, ErrConflict) {
+	if _, err := st.CancelHeldJob(ctx, h2.ID, ""); !errors.Is(err, ErrConflict) {
 		t.Errorf("second CancelHeldJob err = %v, want ErrConflict", err)
 	}
 

@@ -189,7 +189,8 @@ func (r FailRequest) effectiveReason() string {
 	return r.Reason
 }
 
-// ReasonRequest is the JSON body for POST /jobs/{id}/cancel and POST /jobs/{id}/reject-invalid.
+// ReasonRequest is the JSON body for POST /jobs/{id}/cancel, POST /jobs/{id}/reject-invalid,
+// and DELETE /gate/held/{id}.
 type ReasonRequest struct {
 	LastError string `json:"last_error"`
 	Reason    string `json:"reason"`
@@ -263,9 +264,31 @@ type HeldJobDTO struct {
 	ErrorCount      int                   `json:"error_count,omitempty"`
 	CreatedAt       time.Time             `json:"created_at"`
 	UpdatedAt       time.Time             `json:"updated_at"`
+	// HeldAt is when the job was held. HeldSeconds is the whole seconds it has spent
+	// held: up to now while status is held, otherwise up to release or cancellation.
+	HeldAt      time.Time `json:"held_at"`
+	HeldSeconds int64     `json:"held_seconds"`
+	// ParentID and ParentStatus are set only for entries with a parent job. ParentStatus
+	// is the parent's current status, or parentStatusNotFound if no such job exists.
+	ParentID     *int64 `json:"parent_id,omitempty"`
+	ParentStatus string `json:"parent_status,omitempty"`
+	CancelReason string `json:"cancel_reason,omitempty"`
 }
 
-func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
+const parentStatusNotFound = "not_found"
+
+func heldSeconds(h *store.HeldJob, now time.Time) int64 {
+	end := now
+	switch {
+	case h.ReleasedAt != nil:
+		end = *h.ReleasedAt
+	case h.CancelledAt != nil:
+		end = *h.CancelledAt
+	}
+	return max(0, int64(end.Sub(h.CreatedAt)/time.Second))
+}
+
+func toHeldJobDTO(h *store.HeldJob, now time.Time) *HeldJobDTO {
 	if h == nil {
 		return nil
 	}
@@ -285,6 +308,16 @@ func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
 		ErrorCount:      h.ErrorCount,
 		CreatedAt:       h.CreatedAt,
 		UpdatedAt:       h.UpdatedAt,
+		HeldAt:          h.CreatedAt,
+		HeldSeconds:     heldSeconds(h, now),
+		CancelReason:    h.CancelReason,
+	}
+	if h.Payload.ParentID != nil {
+		dto.ParentID = h.Payload.ParentID
+		dto.ParentStatus = string(h.ParentStatus)
+		if dto.ParentStatus == "" {
+			dto.ParentStatus = parentStatusNotFound
+		}
 	}
 	if len(h.AltPools) > 0 {
 		dto.AltPools = append([]string(nil), h.AltPools...)
@@ -292,10 +325,10 @@ func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
 	return dto
 }
 
-func toHeldJobDTOs(items []*store.HeldJob) []*HeldJobDTO {
+func toHeldJobDTOs(items []*store.HeldJob, now time.Time) []*HeldJobDTO {
 	out := make([]*HeldJobDTO, 0, len(items))
 	for _, h := range items {
-		out = append(out, toHeldJobDTO(h))
+		out = append(out, toHeldJobDTO(h, now))
 	}
 	return out
 }

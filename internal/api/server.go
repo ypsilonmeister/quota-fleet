@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -535,7 +536,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 		case store.HeldStatusHeld:
 			writeJSON(w, http.StatusAccepted, HoldJobResponse{
 				HeldID:  existingHeld.ID,
-				Held:    toHeldJobDTO(existingHeld),
+				Held:    toHeldJobDTO(existingHeld, s.nowFn()),
 				Created: false,
 			})
 			return
@@ -552,14 +553,14 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 			writeJSON(w, http.StatusConflict, HeldConflictResponse{
 				Error:         fmt.Sprintf("%v: held job %s for request_id=%s was already released", store.ErrConflict, existingHeld.ID, reqID),
 				CurrentStatus: string(existingHeld.Status),
-				Held:          toHeldJobDTO(existingHeld),
+				Held:          toHeldJobDTO(existingHeld, s.nowFn()),
 			})
 			return
 		default:
 			writeJSON(w, http.StatusConflict, HeldConflictResponse{
 				Error:         fmt.Sprintf("%v: held job %s for request_id=%s is %s", store.ErrConflict, existingHeld.ID, reqID, existingHeld.Status),
 				CurrentStatus: string(existingHeld.Status),
-				Held:          toHeldJobDTO(existingHeld),
+				Held:          toHeldJobDTO(existingHeld, s.nowFn()),
 			})
 			return
 		}
@@ -616,7 +617,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 				resp := HeldConflictResponse{Error: err.Error()}
 				if held != nil {
 					resp.CurrentStatus = string(held.Status)
-					resp.Held = toHeldJobDTO(held)
+					resp.Held = toHeldJobDTO(held, s.nowFn())
 				}
 				writeJSON(w, http.StatusConflict, resp)
 			case errors.Is(err, store.ErrInvalidInput):
@@ -648,7 +649,7 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 
 		writeJSON(w, http.StatusAccepted, HoldJobResponse{
 			HeldID:  held.ID,
-			Held:    toHeldJobDTO(held),
+			Held:    toHeldJobDTO(held, s.nowFn()),
 			Created: heldCreated,
 		})
 		return
@@ -955,7 +956,7 @@ func (s *Server) handleListHeldJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ListHeldJobsResponse{
-		Held:       toHeldJobDTOs(page.Held),
+		Held:       toHeldJobDTOs(page.Held, s.nowFn()),
 		NextCursor: page.NextCursor,
 		HasMore:    page.HasMore,
 	})
@@ -968,7 +969,13 @@ func (s *Server) handleCancelHeldJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	held, err := s.store.CancelHeldJob(r.Context(), heldID)
+	var req ReasonRequest
+	if err := decodeOptionalJSONObject(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	held, err := s.store.CancelHeldJob(r.Context(), heldID, req.effectiveReason())
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrInvalidInput):
@@ -979,7 +986,7 @@ func (s *Server) handleCancelHeldJob(w http.ResponseWriter, r *http.Request) {
 			resp := HeldConflictResponse{Error: err.Error()}
 			if cur, gerr := s.store.GetHeldJob(r.Context(), heldID); gerr == nil && cur != nil {
 				resp.CurrentStatus = string(cur.Status)
-				resp.Held = toHeldJobDTO(cur)
+				resp.Held = toHeldJobDTO(cur, s.nowFn())
 			}
 			writeJSON(w, http.StatusConflict, resp)
 		default:
@@ -989,7 +996,7 @@ func (s *Server) handleCancelHeldJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, HeldJobActionResponse{
-		Held: toHeldJobDTO(held),
+		Held: toHeldJobDTO(held, s.nowFn()),
 	})
 }
 
@@ -1805,6 +1812,28 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, allowEmpty bool
 		if errors.Is(err, io.EOF) && allowEmpty {
 			return nil
 		}
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
+}
+
+// decodeOptionalJSONObject accepts an empty body, leaving dst unchanged, or a body that
+// is exactly one JSON object. Unlike decodeJSON it rejects null and trailing data.
+func decodeOptionalJSONObject(w http.ResponseWriter, r *http.Request, dst any) error {
+	if r.Body == nil {
+		return nil
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	if !bytes.HasPrefix(bytes.TrimLeft(body, " \t\r\n"), []byte("{")) {
+		return errors.New("invalid JSON body: want a JSON object")
+	}
+	if err := json.Unmarshal(body, dst); err != nil {
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil

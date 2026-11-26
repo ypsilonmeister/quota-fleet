@@ -173,7 +173,7 @@ func TestReleaseHeldJobContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HoldJob: %v", err)
 	}
-	if _, err := st.CancelHeldJob(ctx, held2.ID); err != nil {
+	if _, err := st.CancelHeldJob(ctx, held2.ID, ""); err != nil {
 		t.Fatalf("CancelHeldJob: %v", err)
 	}
 	resp = doJSON(t, http.MethodPost, ts.URL+"/gate/held/"+held2.ID+"/release", "", nil)
