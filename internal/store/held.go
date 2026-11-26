@@ -16,8 +16,13 @@ const (
 	heldJobColumns = `
 		id, request_id, status, pool, alt_pools, payload_json, reason, snapshot_summary,
 		released_job_id, released_pool, released_at, cancelled_at,
-		last_error, error_count, created_at, updated_at,
-		cancel_reason, chain_run_id, chain_seq
+		last_error, error_count, created_at, updated_at, cancel_reason,
+		chain_run_id, chain_seq,
+		(
+			SELECT jobs.status FROM jobs
+			WHERE jobs.id = CASE WHEN json_valid(held_jobs.payload_json)
+				THEN json_extract(held_jobs.payload_json, '$.parent_id') END
+		) AS parent_status
 	`
 )
 
@@ -406,12 +411,13 @@ func scanHeldJob(s rowScanner) (*HeldJob, error) {
 		updatedAt     string
 		chainRunID    sql.NullString
 		chainSeq      sql.NullInt64
+		parentStatus  sql.NullString
 	)
 	err := s.Scan(
 		&h.ID, &h.RequestID, &statusStr, &h.Pool, &altPoolsStr, &payloadStr, &h.Reason, &h.SnapshotSummary,
 		&releasedJobID, &h.ReleasedPool, &releasedAt, &cancelledAt,
-		&h.LastError, &h.ErrorCount, &createdAt, &updatedAt,
-		&h.CancelReason, &chainRunID, &chainSeq,
+		&h.LastError, &h.ErrorCount, &createdAt, &updatedAt, &h.CancelReason,
+		&chainRunID, &chainSeq, &parentStatus,
 	)
 	if err != nil {
 		return nil, err
@@ -419,6 +425,7 @@ func scanHeldJob(s rowScanner) (*HeldJob, error) {
 	h.ChainRunID = chainRunID.String
 	h.ChainSeq = int(chainSeq.Int64)
 	h.Status = HeldStatus(statusStr)
+	h.ParentStatus = Status(parentStatus.String)
 	altPools, err := decodeAltPools(altPoolsStr)
 	if err != nil {
 		return nil, fmt.Errorf("decode held alt_pools: %w", err)

@@ -10,14 +10,19 @@ import (
 )
 
 // CancelHeldJob transitions a held entry from status='held' to status='cancelled' without
-// deleting the row so audit history and request_id uniqueness remain intact. The reason
-// recorded in cancel_reason is "cancelled via gate API". When the hold is the current step
-// of a running chain run, the run is stopped with step_cancelled (and its notification
-// row written) in the same transaction (docs/22 §5.2).
-func (s *Store) CancelHeldJob(ctx context.Context, heldID string) (*HeldJob, error) {
+// deleting the row so audit history and request_id uniqueness remain intact.
+// reason is optional; it is stored trimmed as cancel_reason, capped at maxHeldErrorBytes.
+// When the hold is the current step of a running chain run, the run is stopped with
+// step_cancelled (and its notification row written) in the same transaction (docs/22 §5.2).
+func (s *Store) CancelHeldJob(ctx context.Context, heldID, reason string) (*HeldJob, error) {
 	heldID = strings.TrimSpace(heldID)
 	if heldID == "" {
 		return nil, fmt.Errorf("%w: held_id must not be empty", ErrInvalidInput)
+	}
+	reason = strings.TrimSpace(reason)
+	if len(reason) > maxHeldErrorBytes {
+		// Drop a rune split by the cut so the stored text stays valid UTF-8.
+		reason = strings.ToValidUTF8(reason[:maxHeldErrorBytes], "")
 	}
 
 	var out *HeldJob
@@ -26,11 +31,11 @@ func (s *Store) CancelHeldJob(ctx context.Context, heldID string) (*HeldJob, err
 		res, err := conn.ExecContext(ctx, `
 			UPDATE held_jobs
 			SET status = 'cancelled',
-				cancel_reason = 'cancelled via gate API',
+				cancel_reason = ?,
 				cancelled_at = ?,
 				updated_at = ?
 			WHERE id = ? AND status = 'held'
-		`, nowStr, nowStr, heldID)
+		`, reason, nowStr, nowStr, heldID)
 		if err != nil {
 			return err
 		}
@@ -52,8 +57,11 @@ func (s *Store) CancelHeldJob(ctx context.Context, heldID string) (*HeldJob, err
 			}
 			if snap != nil && snap.Run.Status == ChainRunRunning && snap.Step != nil &&
 				snap.Step.Seq == h.ChainSeq && snap.Step.HeldID == h.ID {
-				if _, err := stopChainRunTx(ctx, conn, snap, ChainStopStepCancelled,
-					fmt.Sprintf("held %s cancelled via gate API", h.ID), nowStr); err != nil {
+				detail := fmt.Sprintf("held %s cancelled via gate API", h.ID)
+				if reason != "" {
+					detail += ": " + reason
+				}
+				if _, err := stopChainRunTx(ctx, conn, snap, ChainStopStepCancelled, detail, nowStr); err != nil {
 					return err
 				}
 			}

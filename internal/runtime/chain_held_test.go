@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -137,12 +138,15 @@ func TestChainReleaseHeldVersusCancel(t *testing.T) {
 	t.Run("DELETE /gate/held on a chain hold stops the run", func(t *testing.T) {
 		e := newChainEnv(t, config.GateModeEnforce)
 		run, held := heldRun(t, e, "del")
-		h, err := e.st.CancelHeldJob(e.ctx, held.ID)
-		if err != nil || h.CancelReason != "cancelled via gate API" {
+		h, err := e.st.CancelHeldJob(e.ctx, held.ID, " stale round ")
+		if err != nil || h.CancelReason != "stale round" {
 			t.Fatalf("CancelHeldJob: %+v %v", h, err)
 		}
 		got := e.run(run.ID)
 		mustStatus(t, got, store.ChainRunStopped, store.ChainStopStepCancelled)
+		if !strings.Contains(got.StopDetail, "cancelled via gate API: stale round") {
+			t.Fatalf("stop detail %q", got.StopDetail)
+		}
 		if ns := e.notifications(run.ID); len(ns) != 1 || ns[0].Revision != got.Revision {
 			t.Fatalf("notification: %+v", ns)
 		}

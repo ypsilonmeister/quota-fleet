@@ -304,9 +304,12 @@ type HeldJob struct {
 	ErrorCount      int
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
-
-	// CancelReason records why a held entry was cancelled (docs/22 §5).
+	// CancelReason is the optional reason given when the entry was cancelled (the gate
+	// API body, or "chain cancelled" for a chain run cancel, docs/22 §5).
 	CancelReason string
+	// ParentStatus is the status of the job named by Payload.ParentID at read time.
+	// It is not stored on the held row; empty when there is no parent or no such job.
+	ParentStatus Status
 	// ChainRunID / ChainSeq identify the chain run step this hold belongs to (docs/22).
 	ChainRunID string
 	ChainSeq   int
