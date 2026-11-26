@@ -206,6 +206,15 @@ func TestBuildLaunchCommandEffortBeforeQuotedDoubleDash(t *testing.T) {
 		// Not a terminator after quote removal: the effort is appended as before.
 		{`codex exec --skip-git-repo-check '--x'`, `codex exec --skip-git-repo-check '--x' -c 'model_reasoning_effort=low' < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
 		{`codex exec --skip-git-repo-check '-- '`, `codex exec --skip-git-repo-check '-- ' -c 'model_reasoning_effort=low' < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		// Review round 3, item 8: a quoted argument with spaces is split by strings.Fields, and a
+		// `--` piece inside it is not a terminator. The effort goes before the standalone `--`.
+		{`codex exec --skip-git-repo-check --add-dir '/tmp/a -- b' "--"`, `codex exec --skip-git-repo-check --add-dir '/tmp/a -- b' -c 'model_reasoning_effort=low' "--" < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		{`codex exec --add-dir "/tmp/a -- b" --`, `codex exec --add-dir "/tmp/a -- b" -c 'model_reasoning_effort=low' -- < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		{`codex exec --add-dir /tmp/a\ -- b --`, `codex exec --add-dir /tmp/a\ -- b -c 'model_reasoning_effort=low' -- < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		{`codex exec --add-dir 'x '"-- y" '--'`, `codex exec --add-dir 'x '"-- y" -c 'model_reasoning_effort=low' '--' < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		{`codex exec --add-dir "it's -- here" --`, `codex exec --add-dir "it's -- here" -c 'model_reasoning_effort=low' -- < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		// Only a quoted `--`: no terminator, so the effort is appended.
+		{`codex exec --add-dir '/tmp/a -- b'`, `codex exec --add-dir '/tmp/a -- b' -c 'model_reasoning_effort=low' < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
 	}
 	sh, shErr := exec.LookPath("sh")
 	for _, c := range cases {
@@ -231,6 +240,23 @@ func TestBuildLaunchCommandEffortBeforeQuotedDoubleDash(t *testing.T) {
 			t.Fatalf("%s: sh: %v", c.launch, err)
 		}
 		argv := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+		// The template's own arguments must reach the CLI unchanged: the shell argv without the
+		// inserted effort pair equals the shell argv of the template alone.
+		tmplOut, err := exec.Command(sh, "-c", `printf '%s\n' `+strings.TrimPrefix(c.launch, "codex ")).Output()
+		if err != nil {
+			t.Fatalf("%s: sh: %v", c.launch, err)
+		}
+		var withoutEffort []string
+		for i := 0; i < len(argv); i++ {
+			if argv[i] == "-c" && i+1 < len(argv) && argv[i+1] == "model_reasoning_effort=low" {
+				i++
+				continue
+			}
+			withoutEffort = append(withoutEffort, argv[i])
+		}
+		if want := strings.Split(strings.TrimSuffix(string(tmplOut), "\n"), "\n"); strings.Join(withoutEffort, "\x00") != strings.Join(want, "\x00") {
+			t.Errorf("%s: shell argv %q changes the template's arguments %q", c.launch, argv, want)
+		}
 		effortAt, endAt := -1, -1
 		for i, a := range argv {
 			if a == "model_reasoning_effort=low" && effortAt < 0 {
@@ -327,5 +353,50 @@ func TestEffortProbe(t *testing.T) {
 	}
 	if err := codex.Classify(ExecResult{Output: "  -m, --model <MODEL>"}, nil); !errors.Is(err, ErrEffortUnsupported) {
 		t.Errorf("codex help without --config: %v", err)
+	}
+}
+
+func TestShellOptionEndIndex(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want int
+	}{
+		{`codex exec --`, 2},
+		{`codex exec --add-dir '/tmp/a -- b' "--"`, 6},
+		{`codex exec --add-dir '/tmp/a -- b'`, -1},
+		{`codex exec --add-dir "/tmp/a -- b" x`, -1},
+		{`codex exec --add-dir /tmp/a\ -- b`, -1},
+		{`codex exec "a\" -- b" --`, 5},
+		{`codex exec '-- x`, -1}, // unbalanced: never a terminator
+		{`codex -- '--'`, 1},
+	}
+	for _, c := range cases {
+		if got := shellOptionEndIndex(strings.Fields(c.cmd)); got != c.want {
+			t.Errorf("shellOptionEndIndex(%s) = %d, want %d", c.cmd, got, c.want)
+		}
+	}
+}
+
+// Review round 3, item 1: relative command paths depend on the launch directory.
+func TestIsRelativeCommandPath(t *testing.T) {
+	for exe, want := range map[string]bool{
+		"claude":                    false,
+		"claude.exe":                false,
+		"/usr/local/bin/claude":     false,
+		"~/bin/claude":              false,
+		`C:\Tools\claude.exe`:       false,
+		"C:/Tools/claude.exe":       false,
+		`\\server\share\claude.exe`: false,
+		"'/opt/my tools/claude'":    false,
+		"./claude":                  true,
+		"bin/claude":                true,
+		"../bin/claude":             true,
+		`.\claude.exe`:              true,
+		`tools\claude.exe`:          true,
+		`\tools\claude.exe`:         true, // root of the current drive
+	} {
+		if got := isRelativeCommandPath(exe); got != want {
+			t.Errorf("isRelativeCommandPath(%q) = %v, want %v", exe, got, want)
+		}
 	}
 }

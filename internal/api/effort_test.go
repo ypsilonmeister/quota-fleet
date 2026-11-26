@@ -173,13 +173,16 @@ func TestCreateJobEffortResponsePaths(t *testing.T) {
 // up and fails to reach any other host.
 type fakeHostAccess struct {
 	up map[string]bool
+	// dir is the directory host commands run in ("" = the test's working directory), like the
+	// SSH login directory of a real host, which is not the job's workdir.
+	dir string
 }
 
 func (f fakeHostAccess) FileAccessForHost(host string) (adapter.FileAccess, error) {
 	if !f.up[host] {
 		return nil, errors.New("ssh: connect to host " + host + ": connection refused")
 	}
-	return adapter.NewLocalFileAccess(""), nil
+	return adapter.NewLocalFileAccess(f.dir), nil
 }
 
 // writeFakeCLI writes an executable that prints help to stdout and appends a line to calls on
@@ -265,5 +268,65 @@ func TestCreateJobEffortHostCLIProbe(t *testing.T) {
 		if got := runs() - before; got != c.probes {
 			t.Errorf("%s: CLI ran %d times, want %d", c.id, got, c.probes)
 		}
+	}
+}
+
+// Review round 3, item 1: a relative command path (./claude, bin/claude) is resolved by the
+// launcher from the job's workdir (run.sh does `cd <workdir>` first), while the registration probe
+// runs in the host's login directory, so the probe could judge a different file. Such a command
+// is rejected at registration when the job has an effort, before any probe runs, in both
+// directions the reviewer reproduced:
+//   - the probe's directory has a CLI with --effort but the workdir's ./claude does not (was 201);
+//   - the probe's directory has no ./claude but the workdir's has --effort (was 400 "was not
+//     found", a wrong reason).
+func TestCreateJobEffortRelativeCommandRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake CLIs are shell scripts")
+	}
+	const supported = "Usage: claude [options]\n  --effort <level>  Effort level"
+	const legacy = "Usage: claude [options]\n  --model <model>  Model"
+	for _, c := range []struct {
+		name                    string
+		probeDirCLI, workdirCLI string // help text of ./claude in each directory ("" = absent)
+	}{
+		{"probe-dir-supported-workdir-legacy", supported, legacy},
+		{"probe-dir-missing-workdir-supported", "", supported},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			calls := filepath.Join(dir, "calls")
+			probeDir := filepath.Join(dir, "home")
+			workdir := filepath.Join(dir, "work")
+			for _, d := range []string{probeDir, workdir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if c.probeDirCLI != "" {
+				writeFakeCLI(t, filepath.Join(probeDir, "claude"), c.probeDirCLI, calls)
+			}
+			writeFakeCLI(t, filepath.Join(workdir, "claude"), c.workdirCLI, calls)
+
+			cfg := &config.Config{Hosts: map[string]config.HostConfig{
+				"rel":    {OS: "linux", Agents: map[string]config.HostAgentOverride{"claude": {Command: "./claude"}}},
+				"relsub": {OS: "linux", Agents: map[string]config.HostAgentOverride{"claude": {Command: "bin/claude"}}},
+			}}
+			_, _, ts := newTestServer(t, Options{InstanceID: "effort-rel", Config: cfg, Hosts: []string{"rel", "relsub"}, Agents: []string{"claude"},
+				HostAccess: fakeHostAccess{up: map[string]bool{"rel": true, "relsub": true}, dir: probeDir}})
+
+			for _, host := range []string{"rel", "relsub"} {
+				status, _, body := postJob(t, ts.URL, CreateJobRequest{RequestID: c.name + host, Title: "t", Agent: "claude", Host: host, Workdir: workdir, Effort: "high"})
+				if status != http.StatusBadRequest || !strings.Contains(body, "relative path") {
+					t.Errorf("%s: status=%d body=%s, want 400 naming the relative path", host, status, body)
+				}
+			}
+			if b, _ := os.ReadFile(calls); len(b) != 0 {
+				t.Errorf("a CLI was probed for a relative command: %q", b)
+			}
+			// Without an effort nothing is passed to the CLI, so the command is accepted as before.
+			if status, _, body := postJob(t, ts.URL, CreateJobRequest{RequestID: c.name + "-none", Title: "t", Agent: "claude", Host: "rel", Workdir: workdir}); status != http.StatusCreated {
+				t.Errorf("no effort: status=%d body=%s, want 201", status, body)
+			}
+		})
 	}
 }
