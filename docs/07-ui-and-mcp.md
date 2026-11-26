@@ -40,7 +40,7 @@ UI と MCP はこの原則の下に置く。具体化は次のとおり。
 - 保持エントリの表現（`GET /gate/held` の各要素と、`POST /jobs`・`DELETE /gate/held/{id}` が返す `held`）は、運用時の見分けのために次を含む（Issue #30）。
   - `held_at`: 保持された時刻（`created_at` と同じ値）。`held_seconds`: 保持されていた秒数。保持中は現在まで、解放・取消し後はその時点まで。
   - `parent_id` と `parent_status`: 親ジョブを指定した保持にだけ含む。`parent_status` は応答を作る時点の親の状態で、該当ジョブがなければ `not_found`。
-  - `cancel_reason`: `DELETE /gate/held/{id}` の任意の本文 `{"reason": "..."}` で渡した取消理由（2048 バイトまでで切り詰める）。理由なしの取消しと、この項目の追加より前の取消しでは省く。
+  - `cancel_reason`: `DELETE /gate/held/{id}` の任意の本文 `{"reason": "..."}` で渡した取消理由（2048 バイトまでで切り詰める）。理由なしの取消しと、この項目の追加より前の取消しでは省く。本文は省略するか、JSON オブジェクト 1 個だけにする。それ以外の本文は 400 になり、保持は取り消されない。
 - `GET /jobs` に `agent`、`host`、`q`（タイトル部分一致）、`parent_id` のフィルタを追加する（`status` 必須は維持）。
 - `GET /deliveries` に `status=undelivered|delivered|all` と `limit` を追加する。
 - `GET /gate/decisions` に `job_id`、`held_id`、`limit` のフィルタを追加する。

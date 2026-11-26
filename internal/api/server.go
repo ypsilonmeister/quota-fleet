@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -969,7 +970,7 @@ func (s *Server) handleCancelHeldJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ReasonRequest
-	if err := decodeJSON(w, r, &req, true); err != nil {
+	if err := decodeOptionalJSONObject(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1811,6 +1812,28 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, allowEmpty bool
 		if errors.Is(err, io.EOF) && allowEmpty {
 			return nil
 		}
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
+}
+
+// decodeOptionalJSONObject accepts an empty body, leaving dst unchanged, or a body that
+// is exactly one JSON object. Unlike decodeJSON it rejects null and trailing data.
+func decodeOptionalJSONObject(w http.ResponseWriter, r *http.Request, dst any) error {
+	if r.Body == nil {
+		return nil
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	if !bytes.HasPrefix(bytes.TrimLeft(body, " \t\r\n"), []byte("{")) {
+		return errors.New("invalid JSON body: want a JSON object")
+	}
+	if err := json.Unmarshal(body, dst); err != nil {
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil
