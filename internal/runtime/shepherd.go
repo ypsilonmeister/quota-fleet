@@ -47,8 +47,9 @@ type Shepherd struct {
 	maxEvalRetries int
 	logger         *log.Logger
 
-	evalMu       sync.Mutex
-	evalFailures map[int64]evalFailureState
+	evalMu          sync.Mutex
+	evalFailures    map[int64]evalFailureState
+	captureFailures map[int64]evalFailureState
 }
 
 // NewShepherd creates a new Shepherd.
@@ -204,7 +205,23 @@ func (s *Shepherd) finishExitedJob(ctx context.Context, job *store.Job, state ad
 			resultText := evalRes.FormatText()
 
 			if evalRes.Passed {
-				res, err := s.store.Complete(ctx, job.ID, job.ClaimedBy, resultText)
+				// docs/22 §7.1: a chain review step's verdict is captured with the same
+				// FileAccess and stored in the same transaction as the completion.
+				artifact, capErr := s.captureVerdict(ctx, job)
+				if capErr != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					count := s.recordCaptureFailure(job.ID, job.ClaimedBy)
+					s.logger.Printf("shepherd verdict capture error for job #%d (%d/%d): %v", job.ID, count, s.maxEvalRetries, capErr)
+					if count < s.maxEvalRetries {
+						return
+					}
+					artifact = s.verdictArtifact(job, store.ChainArtifactUnavailable,
+						fmt.Sprintf("verdict could not be read after %d attempts: %v", count, capErr))
+				}
+				s.clearCaptureFailure(job.ID)
+				res, err := s.store.CompleteWithArtifact(ctx, job.ID, job.ClaimedBy, resultText, artifact)
 				if err != nil {
 					if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
 						// Lost ownership; stop before delivery per docs/02-job-model.md.

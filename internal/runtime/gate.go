@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -119,22 +120,38 @@ func (g *GateChecker) CheckOnce(ctx context.Context) error {
 	if !g.Enabled() {
 		return nil
 	}
-	heldList, err := g.store.ListHeldJobs(ctx, store.HeldStatusHeld, store.MaxListLimit)
-	if err != nil {
-		return fmt.Errorf("list held jobs: %w", err)
-	}
-	if len(heldList) == 0 {
-		return nil
-	}
-
-	snap, snapErr := g.loadSnapshot()
-	for _, held := range heldList {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	// docs/22 §5.1 (F7'): walk every page so an exhausted hold at the head of the list
+	// cannot hide the holds behind it. The snapshot is loaded once, lazily.
+	var (
+		snap     *quota.Snapshot
+		snapErr  error
+		snapRead bool
+		cursor   string
+	)
+	for {
+		page, err := g.store.ListHeldJobsPage(ctx, store.ListHeldJobsFilter{
+			Status: store.HeldStatusHeld,
+			Cursor: cursor,
+			Limit:  store.MaxListLimit,
+		})
+		if err != nil {
+			return fmt.Errorf("list held jobs: %w", err)
 		}
-		_, _ = g.tryReleaseHeld(ctx, held, snap, snapErr)
+		if len(page.Held) > 0 && !snapRead {
+			snap, snapErr = g.loadSnapshot()
+			snapRead = true
+		}
+		for _, held := range page.Held {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			_, _ = g.tryReleaseHeld(ctx, held, snap, snapErr)
+		}
+		if !page.HasMore || page.NextCursor == "" {
+			return nil
+		}
+		cursor = page.NextCursor
 	}
-	return nil
 }
 
 // ReleaseByID manually re-evaluates and attempts to release a single held job by ID.
@@ -189,66 +206,79 @@ func (g *GateChecker) tryReleaseHeld(
 		}, nil
 	}
 
-	// Build CreateJobParams using the held payload and the selected soonest-reset pool,
-	// preserving request_id for idempotent job creation.
-	params := held.Payload
-	params.RequestID = held.RequestID
-	params.Pool = eval.SelectedPool
-
-	job, created, err := g.store.CreateJob(ctx, params)
+	// docs/22 §5.1: create the job, mark the hold released, link a chain step and record
+	// the gate decision in one transaction. A cancel that committed first makes this a
+	// no-op (ErrConflict); a hold whose chain run is over is cancelled instead.
+	out, err := g.store.ReleaseHeld(ctx, store.ReleaseHeldParams{
+		HeldID:       held.ID,
+		SelectedPool: eval.SelectedPool,
+		Gate: &store.GateDecision{
+			Mode:          config.GateModeEnforce,
+			RequestedPool: eval.RequestedPool,
+			AltPools:      eval.AltPools,
+			Decision:      string(eval.Decision),
+			BlockedBy:     eval.BlockedBy,
+			SelectedPool:  eval.SelectedPool,
+			Bypassed:      eval.Bypassed,
+			Reason:        eval.Reason,
+			MeasuredAt:    eval.MeasuredAt,
+			DecidedAt:     eval.DecidedAt,
+		},
+	})
 	if err != nil {
-		updatedHeld, isNew, recErr := g.store.RecordHeldReleaseError(ctx, held.ID, err.Error())
-		if recErr != nil {
-			g.logger.Printf("WARNING: failed to record release error on held %s: %v", held.ID, recErr)
-			updatedHeld = held
-		} else if isNew {
-			g.logger.Printf("WARNING: gate release failed for held %s (selected_pool=%s): %v", held.ID, eval.SelectedPool, err)
-		}
-		return &ReleaseResult{
-			Held:         updatedHeld,
-			Released:     false,
-			SelectedPool: eval.SelectedPool,
-			Evaluation:   eval,
-			Reason:       err.Error(),
-		}, err
-	}
-
-	updatedHeld, err := g.store.MarkHeldReleased(ctx, held.ID, job.ID, eval.SelectedPool)
-	if err != nil {
-		g.logger.Printf("WARNING: created job #%d for held %s but failed to mark released: %v", job.ID, held.ID, err)
-		return &ReleaseResult{
+		res := &ReleaseResult{
 			Held:         held,
-			Job:          job,
-			Created:      created,
 			Released:     false,
 			SelectedPool: eval.SelectedPool,
 			Evaluation:   eval,
 			Reason:       err.Error(),
-		}, err
+		}
+		if out != nil && out.Held != nil {
+			res.Held = out.Held
+		}
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+			return res, err
+		}
+		// Transient (DB) error: nothing was written. Outside a chain keep recording it on
+		// the hold as before; a chain hold's last_error means "permanent" (R9), so only log.
+		if held.ChainRunID == "" {
+			updatedHeld, isNew, recErr := g.store.RecordHeldReleaseError(ctx, held.ID, err.Error())
+			if recErr != nil {
+				g.logger.Printf("WARNING: failed to record release error on held %s: %v", held.ID, recErr)
+			} else {
+				res.Held = updatedHeld
+				if isNew {
+					g.logger.Printf("WARNING: gate release failed for held %s (selected_pool=%s): %v", held.ID, eval.SelectedPool, err)
+				}
+			}
+		} else {
+			g.logger.Printf("WARNING: gate release of chain held %s failed (will retry): %v", held.ID, err)
+		}
+		return res, err
 	}
-
-	if _, derr := g.store.RecordGateDecision(ctx, store.GateDecision{
-		JobID:         job.ID,
-		HeldID:        held.ID,
-		Held:          false,
-		Mode:          config.GateModeEnforce,
-		RequestedPool: eval.RequestedPool,
-		AltPools:      eval.AltPools,
-		Decision:      string(eval.Decision),
-		BlockedBy:     eval.BlockedBy,
-		SelectedPool:  eval.SelectedPool,
-		Bypassed:      eval.Bypassed,
-		Reason:        eval.Reason,
-		MeasuredAt:    eval.MeasuredAt,
-		DecidedAt:     eval.DecidedAt,
-	}); derr != nil {
-		g.logger.Printf("WARNING: failed to record release gate decision for held %s -> job #%d: %v", held.ID, job.ID, derr)
+	if out.CancelledForChain {
+		return &ReleaseResult{
+			Held:         out.Held,
+			Released:     false,
+			SelectedPool: eval.SelectedPool,
+			Evaluation:   eval,
+			Reason:       fmt.Sprintf("held job %s was cancelled because its chain run is no longer running (%s)", held.ID, out.Held.CancelReason),
+		}, fmt.Errorf("%w: held job %s belongs to a chain run that is no longer running", store.ErrConflict, held.ID)
 	}
-
+	if out.PermanentErr != nil {
+		g.logger.Printf("WARNING: gate release failed permanently for held %s (selected_pool=%s): %v", held.ID, eval.SelectedPool, out.PermanentErr)
+		return &ReleaseResult{
+			Held:         out.Held,
+			Released:     false,
+			SelectedPool: eval.SelectedPool,
+			Evaluation:   eval,
+			Reason:       out.PermanentErr.Error(),
+		}, out.PermanentErr
+	}
 	return &ReleaseResult{
-		Held:         updatedHeld,
-		Job:          job,
-		Created:      created,
+		Held:         out.Held,
+		Job:          out.Job,
+		Created:      out.Created,
 		Released:     true,
 		SelectedPool: eval.SelectedPool,
 		Evaluation:   eval,

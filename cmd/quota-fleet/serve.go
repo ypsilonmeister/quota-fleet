@@ -181,6 +181,9 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		ModelsCheckInterval: cfg.EffectiveModelsCheckInterval(),
 		Pools:               cfg.Pools,
 		Logger:              logger,
+		SelectorMode:        cfg.Selector.EffectiveMode(),
+		ChainSweepInterval:  cfg.EffectiveChainSweepInterval(),
+		ChainStallAfter:     cfg.Chains.EffectiveStallAfter(),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "init runtime failed: %v\n", err)
@@ -227,8 +230,12 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		Agents:           cfg.AllAgents(),
 		Config:           cfg,
 		GateReleaser:     gateReleaserAdapter{checker: rt.GateChecker},
-		AgentChecker:     rt.AgentChecker,
-		HostAccess:       hostAccess,
+		Chains: api.ChainOptions{
+			MaxRoundsCap:     cfg.Chains.EffectiveMaxRoundsCap(),
+			DriverStaleAfter: 3 * cfg.EffectiveChainSweepInterval(),
+		},
+		AgentChecker: rt.AgentChecker,
+		HostAccess:   hostAccess,
 	})
 
 	httpSrv := &http.Server{

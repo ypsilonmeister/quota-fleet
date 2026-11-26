@@ -43,6 +43,10 @@ type JobDTO struct {
 
 	// Effort is the per-job reasoning effort (docs/21); omitted when unset (agent default).
 	Effort string `json:"effort,omitempty"`
+
+	// ChainRunID / ChainSeq identify the chain run step this job belongs to (docs/22).
+	ChainRunID string `json:"chain_run_id,omitempty"`
+	ChainSeq   int    `json:"chain_seq,omitempty"`
 }
 
 func toJobDTO(j *store.Job) *JobDTO {
@@ -84,6 +88,8 @@ func toJobDTO(j *store.Job) *JobDTO {
 	dto.SelectionReason = j.SelectionReason
 	dto.SelectionMode = j.SelectionMode
 	dto.Effort = j.Effort
+	dto.ChainRunID = j.ChainRunID
+	dto.ChainSeq = j.ChainSeq
 	return dto
 }
 
@@ -218,6 +224,8 @@ type StatusResponse struct {
 	InstanceID string           `json:"instance_id"`
 	Counts     map[string]int64 `json:"counts"`
 	Total      int64            `json:"total"`
+	// Chains summarizes chain runs and the Chain Driver (docs/22 §6, §8).
+	Chains *ChainStatusDTO `json:"chains,omitempty"`
 }
 
 // DeliveriesResponse is returned by GET /deliveries.
@@ -263,6 +271,9 @@ type HeldJobDTO struct {
 	ErrorCount      int                   `json:"error_count,omitempty"`
 	CreatedAt       time.Time             `json:"created_at"`
 	UpdatedAt       time.Time             `json:"updated_at"`
+	CancelReason    string                `json:"cancel_reason,omitempty"`
+	ChainRunID      string                `json:"chain_run_id,omitempty"`
+	ChainSeq        int                   `json:"chain_seq,omitempty"`
 }
 
 func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
@@ -289,6 +300,9 @@ func toHeldJobDTO(h *store.HeldJob) *HeldJobDTO {
 	if len(h.AltPools) > 0 {
 		dto.AltPools = append([]string(nil), h.AltPools...)
 	}
+	dto.CancelReason = h.CancelReason
+	dto.ChainRunID = h.ChainRunID
+	dto.ChainSeq = h.ChainSeq
 	return dto
 }
 

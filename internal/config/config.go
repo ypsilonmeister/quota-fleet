@@ -116,6 +116,49 @@ type Config struct {
 	ReviewGate          ReviewGateConfig       `yaml:"review_gate"`
 	Notifier            NotifierConfig         `yaml:"notifier"`
 	Selector            SelectorConfig         `yaml:"selector"`
+	Chains              ChainsConfig           `yaml:"chains"`
+}
+
+// Chain run defaults (docs/22).
+const (
+	// DefaultChainStallAfter is how long a step may wait before chain_stalled is reported
+	// (reported only; the run is not stopped).
+	DefaultChainStallAfter = 24 * time.Hour
+	// DefaultChainMaxRoundsCap is the server cap on max_rounds.
+	DefaultChainMaxRoundsCap = 10
+	// MaxChainMaxRoundsCap bounds chains.max_rounds_cap itself.
+	MaxChainMaxRoundsCap = 100
+)
+
+// ChainsConfig configures chain runs and the Chain Driver (docs/22).
+type ChainsConfig struct {
+	// SweepInterval is the Chain Driver period; empty uses runtime.shepherd_interval.
+	SweepInterval string `yaml:"sweep_interval"`
+	// StallAfter reports a step that has not finished for this long (default 24h).
+	StallAfter string `yaml:"stall_after"`
+	// MaxRoundsCap rejects max_rounds above it (default 10).
+	MaxRoundsCap int `yaml:"max_rounds_cap"`
+}
+
+// EffectiveChainSweepInterval returns chains.sweep_interval or the Shepherd interval.
+func (c *Config) EffectiveChainSweepInterval() time.Duration {
+	if c == nil {
+		return DefaultShepherdInterval
+	}
+	return parseDurationOrDefault(c.Chains.SweepInterval, c.Runtime.EffectiveShepherdInterval())
+}
+
+// EffectiveStallAfter returns chains.stall_after or DefaultChainStallAfter.
+func (c ChainsConfig) EffectiveStallAfter() time.Duration {
+	return parseDurationOrDefault(c.StallAfter, DefaultChainStallAfter)
+}
+
+// EffectiveMaxRoundsCap returns chains.max_rounds_cap or DefaultChainMaxRoundsCap.
+func (c ChainsConfig) EffectiveMaxRoundsCap() int {
+	if c.MaxRoundsCap <= 0 {
+		return DefaultChainMaxRoundsCap
+	}
+	return c.MaxRoundsCap
 }
 
 // EffectiveAgentsCheckInterval returns the configured periodic agent version probe interval.
@@ -766,6 +809,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Runtime.SignalMaxBytes < 0 {
 		errs = append(errs, fmt.Errorf("runtime.signal_max_bytes must be >= 0 (got %d)", c.Runtime.SignalMaxBytes))
+	}
+
+	if err := validatePositiveDuration("chains.sweep_interval", c.Chains.SweepInterval); err != nil {
+		errs = append(errs, err)
+	}
+	if err := validatePositiveDuration("chains.stall_after", c.Chains.StallAfter); err != nil {
+		errs = append(errs, err)
+	}
+	if c.Chains.MaxRoundsCap < 0 || c.Chains.MaxRoundsCap > MaxChainMaxRoundsCap {
+		errs = append(errs, fmt.Errorf("chains.max_rounds_cap must be between 1 and %d (got %d)", MaxChainMaxRoundsCap, c.Chains.MaxRoundsCap))
 	}
 
 	if err := validatePositiveDuration("quota.stale_after", c.Quota.StaleAfter); err != nil {

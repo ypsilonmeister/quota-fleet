@@ -100,6 +100,11 @@ type Job struct {
 
 	// Effort is the per-job reasoning effort (docs/21). Empty means the agent's default.
 	Effort string
+
+	// ChainRunID / ChainSeq identify the chain run step this job belongs to (docs/22).
+	// Empty / 0 for jobs outside a chain run.
+	ChainRunID string
+	ChainSeq   int
 }
 
 // CreateJobParams holds input fields for CreateJob.
@@ -299,6 +304,12 @@ type HeldJob struct {
 	ErrorCount      int
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+
+	// CancelReason records why a held entry was cancelled (docs/22 §5).
+	CancelReason string
+	// ChainRunID / ChainSeq identify the chain run step this hold belongs to (docs/22).
+	ChainRunID string
+	ChainSeq   int
 }
 
 // HoldJobParams holds input fields for HoldJob.
