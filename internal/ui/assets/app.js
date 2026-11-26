@@ -766,6 +766,38 @@
     return String(n).padStart(2, "0");
   }
 
+  function formatUtcOffset(date) {
+    const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+    const offsetMin = -d.getTimezoneOffset();
+    if (offsetMin === 0) {
+      return "UTC";
+    }
+    const sign = offsetMin > 0 ? "+" : "-";
+    const abs = Math.abs(offsetMin);
+    return "UTC" + sign + pad2(Math.floor(abs / 60)) + ":" + pad2(abs % 60);
+  }
+
+  function getDisplayTimeZone(refDate) {
+    try {
+      if (typeof Intl !== "undefined" && Intl && typeof Intl.DateTimeFormat === "function") {
+        const resolved = Intl.DateTimeFormat().resolvedOptions();
+        if (resolved && typeof resolved.timeZone === "string" && resolved.timeZone.trim() !== "") {
+          const tz = resolved.timeZone.trim();
+          if (tz === "Etc/UTC" || tz === "Etc/GMT" || tz === "GMT" || tz === "+00:00" || tz === "-00:00") {
+            return "UTC";
+          }
+          if (tz.indexOf("Etc/GMT") === 0 || /^[+-]\d{2}:\d{2}$/.test(tz)) {
+            return formatUtcOffset(refDate);
+          }
+          return tz;
+        }
+      }
+    } catch (_err) {
+      // Fall through to numeric UTC offset below.
+    }
+    return formatUtcOffset(refDate);
+  }
+
   function formatWeeklyResetTime(iso) {
     if (typeof iso !== "string" || iso.trim() === "") {
       return "";
@@ -821,7 +853,16 @@
       shortMissing = true;
     }
 
+    const hasFormattedTime = Boolean(weeklyFormatted || shortFormatted);
+    const refIso = weeklyFormatted ? weeklyRaw : (shortFormatted ? shortRaw : "");
+    const timeZone = hasFormattedTime ? getDisplayTimeZone(refIso ? new Date(refIso) : new Date()) : "";
+    const labelText = timeZone
+      ? t("dashboard.resetLabelWithTz", { tz: timeZone })
+      : t("dashboard.resetLabel");
+
     return {
+      labelText: labelText,
+      timeZone: timeZone,
       weeklyText: weeklyText,
       weeklyMissing: weeklyMissing,
       weeklyRaw: weeklyFormatted ? weeklyRaw : "",
@@ -853,6 +894,7 @@
       matchesModelFamily: matchesModelFamily,
       derivePoolForSelection: derivePoolForSelection,
       formatDerivedPoolLabel: formatDerivedPoolLabel,
+      getDisplayTimeZone: getDisplayTimeZone,
       formatWeeklyResetTime: formatWeeklyResetTime,
       formatShortResetTime: formatShortResetTime,
       formatPoolResetLabels: formatPoolResetLabels
@@ -1428,7 +1470,10 @@
           }
           const resets = formatPoolResetLabels(ps);
           lines.push(el("div", { className: "pool-resets small" }, [
-            el("span", { className: "pool-reset-label", text: L("dashboard.resetLabel") }),
+            el("span", {
+              className: "pool-reset-label",
+              text: function () { return formatPoolResetLabels(ps).labelText; }
+            }),
             el("span", {
               className: resets.weeklyMissing ? "pool-reset-item is-missing" : "pool-reset-item mono",
               title: resets.weeklyRaw || null,

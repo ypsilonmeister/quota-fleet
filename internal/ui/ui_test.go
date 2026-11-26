@@ -914,6 +914,7 @@ console.log("ALL_UI_MODELS_TESTS_PASSED");
 func TestUIPoolResetTimesAssetsAndLogicWithNode(t *testing.T) {
 	js := string(appJS)
 	for _, token := range []string{
+		"getDisplayTimeZone",
 		"formatWeeklyResetTime",
 		"formatShortResetTime",
 		"formatPoolResetLabels",
@@ -922,6 +923,8 @@ func TestUIPoolResetTimesAssetsAndLogicWithNode(t *testing.T) {
 		"pool-reset-item",
 		`L("dashboard.resetLabel")`,
 		`L("dashboard.resetNone")`,
+		"dashboard.resetLabelWithTz",
+		"formatPoolResetLabels(ps).labelText",
 	} {
 		if !strings.Contains(js, token) {
 			t.Errorf("app.js missing expected pool reset time token %q", token)
@@ -930,6 +933,7 @@ func TestUIPoolResetTimesAssetsAndLogicWithNode(t *testing.T) {
 
 	assertJapaneseMessages(t, map[string]string{
 		"dashboard.resetLabel":              "リセット:",
+		"dashboard.resetLabelWithTz":        "リセット ({tz}):",
 		"dashboard.resetNone":               "なし",
 		"dashboard.weeklyReset":             "週次 {time}",
 		"dashboard.weeklyResetMissing":      "週次 なし",
@@ -980,6 +984,8 @@ const both = ui.formatPoolResetLabels({
   weekly_reset_at: "2026-11-26T20:00:00+09:00",
   short_reset_at: "2026-11-23T14:30:00+09:00"
 });
+assert.strictEqual(both.timeZone, "Asia/Tokyo");
+assert.strictEqual(both.labelText, "リセット (Asia/Tokyo):");
 assert.strictEqual(both.weeklyText, "週次 11/26 20:00");
 assert.strictEqual(both.weeklyMissing, false);
 assert.strictEqual(both.weeklyRaw, "2026-11-26T20:00:00+09:00");
@@ -987,10 +993,20 @@ assert.strictEqual(both.shortText, "5h 14:30");
 assert.strictEqual(both.shortMissing, false);
 assert.strictEqual(both.shortRaw, "2026-11-23T14:30:00+09:00");
 
+const jstMidnightBoundary = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T01:32:24+09:00",
+  short_reset_at: "2026-11-27T05:07:00+09:00"
+});
+assert.strictEqual(jstMidnightBoundary.labelText, "リセット (Asia/Tokyo):");
+assert.strictEqual(jstMidnightBoundary.weeklyText, "週次 11/26 01:32");
+assert.strictEqual(jstMidnightBoundary.shortText, "5h 05:07");
+
 const altNoShort = ui.formatPoolResetLabels({
   weekly_reset_at: "2026-11-26T01:32:24+09:00",
   short_reset_at: null
 });
+assert.strictEqual(altNoShort.timeZone, "Asia/Tokyo");
+assert.strictEqual(altNoShort.labelText, "リセット (Asia/Tokyo):");
 assert.strictEqual(altNoShort.weeklyText, "週次 11/26 01:32");
 assert.strictEqual(altNoShort.weeklyMissing, false);
 assert.strictEqual(altNoShort.shortText, "5h なし");
@@ -998,6 +1014,8 @@ assert.strictEqual(altNoShort.shortMissing, true);
 assert.strictEqual(altNoShort.shortRaw, "");
 
 const none = ui.formatPoolResetLabels({});
+assert.strictEqual(none.timeZone, "");
+assert.strictEqual(none.labelText, "リセット:");
 assert.strictEqual(none.weeklyText, "週次 なし");
 assert.strictEqual(none.weeklyMissing, true);
 assert.strictEqual(none.shortText, "5h なし");
@@ -1008,6 +1026,7 @@ const weeklyOnly = ui.formatPoolResetLabels({
   weekly_reset_at_approx: true,
   short_applicable: false
 });
+assert.strictEqual(weeklyOnly.labelText, "リセット (Asia/Tokyo):");
 assert.strictEqual(weeklyOnly.weeklyText, "週次 ~12/3 09:00");
 assert.strictEqual(weeklyOnly.weeklyMissing, false);
 assert.strictEqual(weeklyOnly.shortText, "5h 対象外");
@@ -1024,10 +1043,13 @@ assert.strictEqual(customWin.shortText, "1h ~08:29");
 
 // 3. EN locale output
 i18n.setLocale("en", false);
-assert.strictEqual(ui.formatPoolResetLabels({
+const enBoth = ui.formatPoolResetLabels({
   weekly_reset_at: "2026-11-26T20:00:00+09:00",
   short_reset_at: "2026-11-23T14:30:00+09:00"
-}).weeklyText, "Weekly 11/26 20:00");
+});
+assert.strictEqual(enBoth.labelText, "Reset (Asia/Tokyo):");
+assert.strictEqual(enBoth.weeklyText, "Weekly 11/26 20:00");
+assert.strictEqual(ui.formatPoolResetLabels({}).labelText, "Reset:");
 assert.strictEqual(ui.formatPoolResetLabels({}).weeklyText, "Weekly none");
 assert.strictEqual(ui.formatPoolResetLabels({}).shortText, "5h none");
 assert.strictEqual(ui.formatPoolResetLabels({ short_applicable: false }).shortText, "5h N/A");
@@ -1041,11 +1063,39 @@ console.log("ALL_UI_POOL_RESET_JST_TESTS_PASSED");
 		t.Fatalf("node pool reset JST tests failed: %v\n%s", err, string(outJST))
 	}
 
+	// Non-JST (UTC): JST ISO inputs cross the date boundary and display UTC explicitly on the label.
 	scriptUTC := `
 const assert = require("assert");
+const i18n = require("./assets/i18n.js");
 const ui = require("./assets/app.js");
+
 assert.strictEqual(ui.formatWeeklyResetTime("2026-12-03T11:00:00Z"), "12/3 11:00");
 assert.strictEqual(ui.formatShortResetTime("2026-11-26T22:54:25Z"), "22:54");
+
+const crossedJA = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T01:32:24+09:00",
+  short_reset_at: "2026-11-27T05:07:00+09:00"
+});
+assert.strictEqual(crossedJA.timeZone, "UTC");
+assert.strictEqual(crossedJA.labelText, "リセット (UTC):");
+assert.strictEqual(crossedJA.weeklyText, "週次 11/25 16:32");
+assert.strictEqual(crossedJA.weeklyRaw, "2026-11-26T01:32:24+09:00");
+assert.strictEqual(crossedJA.shortText, "5h 20:07");
+assert.strictEqual(crossedJA.shortRaw, "2026-11-27T05:07:00+09:00");
+
+i18n.setLocale("en", false);
+const crossedEN = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T01:32:24+09:00",
+  short_reset_at: "2026-11-27T05:07:00+09:00"
+});
+assert.strictEqual(crossedEN.labelText, "Reset (UTC):");
+assert.strictEqual(crossedEN.weeklyText, "Weekly 11/25 16:32");
+assert.strictEqual(crossedEN.shortText, "5h 20:07");
+
+const missingEN = ui.formatPoolResetLabels({});
+assert.strictEqual(missingEN.timeZone, "");
+assert.strictEqual(missingEN.labelText, "Reset:");
+
 console.log("ALL_UI_POOL_RESET_UTC_TESTS_PASSED");
 `
 	cmdUTC := exec.Command(nodeBin, "-e", scriptUTC)
@@ -1053,5 +1103,53 @@ console.log("ALL_UI_POOL_RESET_UTC_TESTS_PASSED");
 	outUTC, err := cmdUTC.CombinedOutput()
 	if err != nil || !strings.Contains(string(outUTC), "ALL_UI_POOL_RESET_UTC_TESTS_PASSED") {
 		t.Fatalf("node pool reset UTC tests failed: %v\n%s", err, string(outUTC))
+	}
+
+	// Non-JST (America/New_York): JST ISO input crosses the date boundary with IANA timezone shown.
+	scriptNY := `
+const assert = require("assert");
+const ui = require("./assets/app.js");
+
+const crossedNY = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T01:32:24+09:00",
+  short_reset_at: "2026-11-27T05:07:00+09:00"
+});
+assert.strictEqual(crossedNY.timeZone, "America/New_York");
+assert.strictEqual(crossedNY.labelText, "リセット (America/New_York):");
+assert.strictEqual(crossedNY.weeklyText, "週次 11/25 11:32");
+assert.strictEqual(crossedNY.shortText, "5h 15:07");
+
+console.log("ALL_UI_POOL_RESET_NY_TESTS_PASSED");
+`
+	cmdNY := exec.Command(nodeBin, "-e", scriptNY)
+	cmdNY.Env = append(os.Environ(), "TZ=America/New_York")
+	outNY, err := cmdNY.CombinedOutput()
+	if err != nil || !strings.Contains(string(outNY), "ALL_UI_POOL_RESET_NY_TESTS_PASSED") {
+		t.Fatalf("node pool reset America/New_York tests failed: %v\n%s", err, string(outNY))
+	}
+
+	// POSIX / Etc/GMT fallback normalizes to readable UTC offset (no inverted Etc/GMT sign).
+	for _, tz := range []string{"JST-9", "Etc/GMT-9"} {
+		scriptFallback := `
+const assert = require("assert");
+const ui = require("./assets/app.js");
+
+const res = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T01:32:24+09:00",
+  short_reset_at: "2026-11-27T05:07:00+09:00"
+});
+assert.strictEqual(res.timeZone, "UTC+09:00");
+assert.strictEqual(res.labelText, "リセット (UTC+09:00):");
+assert.strictEqual(res.weeklyText, "週次 11/26 01:32");
+assert.strictEqual(res.shortText, "5h 05:07");
+
+console.log("ALL_UI_POOL_RESET_FALLBACK_TESTS_PASSED");
+`
+		cmdFallback := exec.Command(nodeBin, "-e", scriptFallback)
+		cmdFallback.Env = append(os.Environ(), "TZ="+tz)
+		outFallback, err := cmdFallback.CombinedOutput()
+		if err != nil || !strings.Contains(string(outFallback), "ALL_UI_POOL_RESET_FALLBACK_TESTS_PASSED") {
+			t.Fatalf("node pool reset fallback test (TZ=%s) failed: %v\n%s", tz, err, string(outFallback))
+		}
 	}
 }
