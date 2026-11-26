@@ -28,7 +28,7 @@ title: "#26 チェーン自己駆動化"
 scope: ypsilonmeister/quota-fleet#26   # 表示・検索用
 max_rounds: 3                    # 省略時 3。chains.max_rounds_cap（既定 10）を超えると 400
 start: implement                 # C1 は implement だけ（review / fix は 400）
-workspace: {host: ..., workdir: ...}   # または worktree_spec。全工程で共有
+workspace: {host: ..., workdir: ..., worktree_spec: ...}   # workdir は必須。全工程で同じ workdir を使う
 steps:
   implement: {title: ..., agent: codex, model: ..., instructions: ..., acceptance_criteria: ...}
   review:    {title: ..., agent: claude, instructions: "... {{verdict.path}} ... {{verdict.nonce}} ...", ...}
@@ -37,6 +37,7 @@ steps:
 ```
 
 - 工程の雛形に書けるのは `title`・`agent`（必須）・`model`・`pool`・`alt_pools`・`instructions`・`acceptance_criteria`・`target_ref` だけ。それ以外のキー（`request_id`・`parent_id`・`draft`・`workdir` など）は **400**（未知キーを拒否するデコード）。
+- `workspace.workdir` は必須（`worktree_spec` だけの定義は 400）。workdir が空のジョブは Adapter が `WorkdirRoot/job-<id>` を工程ごとに割り当てるため、`worktree_spec` だけでは工程ごとに別の worktree になり、implement の変更を review が見られない。`worktree_spec` を併記した場合、最初の工程が workdir に worktree を作り、後続の工程は既存の worktree（`<workdir>/.git`）をそのまま使う。
 - 変数は `{{round}}`・`{{prev.job_id}}`・`{{run.id}}`・`{{run.scope}}`、review だけ `{{verdict.path}}`・`{{verdict.nonce}}`、fix と publish だけ `{{verdict.reviewed_commit}}`。未知・その工程で使えない変数は登録時に 400（生成時も同じ `chain.Expand` を通る）。
 - **review の instructions には `{{verdict.path}}` と `{{verdict.nonce}}` が必須**（v2 に無い追加の検証。書けないと必ず `verdict_unavailable` で止まるため）。
 - 上限: 本文 64 KiB、`instructions` 1 本 32 KiB。
@@ -64,6 +65,8 @@ Driver は 1 run について:
 | ポインタだけ進んで工程が欠落する | `.../a failure inside the transaction leaves neither pointer nor step`（同じキーの保持行を割り込ませると、ポインタも工程もジョブも残らない。行を消すと収束） |
 | cancel の後に古い実行が進める | `.../cancel between read and commit` |
 | 初回作成で run だけ・ジョブだけが残る | `.../initial registration is one transaction and idempotent` |
+| 書き込みの途中（ジョブ/保持・Outbox・Gate 記録・工程履歴の後、ポインタ更新の後、停止と通知行の後、解放のリンク後、初回作成の後）で失敗する | `TestChainFaultAfterWritesRollsBackEverything`（`Store.SetChainFaultHookForTest` で各点にエラーを注入し、全テーブルの件数と run の行が注入前と一致すること、フックを外すと収束することを確認） |
+| 2 つのプロセス（別々の書き込み接続）が同じ run を駆動する | `TestChainDoubleDriveTwoConnections`（同じ DB ファイルに 2 つの Store を開き、片方の読み取りとコミットの間に他方を割り込ませる決定的な順序と、15 回の同時実行。seq 2 の工程・ジョブ・Outbox がそれぞれ 1 行） |
 
 指紋の照合とトランザクション内の再判定は二重の歯止めで、片方だけを外しても上の多くの反例は他方で止まる。両方を外すと保持/実ジョブの二重駆動と verdict の反例が落ちることを確認した。
 
@@ -73,9 +76,10 @@ Driver は 1 run について:
 - run が終端なら保持を `cancelled`（`cancel_reason = 'chain <status>'`）にしてジョブは作らない。
 - 親が無い・終端・入力不正などの**恒久的な**エラーは held の `last_error` に記録し、チェーンなら同じトランザクションで `stopped: release_failed` と通知行を書く。枠待ち（not releasable）は `ReleaseHeld` に来ないので区別される。一時的な DB エラーはロールバックし、チェーン外の保持では従来どおり `last_error` に記録、チェーンの保持では記録しない（`last_error` は R9 で「恒久」と解釈するため）。
 - `CheckOnce` はキーセットで全ページを巡回する（先頭 200 件が枯渇で残っても後ろを判定する）。
-- `POST /chains/{id}/cancel`: run を `cancelled`。現在工程が held なら `cancelled`（`chain cancelled`）、draft/queued/waiting のジョブなら既存の `Cancel` と同じ書き込み（波及を含む）。**claimed のジョブは止めず**、応答の `running_job_id` と `warning` で知らせる。冪等（既に cancelled なら 200 と `already_cancelled: true`）。operate、または run を登録したトークンに許可。
+- `POST /chains/{id}/cancel`: run を `cancelled`。現在工程が held なら `cancelled`（`chain cancelled`）、draft/queued/waiting のジョブなら既存の `Cancel` と同じ書き込み（波及を含む）。解放済みで `chain_steps.job_id` がまだ NULL（R10 の状態）なら、解放先のジョブを同じ扱いにする。対象のジョブは §6 の所属検証を通ったものだけで、通らなければ触らない（`CancelChainRunResult.Inconsistency`）。**claimed のジョブは止めず**、応答の `running_job_id` と `warning` で知らせる。冪等（既に cancelled なら 200 と `already_cancelled: true`）。operate、または run を登録したトークンに許可。
 - `DELETE /gate/held/{id}`: `cancel_reason = 'cancelled via gate API'`。チェーンの現在工程なら同じトランザクションで `stopped: step_cancelled` と通知行。
-- `POST /jobs/{id}/requeue` はチェーンのジョブに **409**（`chain-managed job; register a new chain run`）。`reset`・worker の complete/fail などは従来どおり。
+- `POST /jobs/{id}/requeue` はチェーンのジョブに **409**（`chain-managed job; register a new chain run`）。worker の complete/fail などは従来どおり。
+- `Store.Reset`（Reconciler の自動 reset と `POST /jobs/{id}/reset`）は、run が running ならチェーンのジョブも従来どおり queued に戻す。run が終端（cancelled / stopped / completed）なら、**同じトランザクションで claimed → cancelled** にし（`last_error = chain run is <status>; not reset to queued`）、再び claim できる状態にしない。Reconciler はこの場合 `stale_claimed_cancelled` を報告する（`TestChainResetAfterCancelDoesNotRequeue`）。
 
 `TestChainReleaseHeldVersusCancel` が「取消が先」「解放が先」「同時実行 25 回（不変条件: cancelled の run に生きたジョブが残らない）」「claim 済みを止めない」「DELETE /gate/held」「停止済み run の保持の解放」「恒久エラーと枠待ちの区別」を、`TestGateCheckerCheckOnceWalksAllPages` が 200 件超の巡回を固定する。
 
@@ -94,25 +98,27 @@ Driver は 1 run について:
 | R7 | cancelled | `step_cancelled` |
 | R8 | 保持 held、`last_error` なし | 待つ（R1 と同じ停滞報告） |
 | R9 | 保持 held、`last_error` あり | `release_failed` |
-| R10 | 保持 released で `chain_steps.job_id` が NULL | `released_job_id` を紐付ける |
+| R10 | 保持 released で `chain_steps.job_id` が NULL | 解放先のジョブが存在し、保持と同じ `request_id` で、所属が未設定またはこの run・seq なら紐付ける。欠損・所属不一致は `internal_inconsistency` |
 | R11 | 保持 cancelled | `step_cancelled` |
-| R12 | 工程なし／job_id と held_id が両方 NULL／参照先なし | `internal_inconsistency` |
+| R12 | 工程なし／job_id と held_id が両方 NULL／参照先なし／所属不一致 | `internal_inconsistency` |
 | T1 | 終端の run の保持が `held` のまま | `cancelled`（`chain <status>`） |
 | T2 | 未送信の通知 | 送る（§8） |
 
 スイープの最後に `meta.chain_driver_last_sweep_at` を書く。`GET /status` の `chains` に run の件数・最終スイープ時刻・`driver_stale`（`3 × sweep_interval` 超）・未送信通知の件数と最古を出す。Reconciler は running の run があるのに最終スイープが `3 × sweep_interval` より古ければ `chain_driver_stale` を報告する（最終スイープ値ごとに 1 回）。
 
-固定したテスト: `TestDecideRepairTable`（分岐関数の全行）、`TestChainSweepRepairTable`（実 DB で R1〜R12・T1・T2）、`TestChainSweepIsolatesBrokenRun`、`TestReconcilerReportsStaleChainDriver`。
+所属検証（`ChainSnapshot.OwnershipProblem`）は分岐関数・R10 の書き込み・取消が共有する。工程のジョブは `chain_run_id`・`chain_seq` がこの run・seq であること。job_id と held_id を両方持つ工程（通常の解放後）は、保持が存在し `released` で `released_job_id` が工程のジョブと一致すること。R10 は上の表のとおり。
+
+固定したテスト: `TestDecideRepairTable`（分岐関数の全行と所属検証）、`TestChainOwnershipOfReleasedJobs`（実 DB で R10 の他 run のジョブ・欠損ジョブ・保持と工程の食い違い・R10 状態での取消）、`TestChainSweepRepairTable`（実 DB で R1〜R12・T1・T2）、`TestChainSweepIsolatesBrokenRun`、`TestReconcilerReportsStaleChainDriver`。
 
 ## 7. verdict ファイル V1
 
 1. review 工程を作るとき nonce を `chain_steps.verdict_nonce` に保存し、`{{verdict.path}}` = `.qf-chain/<run_id>/<seq>/verdict.json`（workdir からの相対パス、工程ごとに別）と `{{verdict.nonce}}` を instructions に展開する。
 2. レビュアーは `{"schema":"qf.review-verdict/1","run_id":"…","seq":N,"nonce":"…","verdict":"ok_to_merge|changes_needed","reviewed_commit":"<40桁の小文字16進>"}` を書く。
-3. **Shepherd** が受け入れ条件の評価に合格した後、同じ FileAccess で読む（`chain_run_id` を持つ review 工程だけ）。パスはサーバーが決めた相対パスで、途中のディレクトリを含めてシンボリックリンク（Windows は reparse point）を通らない通常ファイル・4 KiB 以下であること（`adapter.NoFollowStatter` を追加。Local・Linux リモート・Windows リモートに実装）。JSON は値 1 つ・末尾データなし・キーの重複なし・未知キーなし・6 キーすべて、`run_id`・`seq`・`nonce` が工程と一致、`verdict` は 2 値、`reviewed_commit` は 40 桁。
+3. **Shepherd** が受け入れ条件の評価に合格した後、同じ FileAccess で読む（`chain_run_id` を持つ review 工程だけ）。パスはサーバーが決めた相対パスで、途中のディレクトリを含めてシンボリックリンク（Windows は reparse point）を通らない通常ファイル・4 KiB 以下であること。検査と読み取りは `adapter.NoFollowReader.ReadFileNoFollow` の 1 操作で、リンク検査 → ファイルを開く（Unix は `O_NOFOLLOW|O_NONBLOCK`）→ 開いたまま経路を再検査 → 開いたファイルとパスが同じファイル（Local は `os.SameFile`、Linux は fd とパスの `device:inode`）であることを確認 → 開いたファイルから最大 4 KiB + 1 バイトだけ読む。途中で変わった場合は `invalid`（`changed while it was being read`）。Windows は `FileShare.Read`（書き込み・削除・改名を拒否）で開いて経路を再検査し、ハンドルから上限付きで読む（ファイル ID の比較はしない）。JSON は値 1 つ・末尾データなし・キーの重複なし・未知キーなし・6 キーすべて、`run_id`・`seq`・`nonce` が工程と一致、`verdict` は 2 値、`reviewed_commit` は 40 桁。
 4. 結果（`captured` / `missing` / `invalid` / `unavailable`）を `chain_artifacts` に `Complete` と**同じトランザクション**で書く（`CompleteWithArtifact`）。不合格で failed になるときは取り込まない（R6）。ホストに届かない等の一時エラーは評価エラーと同じ回数（`evaluator.max_eval_retries`）だけ再試行し、尽きたら `unavailable`。Adapter が FileAccess を持たない（mock）なら `unavailable`。
 5. Driver は `chain_artifacts` だけを読み、ワーカーのファイルは読まない。
 
-`TestParseVerdict` と `TestChainVerdictCapture` が「前ラウンドのファイルだけがある（missing）」「前ラウンドのファイルを今回のパスに複製（seq・nonce 不一致で invalid）」「seq だけ書き換えた複製（nonce 不一致）」「書きかけ」「キー重複」「未知キー・未知の値」「末尾データ」「4 KiB 超」「シンボリックリンク（ファイル・親ディレクトリ）」「ディレクトリ」「ホスト不通」「FileAccess なし」「手動 complete（R4）」「done の後の書き換えと再起動で判断が変わらない」を固定する。
+`TestParseVerdict` と `TestChainVerdictCapture` が「前ラウンドのファイルだけがある（missing）」「前ラウンドのファイルを今回のパスに複製（seq・nonce 不一致で invalid）」「seq だけ書き換えた複製（nonce 不一致）」「書きかけ」「キー重複」「未知キー・未知の値」「末尾データ」「4 KiB 超」「シンボリックリンク（ファイル・親ディレクトリ）」「ディレクトリ」（`TestReadFileNoFollowLocal` が「検査と open の間にリンクへ差し替え」「親をリンクにして open 後に戻す」「open 後に別ファイルへ置換」「FIFO」「読み取り上限」を、`TestLinuxNoFollowReadCommand` が Linux 用のシェルコマンドをローカルの sh で実行して通常・上限超過・欠損・リンクを固定する）「ホスト不通」「FileAccess なし」「手動 complete（R4）」「done の後の書き換えと再起動で判断が変わらない」を固定する。
 
 `reviewed_commit` は publish・fix に `{{verdict.reviewed_commit}}` として渡すだけで、head との一致確認は工程側（指示と受け入れ条件）の責務（§15-3 決定どおり）。
 
@@ -160,6 +166,6 @@ chains:
 
 ## 12. 未検証事項
 
-- Linux / Windows リモートホストでの `StatNoFollow`（シェル / PowerShell）は単体のコマンド組み立てだけで、実ホストでは動かしていない。ローカル（`LocalFileAccess`）だけをテストで確認した。
+- Linux リモート用の `ReadFileNoFollow` のシェルコマンドはローカルの sh で実行して確認したが、SSH 越しの実ホストでは動かしていない。検査と open の間の差し替えを注入するテストは Local だけ。Windows の PowerShell は組み立てのみ確認し、実ホストでは未実行。
 - 実エージェントを使ったチェーンの実運用（v2 §14 の 4）は未実施。
 - Webhook 失敗時の再送は `CheckedReporter` を返すテスト用 Notifier で確認した。実 Webhook 受け手での重複排除は未確認。

@@ -40,6 +40,9 @@ func Decide(s store.ChainSnapshot, now time.Time, stallAfter time.Duration) stor
 	if s.JobMissing {
 		return stop(store.ChainStopInternalInconsistency, fmt.Sprintf("step %d references missing job #%d", st.Seq, *st.JobID))
 	}
+	if problem := s.OwnershipProblem(); problem != "" {
+		return stop(store.ChainStopInternalInconsistency, problem) // R10/R12: ownership
+	}
 
 	if st.JobID != nil {
 		job := s.Job

@@ -174,6 +174,64 @@ type ChainSnapshot struct {
 	HeldMissing bool
 	// Artifact is the captured verdict of the step's job (review steps only).
 	Artifact *ChainArtifact
+	// ReleasedJob is the job a released hold points to while chain_steps.job_id is still
+	// NULL (R10). ReleasedJobMissing is true when released_job_id names no jobs row.
+	ReleasedJob        *Job
+	ReleasedJobMissing bool
+}
+
+// OwnershipProblem returns a non-empty description when the step's job or hold does not
+// belong to this run's current step (docs/22 §6 R10/R12). The branch function stops the
+// run with internal_inconsistency on it, and CancelChainRun never touches a job that
+// fails it. Rules:
+//   - a step job must carry chain_run_id = run and chain_seq = step seq;
+//   - a step with both job_id and held_id must point at a released hold whose
+//     released_job_id is that job;
+//   - a released hold of a step without job_id must point at an existing job created
+//     from that hold (same request_id) that is unowned or owned by this step.
+func (s ChainSnapshot) OwnershipProblem() string {
+	if s.Run == nil || s.Step == nil {
+		return ""
+	}
+	st := s.Step
+	owned := func(j *Job, allowUnowned bool) bool {
+		if j.ChainRunID == "" {
+			return allowUnowned
+		}
+		return j.ChainRunID == s.Run.ID && j.ChainSeq == st.Seq
+	}
+	if st.JobID != nil {
+		if s.Job != nil && !owned(s.Job, false) {
+			return fmt.Sprintf("step %d job #%d belongs to chain run %q seq %d", st.Seq, s.Job.ID, s.Job.ChainRunID, s.Job.ChainSeq)
+		}
+		if st.HeldID != "" {
+			switch {
+			case s.HeldMissing || s.Held == nil:
+				return fmt.Sprintf("step %d references missing held job %s", st.Seq, st.HeldID)
+			case s.Held.Status != HeldStatusReleased:
+				return fmt.Sprintf("step %d has job #%d but held %s is %s", st.Seq, *st.JobID, s.Held.ID, s.Held.Status)
+			case s.Held.ReleasedJobID == nil || *s.Held.ReleasedJobID != *st.JobID:
+				released := int64(0)
+				if s.Held.ReleasedJobID != nil {
+					released = *s.Held.ReleasedJobID
+				}
+				return fmt.Sprintf("step %d job #%d differs from held %s released job #%d", st.Seq, *st.JobID, s.Held.ID, released)
+			}
+		}
+		return ""
+	}
+	if s.Held != nil && s.Held.Status == HeldStatusReleased && s.Held.ReleasedJobID != nil {
+		id := *s.Held.ReleasedJobID
+		switch {
+		case s.ReleasedJobMissing || s.ReleasedJob == nil:
+			return fmt.Sprintf("held %s was released to missing job #%d", s.Held.ID, id)
+		case s.ReleasedJob.RequestID != s.Held.RequestID:
+			return fmt.Sprintf("held %s was released to job #%d with another request_id", s.Held.ID, id)
+		case !owned(s.ReleasedJob, true):
+			return fmt.Sprintf("held %s was released to job #%d of chain run %q seq %d", s.Held.ID, id, s.ReleasedJob.ChainRunID, s.ReleasedJob.ChainSeq)
+		}
+	}
+	return ""
 }
 
 // Fingerprint summarises every input of the branch function. AdvanceChain compares the
@@ -207,6 +265,12 @@ func (s ChainSnapshot) Fingerprint() string {
 	}
 	if s.HeldMissing {
 		b.WriteString("heldmissing;")
+	}
+	if s.ReleasedJob != nil {
+		fmt.Fprintf(&b, "releasedjob=%d:%s:%s:%d:%s;", s.ReleasedJob.ID, s.ReleasedJob.Status, s.ReleasedJob.ChainRunID, s.ReleasedJob.ChainSeq, s.ReleasedJob.RequestID)
+	}
+	if s.ReleasedJobMissing {
+		b.WriteString("releasedjobmissing;")
 	}
 	if s.Artifact != nil {
 		fmt.Fprintf(&b, "artifact=%s:%s:%s:%d;", s.Artifact.Status, s.Artifact.RawSHA256, s.Artifact.RunID, s.Artifact.Seq)
@@ -328,6 +392,9 @@ type CancelChainRunResult struct {
 	CancelledJobIDs   []int64
 	CancelledHeldID   string
 	CancelledByChange bool
+	// Inconsistency is set when the step's job or hold failed OwnershipProblem; that job
+	// was not touched.
+	Inconsistency string
 }
 
 // ReleaseHeldParams releases a hold in one transaction (docs/22 §5.1).

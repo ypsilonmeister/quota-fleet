@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
@@ -40,34 +39,32 @@ func (s *Shepherd) captureVerdict(ctx context.Context, job *store.Job) (*store.C
 	if err != nil {
 		return nil, fmt.Errorf("resolve host file access: %w", err)
 	}
-	nf, ok := fa.(adapter.NoFollowStatter)
+	nf, ok := fa.(adapter.NoFollowReader)
 	if !ok {
-		return s.verdictArtifact(job, store.ChainArtifactUnavailable, "the host file access cannot check for symbolic links"), nil
+		return s.verdictArtifact(job, store.ChainArtifactUnavailable, "the host file access cannot read without following symbolic links"), nil
 	}
-	st, err := nf.StatNoFollow(ctx, path)
+	// One operation checks the path for links, opens it, checks again while it is open
+	// and reads at most MaxVerdictBytes+1 bytes from the opened file (docs/22 §7.1).
+	rd, err := nf.ReadFileNoFollow(ctx, path, chain.MaxVerdictBytes)
 	if err != nil {
 		if errors.Is(err, adapter.ErrNotRelative) || errors.Is(err, adapter.ErrDeniedPath) {
 			return s.verdictArtifact(job, store.ChainArtifactInvalid, err.Error()), nil
 		}
-		return nil, fmt.Errorf("inspect %s: %w", path, err)
-	}
-	switch {
-	case !st.Exists:
-		return s.verdictArtifact(job, store.ChainArtifactMissing, path+" does not exist"), nil
-	case st.Symlink:
-		return s.verdictArtifact(job, store.ChainArtifactInvalid, path+" is or passes through a symbolic link"), nil
-	case !st.IsRegular:
-		return s.verdictArtifact(job, store.ChainArtifactInvalid, path+" is not a regular file"), nil
-	case st.Size > chain.MaxVerdictBytes:
-		return s.verdictArtifact(job, store.ChainArtifactInvalid, fmt.Sprintf("%s is %d bytes (max %d)", path, st.Size, chain.MaxVerdictBytes)), nil
-	}
-	data, err := fa.ReadFile(ctx, path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return s.verdictArtifact(job, store.ChainArtifactMissing, path+" does not exist"), nil
-		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	switch {
+	case rd.Changed:
+		return s.verdictArtifact(job, store.ChainArtifactInvalid, path+" changed while it was being read (link or replacement)"), nil
+	case !rd.Exists:
+		return s.verdictArtifact(job, store.ChainArtifactMissing, path+" does not exist"), nil
+	case rd.Symlink:
+		return s.verdictArtifact(job, store.ChainArtifactInvalid, path+" is or passes through a symbolic link"), nil
+	case !rd.IsRegular:
+		return s.verdictArtifact(job, store.ChainArtifactInvalid, path+" is not a regular file"), nil
+	case rd.TooLarge:
+		return s.verdictArtifact(job, store.ChainArtifactInvalid, fmt.Sprintf("%s is larger than %d bytes", path, chain.MaxVerdictBytes)), nil
+	}
+	data := rd.Data
 	a := chain.ParseVerdict(data, job.ChainRunID, job.ChainSeq, step.VerdictNonce)
 	a.JobID = job.ID
 	a.CapturedAt = time.Now().UTC()

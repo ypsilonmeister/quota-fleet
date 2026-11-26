@@ -286,7 +286,10 @@ func loadChainSnapshot(ctx context.Context, q queryRower, runID string) (*ChainS
 				snap.Artifact = art
 			}
 		}
-	} else if step.HeldID != "" {
+	}
+	if step.HeldID != "" {
+		// Also read for a step that already has its job, so that OwnershipProblem can
+		// check that the hold points at the same job.
 		held, err := queryHeldJobByID(ctx, q, step.HeldID)
 		switch {
 		case errors.Is(err, ErrNotFound):
@@ -295,6 +298,17 @@ func loadChainSnapshot(ctx context.Context, q queryRower, runID string) (*ChainS
 			return nil, err
 		default:
 			snap.Held = held
+		}
+		if step.JobID == nil && snap.Held != nil && snap.Held.Status == HeldStatusReleased && snap.Held.ReleasedJobID != nil {
+			job, err := queryJobByID(ctx, q, *snap.Held.ReleasedJobID)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				snap.ReleasedJobMissing = true
+			case err != nil:
+				return nil, err
+			default:
+				snap.ReleasedJob = job
+			}
 		}
 	}
 	return snap, nil
@@ -678,6 +692,9 @@ func (s *Store) CreateChainRun(ctx context.Context, p CreateChainRunParams) (*Ch
 		if _, _, err := s.insertChainStepTx(ctx, conn, changes, run, 1, p.FirstStep, 0, nil, nil, ChainBranchStart, p.First, nowStr); err != nil {
 			return err
 		}
+		if err := s.fault(ChainFaultCreateAfterStep); err != nil {
+			return err
+		}
 		r, err := queryChainRun(ctx, conn, runID)
 		if err != nil {
 			return err
@@ -823,6 +840,9 @@ func (s *Store) AdvanceChain(ctx context.Context, p AdvanceChainParams) (*Advanc
 				out.Skipped = "run moved on"
 				return nil
 			}
+			if err := s.fault(ChainFaultStopAfterWrite); err != nil {
+				return err
+			}
 		case ChainActionComplete:
 			res, err := conn.ExecContext(ctx, `
 				UPDATE chain_runs SET status = 'completed', revision = revision + 1,
@@ -844,10 +864,17 @@ func (s *Store) AdvanceChain(ctx context.Context, p AdvanceChainParams) (*Advanc
 			if snap.Step == nil || decision.LinkJobID <= 0 {
 				return fmt.Errorf("%w: link without a step or job", ErrInvalidInput)
 			}
-			if _, err := conn.ExecContext(ctx, `
+			// The in-transaction Decide already required OwnershipProblem() == "", so the
+			// released job exists and is unowned or owned by this step.
+			if prob := snap.OwnershipProblem(); prob != "" || snap.ReleasedJob == nil || snap.ReleasedJob.ID != decision.LinkJobID {
+				return fmt.Errorf("%w: link of run %s rejected: %s", ErrConflict, run.ID, prob)
+			}
+			if res, err := conn.ExecContext(ctx, `
 				UPDATE chain_steps SET job_id = ? WHERE run_id = ? AND seq = ? AND job_id IS NULL
 			`, decision.LinkJobID, run.ID, snap.Step.Seq); err != nil {
 				return err
+			} else if n, _ := res.RowsAffected(); n != 1 {
+				return fmt.Errorf("%w: step %d of run %s was linked concurrently", ErrConflict, snap.Step.Seq, run.ID)
 			}
 			if _, err := conn.ExecContext(ctx, `
 				UPDATE jobs SET chain_run_id = ?, chain_seq = ? WHERE id = ? AND chain_run_id IS NULL
@@ -890,6 +917,9 @@ func (s *Store) AdvanceChain(ctx context.Context, p AdvanceChainParams) (*Advanc
 			if err != nil {
 				return err
 			}
+			if err := s.fault(ChainFaultAdvanceAfterStep); err != nil {
+				return err
+			}
 			res, err := conn.ExecContext(ctx, `
 				UPDATE chain_runs SET current_seq = ?, round = ?, revision = revision + 1,
 					next_check_at = NULL, check_failures = 0, updated_at = ?
@@ -900,6 +930,9 @@ func (s *Store) AdvanceChain(ctx context.Context, p AdvanceChainParams) (*Advanc
 			}
 			if n, _ := res.RowsAffected(); n == 0 {
 				return fmt.Errorf("%w: run %s moved on during advance", ErrConflict, run.ID)
+			}
+			if err := s.fault(ChainFaultAdvanceAfterPointer); err != nil {
+				return err
 			}
 			out.JobID = jobID
 			out.HeldID = heldID
@@ -1015,20 +1048,31 @@ func (s *Store) CancelChainRun(ctx context.Context, runID, reason string) (*Canc
 			}
 			out.CancelledHeldID = snap.Held.ID
 		}
-		if snap.Job != nil {
-			switch snap.Job.Status {
+		// Only a job that provably belongs to this step is cancelled: the step's job, or
+		// the job of a released hold not yet linked (R10). A job failing the ownership
+		// check (another run's job, a missing row) is left alone.
+		target := snap.Job
+		if snap.Job == nil {
+			target = snap.ReleasedJob
+		}
+		if problem := snap.OwnershipProblem(); problem != "" {
+			target = nil
+			out.Inconsistency = problem
+		}
+		if target != nil {
+			switch target.Status {
 			case StatusDraft, StatusQueued, StatusWaiting:
 				jobReason := "chain run cancelled"
 				if r := strings.TrimSpace(reason); r != "" {
 					jobReason += ": " + r
 				}
-				ids, err := cancelJobTx(ctx, conn, changes, snap.Job.ID, snap.Job.Status, jobReason, nowStr)
+				ids, err := cancelJobTx(ctx, conn, changes, target.ID, target.Status, jobReason, nowStr)
 				if err != nil {
 					return err
 				}
 				out.CancelledJobIDs = ids
 			case StatusClaimed:
-				id := snap.Job.ID
+				id := target.ID
 				out.RunningJobID = &id
 			}
 		}
@@ -1256,4 +1300,77 @@ func (s *Store) ChainNotificationPendingStats(ctx context.Context) (*ChainNotifi
 		out.OldestPending = &t
 	}
 	return out, nil
+}
+
+// jobChainRunTerminal reports whether jobID is a step job of a chain run that is no longer
+// running, and that run's status.
+func jobChainRunTerminal(ctx context.Context, conn *sql.Conn, jobID int64) (bool, ChainRunStatus, error) {
+	var runStatus sql.NullString
+	err := conn.QueryRowContext(ctx, `
+		SELECT r.status FROM jobs j JOIN chain_runs r ON r.id = j.chain_run_id WHERE j.id = ?
+	`, jobID).Scan(&runStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, "", nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	st := ChainRunStatus(runStatus.String)
+	return st != ChainRunRunning, st, nil
+}
+
+// cancelClaimedChainJobTx moves a claimed step job of a terminal chain run to cancelled
+// (instead of back to queued) and cascades to waiting descendants.
+func cancelClaimedChainJobTx(ctx context.Context, conn *sql.Conn, changes *[]statusChange, jobID int64, runStatus ChainRunStatus, nowStr string) (*Job, error) {
+	reason := fmt.Sprintf("chain run is %s; not reset to queued", runStatus)
+	res, err := conn.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'cancelled', claimed_by = '', claimed_at = NULL, last_error = ?, updated_at = ?
+		WHERE id = ? AND status = 'claimed'
+	`, reason, nowStr, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, classifyStatusConflict(ctx, conn, jobID, "claimed")
+	}
+	if _, err := conn.ExecContext(ctx, `DELETE FROM leases WHERE job_id = ?`, jobID); err != nil {
+		return nil, err
+	}
+	cascaded, err := cascadeCancelWaitingDescendants(ctx, conn, jobID, formatCascadeReason(jobID, "cancelled", reason), nowStr)
+	if err != nil {
+		return nil, err
+	}
+	*changes = append(*changes, statusChange{jobID: jobID, prev: StatusClaimed, next: StatusCancelled})
+	*changes = appendCascadeChanges(*changes, cascaded)
+	return queryJobByID(ctx, conn, jobID)
+}
+
+// Fault points inside chain transactions (tests only, see SetChainFaultHookForTest). Each
+// is reached after the transaction already wrote rows.
+const (
+	// ChainFaultCreateAfterStep: CreateChainRun wrote the run, the first step's job or
+	// hold, its Outbox row and gate decision, and the step history.
+	ChainFaultCreateAfterStep = "create:after-step"
+	// ChainFaultAdvanceAfterStep: AdvanceChain wrote the next step's job or hold, Outbox,
+	// gate decision and step history, but not yet the run pointer.
+	ChainFaultAdvanceAfterStep = "advance:after-step"
+	// ChainFaultAdvanceAfterPointer: AdvanceChain also moved current_seq/revision.
+	ChainFaultAdvanceAfterPointer = "advance:after-pointer"
+	// ChainFaultStopAfterWrite: AdvanceChain stopped the run and wrote the notification.
+	ChainFaultStopAfterWrite = "stop:after-write"
+	// ChainFaultReleaseAfterLink: ReleaseHeld created the job and Outbox row, released the
+	// hold, linked the step, bumped the revision and wrote the gate decision.
+	ChainFaultReleaseAfterLink = "release:after-link"
+)
+
+// SetChainFaultHookForTest installs f to run at the ChainFault* points; a non-nil error
+// aborts (rolls back) that transaction. For tests only; pass nil to remove it.
+func (s *Store) SetChainFaultHookForTest(f func(stage string) error) { s.chainFault = f }
+
+func (s *Store) fault(stage string) error {
+	if s.chainFault == nil {
+		return nil
+	}
+	return s.chainFault(stage)
 }

@@ -212,6 +212,11 @@ func (s *Store) ReleaseHeld(ctx context.Context, p ReleaseHeldParams) (*ReleaseH
 				return err
 			}
 		}
+		if snap != nil {
+			if err := s.fault(ChainFaultReleaseAfterLink); err != nil {
+				return err
+			}
+		}
 		out.Job = job
 		out.Created = createdJob
 		out.Released = true

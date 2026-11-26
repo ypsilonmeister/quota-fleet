@@ -153,8 +153,15 @@ func (d *Definition) normalize(maxRoundsCap int) error {
 			d.Workspace.WorktreeSpec = nil
 		}
 	}
-	if d.Workspace.Workdir == "" && d.Workspace.WorktreeSpec == nil {
-		return fmt.Errorf("%w: workspace.workdir or workspace.worktree_spec is required (all steps share it)", ErrInvalidDefinition)
+	// Every step must run in the same directory (docs/22 §7.2). An empty workdir is
+	// resolved per job by the adapter (WorkdirRoot/job-<id>), so worktree_spec alone would
+	// give each step its own worktree; the shared workdir is therefore required, and
+	// worktree_spec only says how to create it the first time (later steps reuse it).
+	if d.Workspace.Workdir == "" {
+		if d.Workspace.WorktreeSpec != nil {
+			return fmt.Errorf("%w: workspace.workdir is required with workspace.worktree_spec (without it each step would get its own worktree)", ErrInvalidDefinition)
+		}
+		return fmt.Errorf("%w: workspace.workdir is required (all steps share it)", ErrInvalidDefinition)
 	}
 	for _, name := range []string{store.ChainStepImplement, store.ChainStepReview, store.ChainStepFix, store.ChainStepPublish} {
 		t := d.Step(name)

@@ -109,6 +109,23 @@ func TestParseDefinition(t *testing.T) {
 	if MaxSteps(d.MaxRounds) != 7 {
 		t.Fatalf("MaxSteps(3) = %d", MaxSteps(3))
 	}
+	// worktree_spec with the shared workdir: every step gets the same workdir and spec.
+	ws, err := parse(t, func(m map[string]any) {
+		m["workspace"] = map[string]any{"workdir": "/tmp/w", "worktree_spec": map[string]any{"repo_path": "/repo", "branch": "feat/x"}}
+	})
+	if err != nil {
+		t.Fatalf("workdir + worktree_spec rejected: %v", err)
+	}
+	run := &store.ChainRun{ID: tRun, Owner: "tok"}
+	for i, step := range []string{store.ChainStepImplement, store.ChainStepReview, store.ChainStepFix, store.ChainStepPublish} {
+		p, err := BuildStepParams(ws, StepInput{Run: run, Step: step, Seq: i + 1, Round: 1, VerdictNonce: tNonce, ReviewedCommit: tSHA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Workdir != "/tmp/w" || p.WorktreeSpec == nil || p.WorktreeSpec.Branch != "feat/x" {
+			t.Fatalf("%s: workdir=%q spec=%+v", step, p.Workdir, p.WorktreeSpec)
+		}
+	}
 	_, h1, _ := d.CanonicalJSON()
 	d2, _ := parse(t, nil)
 	_, h2, _ := d2.CanonicalJSON()
@@ -145,6 +162,10 @@ func TestParseDefinition(t *testing.T) {
 		"missing agent":     func(m map[string]any) { delete(m["steps"].(map[string]any)["fix"].(map[string]any), "agent") },
 		"missing publish":   func(m map[string]any) { delete(m["steps"].(map[string]any), "publish") },
 		"missing workspace": func(m map[string]any) { delete(m, "workspace") },
+		// docs/22 §7.2: without a workdir every step would get its own WorkdirRoot/job-<id>.
+		"worktree_spec without workdir": func(m map[string]any) {
+			m["workspace"] = map[string]any{"worktree_spec": map[string]any{"repo_path": "/repo", "branch": "feat/x"}}
+		},
 		"huge instructions": func(m map[string]any) {
 			m["steps"].(map[string]any)["fix"].(map[string]any)["instructions"] = strings.Repeat("a", MaxInstructionsBytes+1)
 		},
@@ -237,6 +258,45 @@ func TestDecideRepairTable(t *testing.T) {
 		{"R12 held row missing", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), HeldMissing: true}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
 		{"budget guard", store.ChainSnapshot{Run: &store.ChainRun{ID: tRun, Status: store.ChainRunRunning, CurrentSeq: 7, Round: 1, MaxRounds: 3, MaxSteps: 7}, Step: step("fix", 7, id(7), ""), Job: job(store.StatusDone)}, store.ChainActionStop, "", 0, store.ChainStopStepBudgetExceeded},
 	}
+	// Fixtures above describe well-formed runs: the step's job and a released hold's job
+	// belong to the step. The ownership cases below are built explicitly.
+	for i := range cases {
+		sn := &cases[i].snap
+		if sn.Job != nil && sn.Step != nil {
+			j := *sn.Job
+			j.ChainRunID, j.ChainSeq = tRun, sn.Step.Seq
+			sn.Job = &j
+		}
+		if sn.Held != nil && sn.Held.Status == store.HeldStatusReleased && sn.Step != nil {
+			sn.Held.RequestID = "chain:r:2"
+			sn.ReleasedJob = &store.Job{ID: released, Status: store.StatusQueued, RequestID: "chain:r:2", ChainRunID: tRun, ChainSeq: sn.Step.Seq}
+		}
+	}
+	ownJob := func(runID string, seq int) *store.Job {
+		return &store.Job{ID: 7, Status: store.StatusDone, RequestID: "chain:r:2", ChainRunID: runID, ChainSeq: seq}
+	}
+	relHeld := func(jobID *int64) *store.HeldJob {
+		return &store.HeldJob{ID: "h1", RequestID: "chain:r:2", Status: store.HeldStatusReleased, ReleasedJobID: jobID}
+	}
+	cases = append(cases, []struct {
+		name   string
+		snap   store.ChainSnapshot
+		action store.ChainAction
+		next   string
+		round  int
+		reason string
+	}{
+		{"ownership: R10 unlinked job is linkable", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusQueued}}, store.ChainActionLink, "", 0, ""},
+		{"ownership: R10 job of another run", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusDone, ChainRunID: "other", ChainSeq: 2}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: R10 job of another seq", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJob: &store.Job{ID: released, RequestID: "chain:r:2", Status: store.StatusDone, ChainRunID: tRun, ChainSeq: 1}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: R10 job with another request_id", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJob: &store.Job{ID: released, RequestID: "x", Status: store.StatusDone}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: R10 released job missing", store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, nil, "h1"), Held: relHeld(&released), ReleasedJobMissing: true}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: step job of another run", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), ""), Job: ownJob("other", 1)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: job and hold agree", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: relHeld(id(7))}, store.ChainActionAdvance, "review", 1, ""},
+		{"ownership: hold points at another job", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: relHeld(&released)}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: hold of a linked step not released", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), Held: &store.HeldJob{ID: "h1", Status: store.HeldStatusHeld}}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+		{"ownership: hold of a linked step missing", store.ChainSnapshot{Run: run(0, 1), Step: step("implement", 1, id(7), "h1"), Job: ownJob(tRun, 1), HeldMissing: true}, store.ChainActionStop, "", 0, store.ChainStopInternalInconsistency},
+	}...)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d := Decide(tc.snap, now, 24*time.Hour)
@@ -249,7 +309,9 @@ func TestDecideRepairTable(t *testing.T) {
 		})
 	}
 	// Stall is reported only after stall_after.
-	s := store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, id(7), ""), Job: job(store.StatusQueued)}
+	queued := job(store.StatusQueued)
+	queued.ChainRunID, queued.ChainSeq = tRun, 2
+	s := store.ChainSnapshot{Run: run(1, 2), Step: step("review", 2, id(7), ""), Job: queued}
 	if Decide(s, now, 2*time.Hour).Stalled {
 		t.Fatal("stalled before stall_after")
 	}

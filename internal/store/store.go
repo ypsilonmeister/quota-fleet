@@ -43,6 +43,9 @@ type Store struct {
 	events     jobEventHub
 	// afterJobCommit, set only by tests, runs between a job commit and its publication.
 	afterJobCommit func()
+	// chainFault, set only by tests (SetChainFaultHookForTest), runs at named points inside
+	// chain transactions after rows were written; a non-nil error aborts the transaction.
+	chainFault func(stage string) error
 }
 
 // Open opens (or creates) the SQLite database at dbPath, enables WAL mode and
@@ -927,11 +930,26 @@ func (s *Store) Requeue(ctx context.Context, jobID int64) (*Job, error) {
 
 // Reset moves a claimed job back to queued while preserving attempts,
 // clears claim ownership/leases, and emits a signal_outbox row.
+//
+// A step job of a chain run that is no longer running (cancelled, stopped or completed)
+// is never made claimable again (docs/22 §5.2): inside the same transaction it moves
+// claimed → cancelled instead, and the returned job has status cancelled.
 func (s *Store) Reset(ctx context.Context, jobID int64) (*Job, error) {
 	var job *Job
 
 	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		nowStr := formatTime(time.Now().UTC())
+
+		if terminal, runStatus, err := jobChainRunTerminal(ctx, conn, jobID); err != nil {
+			return err
+		} else if terminal {
+			j, err := cancelClaimedChainJobTx(ctx, conn, changes, jobID, runStatus, nowStr)
+			if err != nil {
+				return err
+			}
+			job = j
+			return nil
+		}
 
 		res, err := conn.ExecContext(ctx, `
 			UPDATE jobs

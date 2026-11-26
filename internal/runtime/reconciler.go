@@ -179,11 +179,24 @@ func (r *Reconciler) reconcileStaleClaimed(ctx context.Context) error {
 			continue
 		}
 
-		if _, err := r.store.Reset(ctx, job.ID); err != nil {
+		reset, err := r.store.Reset(ctx, job.ID)
+		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
 				continue
 			}
 			r.logger.Printf("reconciler reset job #%d error: %v", job.ID, err)
+			continue
+		}
+		if reset != nil && reset.Status == store.StatusCancelled {
+			// A step of a chain run that is no longer running: Reset cancelled it instead.
+			r.logger.Printf("reconciler cancelled missing claimed job #%d: %s", job.ID, reset.LastError)
+			r.reportOnce(ctx, Report{
+				DedupKey:  fmt.Sprintf("stale-claimed-chain-cancelled:%d", job.ID),
+				Kind:      "stale_claimed_cancelled",
+				JobID:     job.ID,
+				Message:   fmt.Sprintf("job #%d (%q) missing on worker after %s; %s", job.ID, job.Title, r.staleClaimedAfter, reset.LastError),
+				Timestamp: now,
+			})
 			continue
 		}
 		r.logger.Printf("reconciler reset missing claimed job #%d back to queued (attempts=%d)", job.ID, job.Attempts)
