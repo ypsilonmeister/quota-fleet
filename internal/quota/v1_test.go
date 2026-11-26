@@ -565,3 +565,124 @@ func TestValidateUsageFileModesAndItemsCD(t *testing.T) {
 		t.Errorf("Item C stale/error existing must still reject older generation: exit=%d, want 1", r.ExitCode)
 	}
 }
+
+func TestSanitizeCollectorErrorAndEndToEnd(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty", "", ""},
+		{"whitespace only", "  \t\n ", ""},
+		{"clean code", "probe_timeout", "probe_timeout"},
+		{"clean punctuated code", "provider.api:http-503", "provider.api:http-503"},
+		{"newline raw upstream", "probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE", RedactedCollectorError},
+		{"crlf credential", "probe_timeout\r\nAuthorization: Bearer sk-secret", RedactedCollectorError},
+		{"single line raw upstream text", "HTTP 502 Bad Gateway: <html>raw body</html>", RedactedCollectorError},
+		{"key value secret", "token=secret123", RedactedCollectorError},
+		{"ansi escape", "\x1b[31mprobe_timeout\x1b[0m", RedactedCollectorError},
+		{"oversized", strings.Repeat("a", MaxCollectorErrorLen+1), RedactedCollectorError},
+	}
+	for _, tc := range cases {
+		if got := SanitizeCollectorError(tc.raw); got != tc.want {
+			t.Errorf("%s: SanitizeCollectorError(%q) = %q, want %q", tc.name, tc.raw, got, tc.want)
+		}
+	}
+
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 26, 21, 0, 0, 0, time.UTC)
+	rawJSON := `{
+		"schema_version": 1,
+		"generated_at": "2026-11-26T20:55:00Z",
+		"pools": {
+			"demo-pool": {
+				"status": "error",
+				"error": "probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE",
+				"measured_at": "2026-11-26T20:54:00Z",
+				"weekly": {"remaining_percent": 80},
+				"short": {"remaining_percent": 60}
+			},
+			"raw-single": {
+				"status": "error",
+				"error": "HTTP 502 Bad Gateway: Bearer sk-raw-upstream-secret",
+				"measured_at": "2026-11-26T20:54:00Z",
+				"weekly": {"remaining_percent": 80},
+				"short": {"remaining_percent": 60}
+			}
+		}
+	}`
+	p := filepath.Join(dir, "raw-error.json")
+	if err := os.WriteFile(p, []byte(rawJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	snap, err := ParseUsageJSONWithFormat([]byte(rawJSON), FormatV1)
+	if err != nil {
+		t.Fatalf("ParseUsageJSONWithFormat: %v", err)
+	}
+	for _, name := range []string{"demo-pool", "raw-single"} {
+		if got := snap.Pools[name].Error; got != RedactedCollectorError {
+			t.Errorf("parsed %s.Error = %q, want %q", name, got, RedactedCollectorError)
+		}
+	}
+
+	// Gate evaluation preserves ReasonCollectorError and never leaks raw text, even if Snapshot was built directly.
+	rawSnap := &Snapshot{
+		Format:      FormatV1,
+		GeneratedAt: now.Add(-1 * time.Minute),
+		Pools: map[string]PoolSnapshot{
+			"demo-pool": {
+				Status:                 PoolEntryStatusError,
+				Error:                  "probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE",
+				MeasuredAt:             now.Add(-2 * time.Minute),
+				WeeklyRemainingPercent: 80,
+				ShortRemainingPercent:  intPtr(60),
+			},
+		},
+	}
+	ev := EvaluateGate("demo-pool", nil, rawSnap, EvalOptions{Now: now, StaleAfter: 45 * time.Minute, Format: FormatV1})
+	if ev.Decision != DecisionUnknown || ev.Reason != ReasonCollectorError || ev.PoolError != RedactedCollectorError || ev.Detail != RedactedCollectorError {
+		t.Fatalf("EvaluateGate unsanitized collector error = %+v", ev)
+	}
+	for label, s := range map[string]string{
+		"HoldReason":     FormatHoldReason(ev),
+		"DecisionReason": FormatDecisionReason(ev),
+		"Summary":        SummarizeEvaluation(ev),
+	} {
+		if strings.Contains(s, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(s, "\n") {
+			t.Errorf("%s leaked raw error: %q", label, s)
+		}
+		if !strings.Contains(s, RedactedCollectorError) {
+			t.Errorf("%s missing %q: %q", label, RedactedCollectorError, s)
+		}
+	}
+
+	// ValidateUsageFile keeps collector_error and expected exit codes (normal=2, --ignore-stale=2, --check-deploy=0).
+	for _, tc := range []struct {
+		name     string
+		opts     ValidateOptions
+		wantExit int
+	}{
+		{"normal", ValidateOptions{File: p, Format: FormatV1, Now: now}, 2},
+		{"ignore-stale", ValidateOptions{File: p, Format: FormatV1, IgnoreStale: true, Now: now}, 2},
+		{"check-deploy", ValidateOptions{File: p, Format: FormatV1, CheckDeploy: true, Now: now}, 0},
+	} {
+		res := ValidateUsageFile(tc.opts)
+		if res.ExitCode != tc.wantExit {
+			t.Errorf("ValidateUsageFile(%s) exit=%d, want %d", tc.name, res.ExitCode, tc.wantExit)
+		}
+		for _, ps := range res.Pools {
+			if strings.Contains(ps.PoolError, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(ps.PoolError, "sk-raw-upstream-secret") || strings.Contains(ps.PoolError, "\n") {
+				t.Errorf("ValidateUsageFile(%s) pool %s leaked raw error: %q", tc.name, ps.Pool, ps.PoolError)
+			}
+			if ps.Reason != ReasonCollectorError || ps.PoolError != RedactedCollectorError {
+				t.Errorf("ValidateUsageFile(%s) pool %s = reason:%q error:%q", tc.name, ps.Pool, ps.Reason, ps.PoolError)
+			}
+		}
+		for _, d := range res.Diagnostics {
+			if strings.Contains(d.Message, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(d.Message, "sk-raw-upstream-secret") || strings.Contains(d.Message, "\n") {
+				t.Errorf("ValidateUsageFile(%s) diagnostic leaked raw error: %+v", tc.name, d)
+			}
+		}
+	}
+}

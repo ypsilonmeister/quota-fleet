@@ -148,6 +148,58 @@ quota:
 	if code := run([]string{"usage", "validate", "--config", cfgPath}, &outBuf, &errBuf); code != 2 {
 		t.Fatalf("usage validate deployed partial exit=%d, want 2; out=%s", code, outBuf.String())
 	}
+
+	// Destination that is an existing directory must fail non-zero and NOT receive a moved temp file (§9.2.2).
+	destDir := filepath.Join(dir, "dest-is-directory")
+	if err := os.Mkdir(destDir, 0o755); err != nil {
+		t.Fatalf("Mkdir destDir: %v", err)
+	}
+	if out, err := exec.Command("bash", deployScript, vNew, destDir, binPath).CombinedOutput(); err == nil {
+		t.Fatalf("atomic_deploy to existing directory should fail non-zero, output:\n%s", string(out))
+	}
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		t.Fatalf("ReadDir destDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("atomic_deploy moved files into destination directory: %v", entries)
+	}
+
+	// Unsanitized collector error containing newline / raw upstream text is sanitized in CLI text & JSON outputs while preserving collector_error and exit codes.
+	vRawErr := filepath.Join(dir, "v_raw_err.json")
+	write(vRawErr, `{"schema_version":1,"generated_at":"`+tPart+`","pools":{"demo-pool":{"status":"error","error":"probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE","measured_at":"`+tNew+`","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}},"demo-alt":{"status":"error","error":"HTTP 502: Bearer sk-raw-upstream","measured_at":"`+tNew+`","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}}}}`)
+
+	outBuf.Reset()
+	errBuf.Reset()
+	if code := run([]string{"usage", "validate", "--file", vRawErr, "--format", "v1"}, &outBuf, &errBuf); code != 2 {
+		t.Fatalf("usage validate unsanitized collector error exit=%d, want 2; out=%s err=%s", code, outBuf.String(), errBuf.String())
+	}
+	valOut := outBuf.String()
+	if strings.Contains(valOut, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(valOut, "sk-raw-upstream") {
+		t.Errorf("usage validate leaked raw collector error:\n%s", valOut)
+	}
+	if !strings.Contains(valOut, "collector_error") || !strings.Contains(valOut, quota.RedactedCollectorError) {
+		t.Errorf("usage validate missing collector_error/%s:\n%s", quota.RedactedCollectorError, valOut)
+	}
+
+	outBuf.Reset()
+	errBuf.Reset()
+	if code := run([]string{"usage", "validate", "--file", vRawErr, "--format", "v1", "--check-deploy"}, &outBuf, &errBuf); code != 0 {
+		t.Fatalf("usage validate --check-deploy unsanitized collector error exit=%d, want 0; out=%s err=%s", code, outBuf.String(), errBuf.String())
+	}
+
+	outBuf.Reset()
+	errBuf.Reset()
+	if code := run([]string{"gate", "check", "--config", cfgPath, "--usage-file", vRawErr, "--format", "v1", "--pool", "demo-pool"}, &outBuf, &errBuf); code != 0 {
+		t.Fatalf("gate check unsanitized collector error exit=%d, want 0; out=%s err=%s", code, outBuf.String(), errBuf.String())
+	}
+	gateOut := outBuf.String()
+	if strings.Contains(gateOut, "REVIEW_TEST_RAW_UPSTREAM_LINE") {
+		t.Errorf("gate check leaked raw collector error:\n%s", gateOut)
+	}
+	if !strings.Contains(gateOut, "reason:        collector_error") || !strings.Contains(gateOut, "pool_error:    "+quota.RedactedCollectorError) {
+		t.Errorf("gate check missing sanitized collector_error fields:\n%s", gateOut)
+	}
 }
 
 func TestCLIGateCheckExitCodeAndItemEFlags(t *testing.T) {
@@ -234,6 +286,47 @@ quota:
 	}
 	if !strings.Contains(out.String(), "selected_pool: agy-argon") || !strings.Contains(out.String(), "bypassed:      true") {
 		t.Errorf("unexpected alt-pools-only output:\n%s", out.String())
+	}
+
+	// 3b. Explicit --config / -c to a nonexistent file MUST fail with exit 1 even when --usage-file is valid.
+	missingCfg := filepath.Join(dir, "does-not-exist.yaml")
+	for _, flagName := range []string{"--config", "-c"} {
+		out.Reset()
+		errBuf.Reset()
+		code = run([]string{
+			"gate", "check",
+			flagName, missingCfg,
+			"--usage-file", v1Path,
+			"--format", "v1",
+			"--pool", "claude",
+			"--now", fixedNow,
+			"--json",
+		}, &out, &errBuf)
+		if code != 1 {
+			t.Fatalf("gate check explicit %s nonexistent exit=%d, want 1; stdout=%s stderr=%s", flagName, code, out.String(), errBuf.String())
+		}
+		if !strings.Contains(errBuf.String(), "gate check failed") {
+			t.Errorf("gate check explicit %s nonexistent stderr=%q, want error message", flagName, errBuf.String())
+		}
+	}
+
+	// 3c. Standalone gate check WITHOUT --config/-c succeeds when default fleet.yaml does not exist.
+	t.Setenv("QUOTA_FLEET_CONFIG", filepath.Join(dir, "default-missing-fleet.yaml"))
+	out.Reset()
+	errBuf.Reset()
+	code = run([]string{
+		"gate", "check",
+		"--usage-file", v1Path,
+		"--format", "v1",
+		"--pool", "claude",
+		"--now", fixedNow,
+		"--json",
+	}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("standalone gate check without --config exit=%d, want 0; stdout=%s stderr=%s", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), `"decision": "would_pass"`) || !strings.Contains(out.String(), `"selected_pool": "claude"`) {
+		t.Errorf("unexpected standalone gate check output:\n%s", out.String())
 	}
 
 	// 4. Init template includes commented Quota Gate snippet & next-step hint (§8.1).

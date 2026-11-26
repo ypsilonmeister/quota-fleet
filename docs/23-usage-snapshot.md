@@ -100,7 +100,7 @@ This document defines the normalized JSON contract (**Schema v1**, `schema_versi
 | Field | Type | Required | Rules |
 |---|---|---|---|
 | `status` | `"ok"` \| `"error"` | Optional (default `"ok"`) | `null` or any other value is a schema violation. |
-| `error` | string \| `null` | Optional | Short sanitized failure code/summary (e.g., `probe_timeout`, `probe_auth_expired`). **Must never contain raw CLI output, upstream response bodies, or credentials.** |
+| `error` | string \| `null` | Optional | Short sanitized failure code/summary (e.g., `probe_timeout`, `probe_auth_expired`). **Must never contain raw CLI output, upstream response bodies, or credentials.** Receivers sanitize non-conforming values (newlines, control chars, whitespace/raw text, or >64 chars) to `unsanitized_error_redacted` while preserving `collector_error`. |
 | `measured_at` | string (RFC3339) \| `null` | **Required key** | Timestamp when this pool was actually probed (preferably stamped from the collector host's single UTC clock on probe completion). Must be non-null RFC3339 when `status: "ok"`. When `status: "error"`, retain the last successful `measured_at` (`null` only on initial failure with no prior observation). Never bump a previous `measured_at` on re-copy or retry failure. |
 | `weekly` | object \| `null` | **Required key** | Must be a JSON object when `status: "ok"`. May retain the prior object or be `null` on initial failure when `status: "error"`. |
 | `weekly.remaining_percent` | integer (`0..100`) | **Required** (when `weekly != null`) | Strict JSON integer `0..100`. Omission, `null`, floats (`12.5`, `1.0`), strings, or out-of-range values are file-wide schema violations (`snapshot_error`). |
@@ -255,12 +255,16 @@ chmod 0644 "$TMP"
 
 exec 9>"$LOCK"
 flock -x 9
+if [ -d "$DEST" ]; then
+  echo "destination is a directory: $DEST" >&2
+  exit 1
+fi
 quota-fleet usage validate --file "$TMP" --format v1 --check-deploy --reject-older-than "$DEST"
 
 if [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
   exit 0
 fi
-mv -f "$TMP" "$DEST"
+mv -fT "$TMP" "$DEST"
 trap - EXIT
 ```
 

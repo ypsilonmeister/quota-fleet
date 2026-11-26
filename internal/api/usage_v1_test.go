@@ -146,6 +146,44 @@ func TestUsageV1EnforceDryRunUndefinedAndChainDriver(t *testing.T) {
 		t.Fatalf("mixed exhausted+missing+unmeasured: status=%d body=%q, want 202 short_window_missing", status, body)
 	}
 
+	// 3b. Unsanitized collector error with newline & raw upstream text -> Hold with collector_error and sanitized summary/log (no raw line leak).
+	logBuf.Reset()
+	writeV1(`{
+		"schema_version": 1,
+		"generated_at": "2026-11-26T20:56:00Z",
+		"pools": {
+			"demo-pool": {"status":"error","error":"probe_timeout\nREVIEW_TEST_RAW_UPSTREAM_LINE","measured_at":"2026-11-26T20:55:50Z","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}}
+		}
+	}`)
+	status, body = postJob(`{"request_id":"raw-err-1","title":"Raw Collector Error","pool":"demo-pool"}`)
+	if status != http.StatusAccepted || !strings.Contains(body, quota.ReasonCollectorError) {
+		t.Fatalf("unsanitized collector error hold: status=%d body=%q, want 202 collector_error", status, body)
+	}
+	if strings.Contains(body, "REVIEW_TEST_RAW_UPSTREAM_LINE") {
+		t.Errorf("HTTP hold response leaked raw collector error: %q", body)
+	}
+	var rawErrHoldResp struct {
+		HeldID string `json:"held_id"`
+	}
+	_ = json.Unmarshal([]byte(body), &rawErrHoldResp)
+	heldRawErr, err := st.GetHeldJob(context.Background(), rawErrHoldResp.HeldID)
+	if err != nil {
+		t.Fatalf("GetHeldJob raw-err: %v", err)
+	}
+	if strings.Contains(heldRawErr.Reason, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(heldRawErr.Reason, "\n") || !strings.Contains(heldRawErr.Reason, quota.RedactedCollectorError) {
+		t.Errorf("held_jobs.reason not sanitized: %q", heldRawErr.Reason)
+	}
+	if strings.Contains(heldRawErr.SnapshotSummary, "REVIEW_TEST_RAW_UPSTREAM_LINE") || !strings.Contains(heldRawErr.SnapshotSummary, quota.RedactedCollectorError) {
+		t.Errorf("held_jobs.snapshot_summary not sanitized: %q", heldRawErr.SnapshotSummary)
+	}
+	if strings.Contains(logBuf.String(), "REVIEW_TEST_RAW_UPSTREAM_LINE") || !strings.Contains(logBuf.String(), "pool_error="+quota.RedactedCollectorError) {
+		t.Errorf("operational log leaked raw collector error or missed sanitized summary:\n%s", logBuf.String())
+	}
+	rawDecs, err := st.ListGateDecisions(context.Background(), 1)
+	if err != nil || len(rawDecs) == 0 || strings.Contains(rawDecs[0].Reason, "REVIEW_TEST_RAW_UPSTREAM_LINE") || strings.Contains(rawDecs[0].Reason, "\n") || !strings.Contains(rawDecs[0].Reason, quota.RedactedCollectorError) {
+		t.Errorf("gate_decisions.reason not sanitized: %+v (err=%v)", rawDecs, err)
+	}
+
 	// 4. Write recovered healthy v1 -> periodic release releases held job!
 	writeV1(`{
 		"schema_version": 1,
@@ -345,7 +383,8 @@ func TestHeldJobReleaseConfigChangesAndLegacyCompatItemA(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 
-	// Part 1 (Item B): Held job in v1 after config changes — periodic & manual release match identically.
+	// Part 1 (Item B): Held job in v1 after config changes — periodic & manual release match identically,
+	// AND neither path reads the usage snapshot file when every held job is skip-eligible.
 	stV1, err := store.Open(ctx, filepath.Join(dir, "held-v1.db"), store.Options{InstanceID: "held-v1"})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -362,23 +401,35 @@ func TestHeldJobReleaseConfigChangesAndLegacyCompatItemA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HoldJob all-del: %v", err)
 	}
-	hUnmPrimary, _, err := stV1.HoldJob(ctx, store.HoldJobParams{
-		RequestID: "h-unm-primary",
+	hUnmPrimaryManual, _, err := stV1.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "h-unm-primary-manual",
 		Pool:      "now-unmeasured",
 		AltPools:  []string{"removed-alt"},
-		Payload:   store.CreateJobParams{RequestID: "h-unm-primary", Title: "Primary Now Unmeasured", Pool: "now-unmeasured"},
+		Payload:   store.CreateJobParams{RequestID: "h-unm-primary-manual", Title: "Primary Now Unmeasured (Manual)", Pool: "now-unmeasured"},
 		Reason:    "exhausted:weekly",
 	})
 	if err != nil {
-		t.Fatalf("HoldJob unm-primary: %v", err)
+		t.Fatalf("HoldJob unm-primary-manual: %v", err)
+	}
+	hUnmPrimaryPeriodic, _, err := stV1.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "h-unm-primary-periodic",
+		Pool:      "now-unmeasured",
+		AltPools:  []string{"removed-alt"},
+		Payload:   store.CreateJobParams{RequestID: "h-unm-primary-periodic", Title: "Primary Now Unmeasured (Periodic)", Pool: "now-unmeasured"},
+		Reason:    "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob unm-primary-periodic: %v", err)
 	}
 
 	newPools := map[string]config.PoolConfig{
 		"now-unmeasured": {Unmeasured: true},
+		"demo-pool":      {},
 	}
 	usagePath := filepath.Join(dir, "v1.json")
-	_ = os.WriteFile(usagePath, []byte(`{"schema_version":1,"generated_at":"2026-11-26T20:59:00Z","pools":{}}`), 0o600)
+	_ = os.WriteFile(usagePath, []byte(`{"schema_version":1,"generated_at":"2026-11-26T20:59:00Z","pools":{"demo-pool":{"status":"ok","measured_at":"2026-11-26T20:58:50Z","weekly":{"remaining_percent":80},"short":{"remaining_percent":60}}}}`), 0o600)
 
+	v1LoadCalls := 0
 	checkerV1 := runtime.NewGateChecker(runtime.GateCheckerOptions{
 		Store:       stV1,
 		GateMode:    config.GateModeEnforce,
@@ -387,29 +438,82 @@ func TestHeldJobReleaseConfigChangesAndLegacyCompatItemA(t *testing.T) {
 		Pools:       newPools,
 		Now:         func() time.Time { return now },
 		Logger:      log.New(io.Discard, "", 0),
+		SnapshotLoader: func() (*quota.Snapshot, error) {
+			v1LoadCalls++
+			return quota.LoadUsageFileWithFormat(usagePath, config.UsageFormatV1)
+		},
 	})
 
-	// Manual release of all-deleted -> refused with pool_not_configured.
+	// Manual release of all-deleted -> refused with pool_not_configured, ZERO snapshot reads.
 	relAllDel, err := checkerV1.ReleaseByID(ctx, hAllDel.ID)
 	if err != nil || relAllDel.Released || !strings.Contains(relAllDel.Reason, quota.ReasonPoolNotConfigured) {
 		t.Fatalf("manual release all-deleted = %+v err=%v, want not released pool_not_configured", relAllDel, err)
 	}
-	// Periodic release: all-deleted stays held, while primary-now-unmeasured + deleted-alt releases to now-unmeasured (Item B)!
+	if v1LoadCalls != 0 {
+		t.Fatalf("manual release all-deleted loadCalls=%d, want 0", v1LoadCalls)
+	}
+
+	// Manual release of primary-now-unmeasured + deleted-alt -> releases to now-unmeasured, ZERO snapshot reads (Item B).
+	relUnmManual, err := checkerV1.ReleaseByID(ctx, hUnmPrimaryManual.ID)
+	if err != nil || !relUnmManual.Released || relUnmManual.SelectedPool != "now-unmeasured" {
+		t.Fatalf("manual release primary-now-unmeasured + deleted-alt = %+v err=%v, want released/now-unmeasured", relUnmManual, err)
+	}
+	if v1LoadCalls != 0 {
+		t.Fatalf("manual release primary-now-unmeasured loadCalls=%d, want 0", v1LoadCalls)
+	}
+
+	// Periodic release with ONLY skip-eligible held jobs (all-deleted + primary-now-unmeasured):
+	// all-deleted stays held, primary-now-unmeasured releases to now-unmeasured, ZERO snapshot reads!
 	if err := checkerV1.CheckOnce(ctx); err != nil {
-		t.Fatalf("CheckOnce: %v", err)
+		t.Fatalf("CheckOnce skip-only: %v", err)
+	}
+	if v1LoadCalls != 0 {
+		t.Fatalf("periodic CheckOnce with only skip-eligible held jobs read snapshot %d times, want 0", v1LoadCalls)
 	}
 	gotAllDel, _ := stV1.GetHeldJob(ctx, hAllDel.ID)
 	if gotAllDel.Status != store.HeldStatusHeld {
 		t.Errorf("all-deleted held status = %s, want held", gotAllDel.Status)
 	}
-	gotUnm, _ := stV1.GetHeldJob(ctx, hUnmPrimary.ID)
+	gotUnm, _ := stV1.GetHeldJob(ctx, hUnmPrimaryPeriodic.ID)
 	if gotUnm.Status != store.HeldStatusReleased || gotUnm.ReleasedPool != "now-unmeasured" {
-		t.Errorf("primary-now-unmeasured + deleted-alt = status:%s pool:%s, want released/now-unmeasured", gotUnm.Status, gotUnm.ReleasedPool)
+		t.Errorf("primary-now-unmeasured + deleted-alt (periodic) = status:%s pool:%s, want released/now-unmeasured", gotUnm.Status, gotUnm.ReleasedPool)
+	}
+
+	// Now add two measured held jobs alongside the remaining all-deleted held job -> CheckOnce defers load until first measured held job and reads ONCE!
+	hPartialMeasured1, _, err := stV1.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "h-part-m1", Pool: "removed-a", AltPools: []string{"demo-pool"},
+		Payload: store.CreateJobParams{RequestID: "h-part-m1", Title: "Partial Measured 1", Pool: "removed-a"}, Reason: "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob h-part-m1: %v", err)
+	}
+	hPartialMeasured2, _, err := stV1.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "h-part-m2", Pool: "demo-pool",
+		Payload: store.CreateJobParams{RequestID: "h-part-m2", Title: "Measured 2", Pool: "demo-pool"}, Reason: "exhausted:weekly",
+	})
+	if err != nil {
+		t.Fatalf("HoldJob h-part-m2: %v", err)
+	}
+	if err := checkerV1.CheckOnce(ctx); err != nil {
+		t.Fatalf("CheckOnce with measured held jobs: %v", err)
+	}
+	if v1LoadCalls != 1 {
+		t.Fatalf("periodic CheckOnce with 1 skip-eligible + 2 measured held jobs loadCalls=%d, want 1", v1LoadCalls)
+	}
+	if got, _ := stV1.GetHeldJob(ctx, hPartialMeasured1.ID); got.Status != store.HeldStatusReleased || got.ReleasedPool != "demo-pool" {
+		t.Errorf("partial deleted + healthy measured = status:%s pool:%s, want released/demo-pool", got.Status, got.ReleasedPool)
+	}
+	if got, _ := stV1.GetHeldJob(ctx, hPartialMeasured2.ID); got.Status != store.HeldStatusReleased || got.ReleasedPool != "demo-pool" {
+		t.Errorf("measured 2 = status:%s pool:%s, want released/demo-pool", got.Status, got.ReleasedPool)
+	}
+	if got, _ := stV1.GetHeldJob(ctx, hAllDel.ID); got.Status != store.HeldStatusHeld {
+		t.Errorf("all-deleted still held status=%s, want held", got.Status)
 	}
 
 	// Part 2 (Item A): Legacy mode with missing/format_mismatch usage file:
-	//   - With unmeasured alt U: registration selects U AND held release releases to U!
-	//   - Without unmeasured alt: registration passes (legacy compat) with snapshot_error, held release defers!
+	//   - With unmeasured alt U: registration selects U AND manual & periodic held release both release to U!
+	//   - Without unmeasured alt: registration passes (legacy compat) and records snapshot_error in gate_decisions,
+	//     while manual & periodic held release both defer!
 	stLeg, err := store.Open(ctx, filepath.Join(dir, "legacy.db"), store.Options{InstanceID: "legacy-a"})
 	if err != nil {
 		t.Fatalf("store.Open legacy: %v", err)
@@ -454,6 +558,7 @@ func TestHeldJobReleaseConfigChangesAndLegacyCompatItemA(t *testing.T) {
 	}
 	var jobU struct {
 		Job struct {
+			ID   int64  `json:"id"`
 			Pool string `json:"pool"`
 		} `json:"job"`
 	}
@@ -463,35 +568,78 @@ func TestHeldJobReleaseConfigChangesAndLegacyCompatItemA(t *testing.T) {
 		t.Fatalf("Item A legacy alt U on error: status=%d pool=%q, want 201 agy-argon", respU.StatusCode, jobU.Job.Pool)
 	}
 
-	// Registration without unmeasured alt on format_mismatch -> passes (legacy compat), records snapshot_error!
+	// Registration without unmeasured alt on format_mismatch -> passes (legacy compat), records unknown/snapshot_error in gate_decisions!
 	respNoU, err := http.Post(tsLeg.URL+"/jobs", "application/json", strings.NewReader(`{"request_id":"leg-nou","title":"Legacy No U","pool":"claude"}`))
 	if err != nil {
 		t.Fatalf("POST legacy no U: %v", err)
 	}
+	var jobNoU struct {
+		Job struct {
+			ID int64 `json:"id"`
+		} `json:"job"`
+	}
+	_ = json.NewDecoder(respNoU.Body).Decode(&jobNoU)
 	respNoU.Body.Close()
 	if respNoU.StatusCode != http.StatusCreated {
 		t.Fatalf("legacy no U on format_mismatch: status=%d, want 201", respNoU.StatusCode)
 	}
-
-	// Held jobs in legacy on format_mismatch: with U -> releases to U; without U -> deferred (409)!
-	hLegWithU, _, _ := stLeg.HoldJob(ctx, store.HoldJobParams{
-		RequestID: "h-leg-u", Pool: "claude", AltPools: []string{"agy-argon"},
-		Payload: store.CreateJobParams{RequestID: "h-leg-u", Title: "Held Leg U", Pool: "claude"}, Reason: "exhausted:weekly",
-	})
-	hLegNoU, _, _ := stLeg.HoldJob(ctx, store.HoldJobParams{
-		RequestID: "h-leg-nou", Pool: "claude",
-		Payload: store.CreateJobParams{RequestID: "h-leg-nou", Title: "Held Leg No U", Pool: "claude"}, Reason: "exhausted:weekly",
-	})
-	relWithU, err := legChecker.ReleaseByID(ctx, hLegWithU.ID)
-	if err != nil || !relWithU.Released || relWithU.SelectedPool != "agy-argon" {
-		t.Fatalf("Item A legacy held release with U = %+v err=%v, want released to agy-argon", relWithU, err)
+	legDecs, err := stLeg.ListGateDecisions(ctx, 10)
+	if err != nil || len(legDecs) < 2 {
+		t.Fatalf("legacy gate_decisions = %+v (err=%v), want >= 2", legDecs, err)
 	}
-	relNoU, err := legChecker.ReleaseByID(ctx, hLegNoU.ID)
+	var foundNoUSnapErr, foundUBypass bool
+	for _, d := range legDecs {
+		if d.JobID == jobNoU.Job.ID && d.Decision == string(quota.DecisionUnknown) &&
+			strings.Contains(d.Reason, quota.ReasonSnapshotError) && strings.Contains(d.Reason, quota.ReasonFormatMismatch) {
+			foundNoUSnapErr = true
+		}
+		if d.JobID == jobU.Job.ID && d.Decision == string(quota.DecisionWouldPass) && d.SelectedPool == "agy-argon" && d.Bypassed {
+			foundUBypass = true
+		}
+	}
+	if !foundNoUSnapErr {
+		t.Errorf("legacy no-U registration missing unknown/snapshot_error(format_mismatch) gate_decision record: %+v", legDecs)
+	}
+	if !foundUBypass {
+		t.Errorf("legacy with-U registration missing bypassed agy-argon gate_decision record: %+v", legDecs)
+	}
+
+	// Manual held release in legacy on format_mismatch: with U -> releases to U; without U -> deferred!
+	hLegManualU, _, _ := stLeg.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "h-leg-manual-u", Pool: "claude", AltPools: []string{"agy-argon"},
+		Payload: store.CreateJobParams{RequestID: "h-leg-manual-u", Title: "Held Leg Manual U", Pool: "claude"}, Reason: "exhausted:weekly",
+	})
+	hLegManualNoU, _, _ := stLeg.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "h-leg-manual-nou", Pool: "claude",
+		Payload: store.CreateJobParams{RequestID: "h-leg-manual-nou", Title: "Held Leg Manual No U", Pool: "claude"}, Reason: "exhausted:weekly",
+	})
+	relWithU, err := legChecker.ReleaseByID(ctx, hLegManualU.ID)
+	if err != nil || !relWithU.Released || relWithU.SelectedPool != "agy-argon" {
+		t.Fatalf("Item A legacy manual held release with U = %+v err=%v, want released to agy-argon", relWithU, err)
+	}
+	relNoU, err := legChecker.ReleaseByID(ctx, hLegManualNoU.ID)
 	if err != nil || relNoU.Released || !strings.Contains(relNoU.Reason, quota.ReasonSnapshotError) {
-		t.Fatalf("legacy held release without U = %+v err=%v, want deferred snapshot_error", relNoU, err)
+		t.Fatalf("legacy manual held release without U = %+v err=%v, want deferred snapshot_error", relNoU, err)
+	}
+
+	// Periodic CheckOnce in legacy on format_mismatch: with U -> releases to U; without U -> remains held!
+	hLegPeriodicU, _, _ := stLeg.HoldJob(ctx, store.HoldJobParams{
+		RequestID: "h-leg-periodic-u", Pool: "claude", AltPools: []string{"agy-argon"},
+		Payload: store.CreateJobParams{RequestID: "h-leg-periodic-u", Title: "Held Leg Periodic U", Pool: "claude"}, Reason: "exhausted:weekly",
+	})
+	if err := legChecker.CheckOnce(ctx); err != nil {
+		t.Fatalf("Item A legacy CheckOnce: %v", err)
+	}
+	gotLegPeriodicU, _ := stLeg.GetHeldJob(ctx, hLegPeriodicU.ID)
+	if gotLegPeriodicU.Status != store.HeldStatusReleased || gotLegPeriodicU.ReleasedPool != "agy-argon" {
+		t.Fatalf("Item A legacy periodic release with U = status:%s pool:%s, want released/agy-argon", gotLegPeriodicU.Status, gotLegPeriodicU.ReleasedPool)
+	}
+	gotLegPeriodicNoU, _ := stLeg.GetHeldJob(ctx, hLegManualNoU.ID)
+	if gotLegPeriodicNoU.Status != store.HeldStatusHeld {
+		t.Fatalf("Item A legacy periodic release without U = status:%s, want held", gotLegPeriodicNoU.Status)
 	}
 	if !strings.Contains(legLog.String(), "format_mismatch") {
 		t.Errorf("expected format_mismatch warning in legacy log, got:\n%s", legLog.String())
 	}
-	_ = fmt.Sprint(hLegWithU.ID)
+	_ = fmt.Sprint(hLegManualU.ID)
 }

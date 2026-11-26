@@ -236,10 +236,11 @@ func validateV1Snapshot(
 
 	for _, name := range snapPoolNames {
 		ps := snap.Pools[name]
+		sanitizedErr := SanitizeCollectorError(ps.Error)
 		summary := ValidatePoolSummary{
 			Pool:            name,
 			Status:          ps.EffectiveStatus(),
-			PoolError:       ps.Error,
+			PoolError:       sanitizedErr,
 			ShortApplicable: ps.ShortApplicable,
 		}
 		if !ps.WeeklyAbsent {
@@ -300,8 +301,8 @@ func validateV1Snapshot(
 		// Per-pool collector error (Rank 5 -> degraded exit 2).
 		if ps.EffectiveStatus() == PoolEntryStatusError {
 			msg := fmt.Sprintf("pools.%s reported collector error", name)
-			if ps.Error != "" {
-				msg += fmt.Sprintf(" (%s)", ps.Error)
+			if sanitizedErr != "" {
+				msg += fmt.Sprintf(" (%s)", sanitizedErr)
 			}
 			addDiag(SeverityDegraded, ReasonCollectorError, name, msg)
 		}

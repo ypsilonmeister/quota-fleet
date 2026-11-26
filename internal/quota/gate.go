@@ -266,11 +266,12 @@ func evaluatePoolV1(pool string, snap *Snapshot, opts EvalOptions) PoolEvaluatio
 
 	// Rank 5: per-pool collector error.
 	if ps.EffectiveStatus() == PoolEntryStatusError {
+		sanitizedErr := SanitizeCollectorError(ps.Error)
 		eval.Status = PoolUnknown
 		eval.Reason = ReasonCollectorError
-		eval.PoolError = ps.Error
-		if ps.Error != "" {
-			eval.Detail = ps.Error
+		eval.PoolError = sanitizedErr
+		if sanitizedErr != "" {
+			eval.Detail = sanitizedErr
 		}
 		return eval
 	}
@@ -813,8 +814,12 @@ func FormatHoldReason(eval GateEvaluation) string {
 		return "exhausted"
 	}
 	if eval.Reason != "" {
-		if eval.Detail != "" && !strings.Contains(eval.Reason, eval.Detail) {
-			return eval.Reason + ": " + eval.Detail
+		detail := eval.Detail
+		if eval.Reason == ReasonCollectorError && detail != "" {
+			detail = SanitizeCollectorError(detail)
+		}
+		if detail != "" && !strings.Contains(eval.Reason, detail) {
+			return eval.Reason + ": " + detail
 		}
 		return eval.Reason
 	}
@@ -827,8 +832,12 @@ func FormatDecisionReason(eval GateEvaluation) string {
 	if eval.Reason == "" {
 		return ""
 	}
-	if eval.Detail != "" && !strings.Contains(eval.Reason, eval.Detail) {
-		return eval.Reason + ": " + eval.Detail
+	detail := eval.Detail
+	if eval.Reason == ReasonCollectorError && detail != "" {
+		detail = SanitizeCollectorError(detail)
+	}
+	if detail != "" && !strings.Contains(eval.Reason, detail) {
+		return eval.Reason + ": " + detail
 	}
 	return eval.Reason
 }
@@ -877,6 +886,11 @@ type evaluationSnapshotSummary struct {
 // SummarizeEvaluation serializes a compact JSON summary of the snapshot and pool
 // states observed at gate decision time for persistence on held_jobs.
 func SummarizeEvaluation(eval GateEvaluation) string {
+	detail := eval.Detail
+	poolErr := SanitizeCollectorError(eval.PoolError)
+	if eval.Reason == ReasonCollectorError && detail != "" {
+		detail = SanitizeCollectorError(detail)
+	}
 	summary := evaluationSnapshotSummary{
 		Format:     eval.Format,
 		MeasuredAt: eval.MeasuredAt,
@@ -884,20 +898,25 @@ func SummarizeEvaluation(eval GateEvaluation) string {
 		Decision:   eval.Decision,
 		BlockedBy:  eval.BlockedBy,
 		Reason:     eval.Reason,
-		Detail:     eval.Detail,
-		PoolError:  eval.PoolError,
+		Detail:     detail,
+		PoolError:  poolErr,
 		AgeSeconds: eval.AgeSeconds,
 	}
 	if len(eval.Pools) > 0 {
 		summary.Pools = make([]poolSnapshotSummary, 0, len(eval.Pools))
 		for _, p := range eval.Pools {
+			pDetail := p.Detail
+			pPoolErr := SanitizeCollectorError(p.PoolError)
+			if p.Reason == ReasonCollectorError && pDetail != "" {
+				pDetail = SanitizeCollectorError(pDetail)
+			}
 			ps := poolSnapshotSummary{
 				Pool:       p.Pool,
 				Status:     p.Status,
 				BlockedBy:  p.BlockedBy,
 				Reason:     p.Reason,
-				Detail:     p.Detail,
-				PoolError:  p.PoolError,
+				Detail:     pDetail,
+				PoolError:  pPoolErr,
 				AgeSeconds: p.AgeSeconds,
 			}
 			if p.Snapshot != nil {

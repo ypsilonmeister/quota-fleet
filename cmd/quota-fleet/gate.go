@@ -85,6 +85,13 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	cfgExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" || f.Name == "c" {
+			cfgExplicit = true
+		}
+	})
+
 	pool = strings.TrimSpace(pool)
 	altPools := parseCommaList(altPoolsRaw)
 	if pool == "" && len(altPools) == 0 {
@@ -118,8 +125,9 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 			usageFile = strings.TrimSpace(cfg.Quota.UsageFile)
 		}
 	} else {
-		// Allow standalone checks with --usage-file when the default fleet.yaml does not exist.
-		if usageFile == "" || !errors.Is(err, os.ErrNotExist) {
+		// Allow standalone checks with --usage-file only when --config/-c was not explicitly specified
+		// and the default fleet.yaml does not exist.
+		if cfgExplicit || usageFile == "" || !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(stderr, "gate check failed: %v\n", err)
 			return 1
 		}
@@ -469,6 +477,13 @@ func runGateRelease(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	cfgExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" || f.Name == "c" {
+			cfgExplicit = true
+		}
+	})
+
 	formatFlag = strings.TrimSpace(formatFlag)
 	if formatFlag != "" {
 		if _, err := quota.NormalizeUsageFormat(formatFlag); err != nil {
@@ -492,7 +507,7 @@ func runGateRelease(args []string, stdout, stderr io.Writer) int {
 			usageFile = strings.TrimSpace(cfg.Quota.UsageFile)
 		}
 	} else {
-		if dbPath == "" || !errors.Is(err, os.ErrNotExist) {
+		if cfgExplicit || dbPath == "" || !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(stderr, "gate release failed: %v\n", err)
 			return 1
 		}

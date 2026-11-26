@@ -527,13 +527,18 @@ func (a *Admission) logEvaluationWarning(phase string, eval quota.GateEvaluation
 	if eval.Reason != "" {
 		parts = append(parts, "reason="+eval.Reason)
 	}
+	poolErr := quota.SanitizeCollectorError(eval.PoolError)
+	detail := eval.Detail
+	if eval.Reason == quota.ReasonCollectorError && detail != "" {
+		detail = quota.SanitizeCollectorError(detail)
+	}
 	if eval.Reason == quota.ReasonStale && eval.AgeSeconds != nil {
 		parts = append(parts, quota.FormatStaleUnarrivedMessage(time.Duration(*eval.AgeSeconds)*time.Second, a.staleAfter))
-	} else if eval.Detail != "" {
-		parts = append(parts, "detail="+eval.Detail)
+	} else if detail != "" && detail != poolErr {
+		parts = append(parts, "detail="+detail)
 	}
-	if eval.PoolError != "" {
-		parts = append(parts, "pool_error="+eval.PoolError)
+	if poolErr != "" {
+		parts = append(parts, "pool_error="+poolErr)
 	}
 	if snapErr != nil && !strings.Contains(eval.Detail, snapErr.Error()) && !strings.Contains(eval.Reason, snapErr.Error()) {
 		parts = append(parts, "snapshot_err="+snapErr.Error())

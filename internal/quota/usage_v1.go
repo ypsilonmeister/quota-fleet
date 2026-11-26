@@ -12,6 +12,43 @@ import (
 	"time"
 )
 
+const (
+	// MaxCollectorErrorLen bounds sanitized collector error codes/summaries emitted to
+	// diagnostics, operational logs, and persisted hold summaries.
+	MaxCollectorErrorLen = 64
+
+	// RedactedCollectorError is substituted when a collector supplies a non-conforming
+	// error string (e.g., containing newlines, control characters, whitespace/raw upstream text,
+	// or exceeding MaxCollectorErrorLen).
+	RedactedCollectorError = "unsanitized_error_redacted"
+)
+
+// SanitizeCollectorError ensures a collector-supplied pool error string is a short,
+// single-line sanitized code (ASCII [A-Za-z0-9._:-], length <= MaxCollectorErrorLen,
+// starting with an alphanumeric character). Empty or whitespace-only input returns "".
+// Any non-conforming input (newlines, control chars, spaces, raw upstream text, etc.) is
+// replaced with RedactedCollectorError so raw CLI output, upstream bodies, or credentials
+// never leak into CLI diagnostics, operational logs, or persisted hold summaries.
+func SanitizeCollectorError(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	if len(raw) > MaxCollectorErrorLen {
+		return RedactedCollectorError
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		isAlphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if i == 0 && !isAlphaNum {
+			return RedactedCollectorError
+		}
+		if !isAlphaNum && c != '_' && c != '-' && c != '.' && c != ':' {
+			return RedactedCollectorError
+		}
+	}
+	return raw
+}
+
 // ParseError classifies usage snapshot read/parse/schema failures so callers and CLI tools
 // can distinguish format mismatches, duplicate keys, JSON syntax errors, and schema violations.
 type ParseError struct {
@@ -392,14 +429,14 @@ func decodePoolEntryV1(name string, raw json.RawMessage) (PoolSnapshot, error) {
 		status = s
 	}
 
-	// error: optional string or null.
+	// error: optional string or null (receiver-sanitized to short code/summary).
 	var errSummary string
 	if v, ok := fields["error"]; ok && !isJSONNull(v) {
 		s, err := decodeStrictString(v, fmt.Sprintf("pools.%s.error", name))
 		if err != nil {
 			return PoolSnapshot{}, err
 		}
-		errSummary = s
+		errSummary = SanitizeCollectorError(s)
 	}
 
 	// measured_at: key MUST exist; non-null RFC3339 required when status=="ok"; null allowed when status=="error".

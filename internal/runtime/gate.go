@@ -148,16 +148,23 @@ func (g *GateChecker) CheckOnce(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("list held jobs: %w", err)
 		}
-		if len(page.Held) > 0 && !snapRead {
-			snap, snapErr = g.loadSnapshot()
-			snapRead = true
-		}
 		for _, held := range page.Held {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			seenIDs[held.ID] = struct{}{}
-			res, _ := g.tryReleaseHeld(ctx, held, snap, snapErr, true)
+			var (
+				heldSnap    *quota.Snapshot
+				heldSnapErr error
+			)
+			if !g.shouldSkipSnapshotForHeld(held) {
+				if !snapRead {
+					snap, snapErr = g.loadSnapshot()
+					snapRead = true
+				}
+				heldSnap, heldSnapErr = snap, snapErr
+			}
+			res, _ := g.tryReleaseHeld(ctx, held, heldSnap, heldSnapErr, true)
 			if res != nil && res.Released {
 				g.clearWarn(held.ID)
 			}

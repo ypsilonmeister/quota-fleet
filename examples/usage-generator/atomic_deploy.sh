@@ -19,6 +19,17 @@ SRC="$1"
 DEST="$2"
 QF_BIN="${3:-quota-fleet}"
 
+case "$DEST" in
+  ""|*/)
+    echo "atomic_deploy: destination must be a file path, not a directory: $DEST" >&2
+    exit 1
+    ;;
+esac
+if [ -d "$DEST" ]; then
+  echo "atomic_deploy: destination is a directory: $DEST" >&2
+  exit 1
+fi
+
 DEST_DIR="$(dirname "$DEST")"
 DEST_BASE="$(basename "$DEST")"
 mkdir -p "$DEST_DIR"
@@ -40,6 +51,11 @@ chmod 0644 "$TMP"
 exec 9>"$LOCK"
 flock -x 9
 
+if [ -d "$DEST" ]; then
+  echo "atomic_deploy: destination is a directory: $DEST" >&2
+  exit 1
+fi
+
 "$QF_BIN" usage validate \
   --file "$TMP" \
   --format v1 \
@@ -50,5 +66,5 @@ if [ -f "$DEST" ] && cmp -s "$TMP" "$DEST"; then
   exit 0
 fi
 
-mv -f "$TMP" "$DEST"
+mv -fT "$TMP" "$DEST"
 trap - EXIT
