@@ -663,6 +663,26 @@ html[data-direction="ledger"] .pool-card {
   font-size: 13px;
 }
 
+.pool-resets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  margin-top: 2px;
+}
+
+.pool-reset-label {
+  color: var(--muted);
+}
+
+.pool-reset-item {
+  white-space: nowrap;
+}
+
+.pool-reset-item.is-missing {
+  color: var(--muted);
+}
+
 /* ==========================================================================
    Tabs & Filter Bar
    ========================================================================== */

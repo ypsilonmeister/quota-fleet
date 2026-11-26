@@ -3,6 +3,7 @@ package ui
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -907,5 +908,150 @@ console.log("ALL_UI_MODELS_TESTS_PASSED");
 	}
 	if !strings.Contains(string(out), "ALL_UI_MODELS_TESTS_PASSED") {
 		t.Fatalf("unexpected node test output: %s", string(out))
+	}
+}
+
+func TestUIPoolResetTimesAssetsAndLogicWithNode(t *testing.T) {
+	js := string(appJS)
+	for _, token := range []string{
+		"formatWeeklyResetTime",
+		"formatShortResetTime",
+		"formatPoolResetLabels",
+		"pool-resets",
+		"pool-reset-label",
+		"pool-reset-item",
+		`L("dashboard.resetLabel")`,
+		`L("dashboard.resetNone")`,
+	} {
+		if !strings.Contains(js, token) {
+			t.Errorf("app.js missing expected pool reset time token %q", token)
+		}
+	}
+
+	assertJapaneseMessages(t, map[string]string{
+		"dashboard.resetLabel":              "リセット:",
+		"dashboard.resetNone":               "なし",
+		"dashboard.weeklyReset":             "週次 {time}",
+		"dashboard.weeklyResetMissing":      "週次 なし",
+		"dashboard.shortReset":              "{window} {time}",
+		"dashboard.shortResetMissing":       "{window} なし",
+		"dashboard.shortResetNotApplicable": "{window} 対象外",
+	})
+
+	css := string(styleCSS)
+	for _, cls := range []string{
+		".pool-resets",
+		".pool-reset-label",
+		".pool-reset-item",
+		".pool-reset-item.is-missing",
+	} {
+		if !strings.Contains(css, cls) {
+			t.Errorf("style.css missing expected pool reset selector %q", cls)
+		}
+	}
+
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available in PATH; skipping JS pool reset time test")
+	}
+
+	scriptJST := `
+const assert = require("assert");
+const i18n = require("./assets/i18n.js");
+const ui = require("./assets/app.js");
+
+// 1. Direct formatters in JST
+assert.strictEqual(ui.formatWeeklyResetTime("2026-11-26T20:00:00+09:00"), "11/26 20:00");
+assert.strictEqual(ui.formatWeeklyResetTime("2026-12-03T00:05:00+09:00"), "12/3 00:05");
+assert.strictEqual(ui.formatWeeklyResetTime("2026-12-03T11:00:00Z"), "12/3 20:00");
+assert.strictEqual(ui.formatWeeklyResetTime(""), "");
+assert.strictEqual(ui.formatWeeklyResetTime(null), "");
+assert.strictEqual(ui.formatWeeklyResetTime("invalid-date"), "");
+
+assert.strictEqual(ui.formatShortResetTime("2026-11-23T14:30:00+09:00"), "14:30");
+assert.strictEqual(ui.formatShortResetTime("2026-11-23T05:07:00+09:00"), "05:07");
+assert.strictEqual(ui.formatShortResetTime("2026-11-26T22:54:25Z"), "07:54");
+assert.strictEqual(ui.formatShortResetTime(""), "");
+assert.strictEqual(ui.formatShortResetTime(undefined), "");
+assert.strictEqual(ui.formatShortResetTime("not-a-timestamp"), "");
+
+// 2. Pool reset labels in JA (both present, alt short missing, both missing, short_applicable=false, approx + custom window)
+const both = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T20:00:00+09:00",
+  short_reset_at: "2026-11-23T14:30:00+09:00"
+});
+assert.strictEqual(both.weeklyText, "週次 11/26 20:00");
+assert.strictEqual(both.weeklyMissing, false);
+assert.strictEqual(both.weeklyRaw, "2026-11-26T20:00:00+09:00");
+assert.strictEqual(both.shortText, "5h 14:30");
+assert.strictEqual(both.shortMissing, false);
+assert.strictEqual(both.shortRaw, "2026-11-23T14:30:00+09:00");
+
+const altNoShort = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T01:32:24+09:00",
+  short_reset_at: null
+});
+assert.strictEqual(altNoShort.weeklyText, "週次 11/26 01:32");
+assert.strictEqual(altNoShort.weeklyMissing, false);
+assert.strictEqual(altNoShort.shortText, "5h なし");
+assert.strictEqual(altNoShort.shortMissing, true);
+assert.strictEqual(altNoShort.shortRaw, "");
+
+const none = ui.formatPoolResetLabels({});
+assert.strictEqual(none.weeklyText, "週次 なし");
+assert.strictEqual(none.weeklyMissing, true);
+assert.strictEqual(none.shortText, "5h なし");
+assert.strictEqual(none.shortMissing, true);
+
+const weeklyOnly = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-12-03T00:00:00Z",
+  weekly_reset_at_approx: true,
+  short_applicable: false
+});
+assert.strictEqual(weeklyOnly.weeklyText, "週次 ~12/3 09:00");
+assert.strictEqual(weeklyOnly.weeklyMissing, false);
+assert.strictEqual(weeklyOnly.shortText, "5h 対象外");
+assert.strictEqual(weeklyOnly.shortMissing, true);
+
+const customWin = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-12-03T09:29:03Z",
+  short_reset_at: "2026-11-26T23:29:03Z",
+  short_reset_at_approx: true,
+  short_window: "1h"
+});
+assert.strictEqual(customWin.weeklyText, "週次 12/3 18:29");
+assert.strictEqual(customWin.shortText, "1h ~08:29");
+
+// 3. EN locale output
+i18n.setLocale("en", false);
+assert.strictEqual(ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T20:00:00+09:00",
+  short_reset_at: "2026-11-23T14:30:00+09:00"
+}).weeklyText, "Weekly 11/26 20:00");
+assert.strictEqual(ui.formatPoolResetLabels({}).weeklyText, "Weekly none");
+assert.strictEqual(ui.formatPoolResetLabels({}).shortText, "5h none");
+assert.strictEqual(ui.formatPoolResetLabels({ short_applicable: false }).shortText, "5h N/A");
+
+console.log("ALL_UI_POOL_RESET_JST_TESTS_PASSED");
+`
+	cmdJST := exec.Command(nodeBin, "-e", scriptJST)
+	cmdJST.Env = append(os.Environ(), "TZ=Asia/Tokyo")
+	outJST, err := cmdJST.CombinedOutput()
+	if err != nil || !strings.Contains(string(outJST), "ALL_UI_POOL_RESET_JST_TESTS_PASSED") {
+		t.Fatalf("node pool reset JST tests failed: %v\n%s", err, string(outJST))
+	}
+
+	scriptUTC := `
+const assert = require("assert");
+const ui = require("./assets/app.js");
+assert.strictEqual(ui.formatWeeklyResetTime("2026-12-03T11:00:00Z"), "12/3 11:00");
+assert.strictEqual(ui.formatShortResetTime("2026-11-26T22:54:25Z"), "22:54");
+console.log("ALL_UI_POOL_RESET_UTC_TESTS_PASSED");
+`
+	cmdUTC := exec.Command(nodeBin, "-e", scriptUTC)
+	cmdUTC.Env = append(os.Environ(), "TZ=UTC")
+	outUTC, err := cmdUTC.CombinedOutput()
+	if err != nil || !strings.Contains(string(outUTC), "ALL_UI_POOL_RESET_UTC_TESTS_PASSED") {
+		t.Fatalf("node pool reset UTC tests failed: %v\n%s", err, string(outUTC))
 	}
 }

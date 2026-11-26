@@ -762,6 +762,75 @@
     return t("form.derivedPoolNone");
   }
 
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function formatWeeklyResetTime(iso) {
+    if (typeof iso !== "string" || iso.trim() === "") {
+      return "";
+    }
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) {
+      return "";
+    }
+    return (d.getMonth() + 1) + "/" + d.getDate() + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  function formatShortResetTime(iso) {
+    if (typeof iso !== "string" || iso.trim() === "") {
+      return "";
+    }
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) {
+      return "";
+    }
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  function formatPoolResetLabels(ps) {
+    const item = ps && typeof ps === "object" ? ps : {};
+    const shortWindow = (typeof item.short_window === "string" && item.short_window.trim())
+      ? item.short_window.trim()
+      : "5h";
+    const weeklyRaw = typeof item.weekly_reset_at === "string" ? item.weekly_reset_at.trim() : "";
+    const shortRaw = typeof item.short_reset_at === "string" ? item.short_reset_at.trim() : "";
+
+    const weeklyFormatted = formatWeeklyResetTime(weeklyRaw);
+    let weeklyText;
+    let weeklyMissing = false;
+    if (weeklyFormatted) {
+      const wt = item.weekly_reset_at_approx ? ("~" + weeklyFormatted) : weeklyFormatted;
+      weeklyText = t("dashboard.weeklyReset", { time: wt });
+    } else {
+      weeklyText = t("dashboard.weeklyResetMissing");
+      weeklyMissing = true;
+    }
+
+    const shortFormatted = formatShortResetTime(shortRaw);
+    let shortText;
+    let shortMissing = false;
+    if (shortFormatted) {
+      const st = item.short_reset_at_approx ? ("~" + shortFormatted) : shortFormatted;
+      shortText = t("dashboard.shortReset", { window: shortWindow, time: st });
+    } else if (item.short_applicable === false) {
+      shortText = t("dashboard.shortResetNotApplicable", { window: shortWindow });
+      shortMissing = true;
+    } else {
+      shortText = t("dashboard.shortResetMissing", { window: shortWindow });
+      shortMissing = true;
+    }
+
+    return {
+      weeklyText: weeklyText,
+      weeklyMissing: weeklyMissing,
+      weeklyRaw: weeklyFormatted ? weeklyRaw : "",
+      shortText: shortText,
+      shortMissing: shortMissing,
+      shortRaw: shortFormatted ? shortRaw : ""
+    };
+  }
+
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       detectPreferredDirection: detectPreferredDirection,
@@ -783,7 +852,10 @@
       deriveModelFamily: deriveModelFamily,
       matchesModelFamily: matchesModelFamily,
       derivePoolForSelection: derivePoolForSelection,
-      formatDerivedPoolLabel: formatDerivedPoolLabel
+      formatDerivedPoolLabel: formatDerivedPoolLabel,
+      formatWeeklyResetTime: formatWeeklyResetTime,
+      formatShortResetTime: formatShortResetTime,
+      formatPoolResetLabels: formatPoolResetLabels
     };
   }
 
@@ -1343,6 +1415,10 @@
         const lines = [];
         if (ps.unmeasured) {
           lines.push(el("div", { className: "small muted", text: L("dashboard.unmeasured") }));
+          lines.push(el("div", { className: "pool-resets small" }, [
+            el("span", { className: "pool-reset-label", text: L("dashboard.resetLabel") }),
+            el("span", { className: "pool-reset-item is-missing", text: L("dashboard.resetNone") })
+          ]));
         } else {
           if (ps.weekly_remaining_percent !== undefined && ps.weekly_remaining_percent !== null) {
             lines.push(el("div", { className: "small", text: L("dashboard.weeklyRemaining", { percent: ps.weekly_remaining_percent }) }));
@@ -1350,6 +1426,20 @@
           if (ps.short_remaining_percent !== undefined && ps.short_remaining_percent !== null) {
             lines.push(el("div", { className: "small", text: L("dashboard.shortRemaining", { percent: ps.short_remaining_percent }) }));
           }
+          const resets = formatPoolResetLabels(ps);
+          lines.push(el("div", { className: "pool-resets small" }, [
+            el("span", { className: "pool-reset-label", text: L("dashboard.resetLabel") }),
+            el("span", {
+              className: resets.weeklyMissing ? "pool-reset-item is-missing" : "pool-reset-item mono",
+              title: resets.weeklyRaw || null,
+              text: function () { return formatPoolResetLabels(ps).weeklyText; }
+            }),
+            el("span", {
+              className: resets.shortMissing ? "pool-reset-item is-missing" : "pool-reset-item mono",
+              title: resets.shortRaw || null,
+              text: function () { return formatPoolResetLabels(ps).shortText; }
+            })
+          ]));
           if (ps.measured_at) {
             lines.push(el("div", { className: "small muted" }, [
               L("dashboard.measuredAt"),

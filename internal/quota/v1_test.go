@@ -714,3 +714,119 @@ func TestSanitizeCollectorErrorAndEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+func TestParseUsageJSONV1ResetTimesPreserved(t *testing.T) {
+	raw := `{
+		"schema_version": 1,
+		"generated_at": "2026-11-26T20:30:12Z",
+		"pools": {
+			"claude": {
+				"status": "ok",
+				"measured_at": "2026-11-26T20:29:48Z",
+				"weekly": { "remaining_percent": 100, "reset_at": "2026-12-03T11:00:00Z" },
+				"short": { "remaining_percent": 100, "reset_at": null, "window": "5h" }
+			},
+			"codex": {
+				"status": "error",
+				"error": "probe_auth_expired",
+				"measured_at": "2026-11-26T19:59:44Z",
+				"weekly": { "remaining_percent": 62, "reset_at": "2026-12-01T05:54:42Z" },
+				"short": { "remaining_percent": 63, "reset_at": "2026-11-26T22:54:25Z", "window": "5h" }
+			},
+			"agy-gemini": {
+				"status": "ok",
+				"measured_at": "2026-11-26T20:30:10Z",
+				"weekly": { "remaining_percent": 94, "reset_at": "2026-12-03T09:29:03Z", "reset_at_approx": false },
+				"short": { "remaining_percent": 79, "reset_at": "2026-11-26T23:29:03Z", "reset_at_approx": true, "window": "1h" }
+			},
+			"agy-3p": {
+				"status": "ok",
+				"measured_at": "2026-11-26T20:30:10Z",
+				"weekly": { "remaining_percent": 0, "reset_at": "2026-12-02T08:24:03Z", "reset_at_approx": false },
+				"short": null
+			},
+			"weekly-only-plan": {
+				"status": "ok",
+				"measured_at": "2026-11-26T20:30:11Z",
+				"weekly": { "remaining_percent": 80, "reset_at": "2026-12-03T00:00:00+09:00", "reset_at_approx": true },
+				"short": { "applicable": false }
+			},
+			"initial-err": {
+				"status": "error",
+				"error": "probe_timeout",
+				"measured_at": null,
+				"weekly": null
+			}
+		}
+	}`
+
+	snap, err := ParseUsageJSONWithFormat([]byte(raw), FormatV1)
+	if err != nil {
+		t.Fatalf("ParseUsageJSONWithFormat(v1): %v", err)
+	}
+
+	assertExact := func(label string, got *time.Time, want string) {
+		t.Helper()
+		if got == nil {
+			t.Fatalf("%s = nil, want %s", label, want)
+		}
+		if gotStr := got.Format(time.RFC3339); gotStr != want {
+			t.Errorf("%s = %q, want verbatim %q", label, gotStr, want)
+		}
+	}
+
+	// claude: weekly present, short.reset_at explicitly null
+	assertExact("claude.WeeklyResetAt", snap.Pools["claude"].WeeklyResetAt, "2026-12-03T11:00:00Z")
+	if snap.Pools["claude"].ShortResetAt != nil {
+		t.Errorf("claude.ShortResetAt = %v, want nil", snap.Pools["claude"].ShortResetAt)
+	}
+	if snap.Pools["claude"].ShortWindow != "5h" {
+		t.Errorf("claude.ShortWindow = %q, want 5h", snap.Pools["claude"].ShortWindow)
+	}
+
+	// codex: status=error retains prior weekly/short reset timestamps
+	assertExact("codex.WeeklyResetAt", snap.Pools["codex"].WeeklyResetAt, "2026-12-01T05:54:42Z")
+	assertExact("codex.ShortResetAt", snap.Pools["codex"].ShortResetAt, "2026-11-26T22:54:25Z")
+
+	// agy-gemini: both present + short approx & custom window
+	assertExact("agy-gemini.WeeklyResetAt", snap.Pools["agy-gemini"].WeeklyResetAt, "2026-12-03T09:29:03Z")
+	assertExact("agy-gemini.ShortResetAt", snap.Pools["agy-gemini"].ShortResetAt, "2026-11-26T23:29:03Z")
+	if !snap.Pools["agy-gemini"].ShortResetAtApprox || snap.Pools["agy-gemini"].ShortWindow != "1h" {
+		t.Errorf("agy-gemini short metadata = approx:%v window:%q", snap.Pools["agy-gemini"].ShortResetAtApprox, snap.Pools["agy-gemini"].ShortWindow)
+	}
+
+	// agy-3p: weekly present, short null
+	assertExact("agy-3p.WeeklyResetAt", snap.Pools["agy-3p"].WeeklyResetAt, "2026-12-02T08:24:03Z")
+	if snap.Pools["agy-3p"].ShortResetAt != nil {
+		t.Errorf("agy-3p.ShortResetAt = %v, want nil", snap.Pools["agy-3p"].ShortResetAt)
+	}
+
+	// weekly-only-plan: preserves +09:00 offset and approx flag, short applicable=false
+	assertExact("weekly-only-plan.WeeklyResetAt", snap.Pools["weekly-only-plan"].WeeklyResetAt, "2026-12-03T00:00:00+09:00")
+	if !snap.Pools["weekly-only-plan"].WeeklyResetAtApprox {
+		t.Errorf("weekly-only-plan.WeeklyResetAtApprox = false, want true")
+	}
+	if snap.Pools["weekly-only-plan"].ShortApplicable == nil || *snap.Pools["weekly-only-plan"].ShortApplicable || snap.Pools["weekly-only-plan"].ShortResetAt != nil {
+		t.Errorf("weekly-only-plan short = applicable:%v reset:%v", snap.Pools["weekly-only-plan"].ShortApplicable, snap.Pools["weekly-only-plan"].ShortResetAt)
+	}
+
+	// initial-err: weekly null -> WeeklyAbsent=true, both reset times nil
+	if !snap.Pools["initial-err"].WeeklyAbsent || snap.Pools["initial-err"].WeeklyResetAt != nil || snap.Pools["initial-err"].ShortResetAt != nil {
+		t.Errorf("initial-err = %+v", snap.Pools["initial-err"])
+	}
+
+	// docs/23-usage-snapshot.md: empty string "" for reset_at is a schema violation
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"empty weekly.reset_at", `{"schema_version":1,"generated_at":"2026-11-26T20:30:12Z","pools":{"p":{"measured_at":"2026-11-26T20:30:10Z","weekly":{"remaining_percent":80,"reset_at":""}}}}`},
+		{"empty short.reset_at", `{"schema_version":1,"generated_at":"2026-11-26T20:30:12Z","pools":{"p":{"measured_at":"2026-11-26T20:30:10Z","weekly":{"remaining_percent":80},"short":{"remaining_percent":50,"reset_at":""}}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseUsageJSONWithFormat([]byte(tc.body), FormatV1); err == nil || ParseErrorCode(err) != "schema_violation" {
+				t.Errorf("%s: err=%v (code=%s), want schema_violation", tc.name, err, ParseErrorCode(err))
+			}
+		})
+	}
+}

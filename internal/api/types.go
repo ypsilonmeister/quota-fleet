@@ -445,8 +445,12 @@ type PoolSummaryDTO struct {
 	Reason                 string     `json:"reason,omitempty"`
 	WeeklyRemainingPercent *int       `json:"weekly_remaining_percent,omitempty"`
 	WeeklyResetAt          *time.Time `json:"weekly_reset_at,omitempty"`
+	WeeklyResetAtApprox    bool       `json:"weekly_reset_at_approx,omitempty"`
+	ShortApplicable        *bool      `json:"short_applicable,omitempty"`
 	ShortRemainingPercent  *int       `json:"short_remaining_percent,omitempty"`
 	ShortResetAt           *time.Time `json:"short_reset_at,omitempty"`
+	ShortResetAtApprox     bool       `json:"short_reset_at_approx,omitempty"`
+	ShortWindow            string     `json:"short_window,omitempty"`
 	MeasuredAt             *time.Time `json:"measured_at,omitempty"`
 	ServiceStale           bool       `json:"service_stale,omitempty"`
 }
