@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentmodels"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentver"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
@@ -462,6 +463,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	// docs/21: effort is checked against the agent the job will actually run on (after the
 	// Selector filled it), before the Gate may hold the payload. Never silently dropped.
 	if err := store.ValidateEffort(params.Agent, params.Effort); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.checkEffortLaunch(params); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1805,4 +1810,27 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, ErrorResponse{Error: message})
+}
+
+// checkEffortLaunch rejects an effort that the job's host could not pass to the agent CLI
+// (docs/21 §3): the driver for the job's host and agent is resolved from fleet.yaml (launch /
+// resume template and the per-host command override) and must launch the agent's own CLI.
+// Without a loaded config or a known host there is nothing to resolve, and the check is skipped.
+func (s *Server) checkEffortLaunch(p store.CreateJobParams) error {
+	if strings.TrimSpace(p.Effort) == "" || s.cfg == nil {
+		return nil
+	}
+	host := strings.TrimSpace(p.Host)
+	hc, ok := s.cfg.Hosts[host]
+	if !ok {
+		return nil
+	}
+	drv, err := adapter.ResolveDriver(s.cfg, hc, p.Agent)
+	if err == nil {
+		err = drv.CheckEffort(&store.Job{Agent: p.Agent, Effort: p.Effort, SessionID: p.SessionID})
+	}
+	if err != nil {
+		return fmt.Errorf("%w: host %q: %s", store.ErrInvalidInput, host, strings.TrimPrefix(err.Error(), "adapter: "))
+	}
+	return nil
 }

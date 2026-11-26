@@ -329,6 +329,73 @@ func effortArgs(agentName, effort string) []string {
 	return nil
 }
 
+// insertBeforeOptionEnd inserts extra options into a rendered command line (tokens[0] is the
+// executable). When the template contains the end-of-options marker `--`, the options go just
+// before it, because a CLI treats everything after `--` as positional arguments (docs/21 §3:
+// `codex exec ... -- -c model_reasoning_effort=low` fails with "unexpected argument").
+// Otherwise they are appended at the end.
+func insertBeforeOptionEnd(tokens, extra []string) []string {
+	if len(extra) == 0 {
+		return tokens
+	}
+	for i := 1; i < len(tokens); i++ {
+		if tokens[i] == "--" {
+			out := make([]string, 0, len(tokens)+len(extra))
+			out = append(out, tokens[:i]...)
+			out = append(out, extra...)
+			return append(out, tokens[i:]...)
+		}
+	}
+	return append(tokens, extra...)
+}
+
+// CheckEffort reports why this driver cannot pass job.Effort to the agent CLI on launch, or nil
+// when it can (or the job has no effort). The API calls it at registration with the driver
+// resolved for the job's host (docs/21 §3), so a job whose effort would not reach the CLI is
+// rejected with 400 instead of failing or silently running at the default effort later.
+//
+// The effort arguments are CLI-specific (`--effort` for claude, `-c model_reasoning_effort=` for
+// codex), so the executable that the selected launch/resume template runs (after the per-host
+// `command` override) must be that agent's own CLI: its base name, without directory or a
+// Windows extension (.exe/.cmd/.bat/.ps1), must equal the agent name. A wrapper script or a
+// different binary may not accept the arguments, so it is rejected.
+func (d AgentDriver) CheckEffort(job *store.Job) error {
+	if job == nil || strings.TrimSpace(job.Effort) == "" {
+		return nil
+	}
+	if effortArgs(d.Name, job.Effort) == nil {
+		return fmt.Errorf("adapter: effort is not supported for agent %q", d.Name)
+	}
+	tmpl, _ := d.selectLaunchTemplate(job)
+	exe := strings.TrimSpace(d.CommandOverride)
+	if exe == "" {
+		fields := strings.Fields(tmpl)
+		if len(fields) == 0 {
+			return fmt.Errorf("adapter: agent %q has empty launch template", d.Name)
+		}
+		exe = fields[0]
+	}
+	if !strings.EqualFold(commandBaseName(exe), strings.TrimSpace(d.Name)) {
+		return fmt.Errorf("adapter: agent %q is launched via %q, which is not the %s CLI, so the effort cannot be passed", d.Name, exe, d.Name)
+	}
+	return nil
+}
+
+// commandBaseName returns the executable name without directory and Windows extension.
+func commandBaseName(exe string) string {
+	exe = strings.Trim(strings.TrimSpace(exe), `"'`)
+	if i := strings.LastIndexAny(exe, `/\`); i >= 0 {
+		exe = exe[i+1:]
+	}
+	lower := strings.ToLower(exe)
+	for _, ext := range []string{".exe", ".cmd", ".bat", ".ps1"} {
+		if strings.HasSuffix(lower, ext) {
+			return exe[:len(exe)-len(ext)]
+		}
+	}
+	return exe
+}
+
 // selectLaunchTemplate chooses the resume template when job.SessionID is set and the driver
 // supports resume, otherwise falling back to the standard launch template.
 func (d AgentDriver) selectLaunchTemplate(job *store.Job) (string, bool) {
@@ -411,13 +478,15 @@ func (d AgentDriver) BuildLaunchCommand(job *store.Job, workdir, promptFile, log
 		expanded = append(expanded, tok)
 	}
 
+	var effortToks []string
 	for _, a := range effortArgs(d.Name, job.Effort) {
 		if isSafeBareToken(a) {
-			expanded = append(expanded, a)
+			effortToks = append(effortToks, a)
 		} else {
-			expanded = append(expanded, shellQuote(a))
+			effortToks = append(effortToks, shellQuote(a))
 		}
 	}
+	expanded = insertBeforeOptionEnd(expanded, effortToks)
 
 	if allowSandbox && strings.TrimSpace(d.SandboxFlag) != "" {
 		expanded = append(expanded, strings.Fields(d.SandboxFlag)...)
@@ -519,7 +588,7 @@ func (d AgentDriver) BuildWindowsLaunchCommand(job *store.Job, workdir, promptFi
 		rawTokens = append(rawTokens, tok)
 	}
 
-	rawTokens = append(rawTokens, effortArgs(d.Name, job.Effort)...)
+	rawTokens = insertBeforeOptionEnd(rawTokens, effortArgs(d.Name, job.Effort))
 
 	if allowSandbox && strings.TrimSpace(d.SandboxFlag) != "" {
 		rawTokens = append(rawTokens, strings.Fields(d.SandboxFlag)...)

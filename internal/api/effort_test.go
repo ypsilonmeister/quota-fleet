@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -88,5 +89,77 @@ func TestCreateJobEffortWithSelector(t *testing.T) {
 	}
 	if job.Agent != "codex" || job.Effort != "high" {
 		t.Fatalf("job agent=%q effort=%q, want codex/high (record-mode default agent)", job.Agent, job.Effort)
+	}
+}
+
+// Review item 1: registration rejects an effort the job's host could not pass to the agent CLI
+// (the host launches the agent through a different executable), and accepts the agent's own CLI.
+func TestCreateJobEffortHostLaunchCommand(t *testing.T) {
+	cfg := &config.Config{
+		Hosts: map[string]config.HostConfig{
+			"plain":   {OS: "linux"},
+			"pathed":  {OS: "linux", Agents: map[string]config.HostAgentOverride{"claude": {Command: "/home/u/.local/bin/claude"}}},
+			"wrapped": {OS: "linux", Agents: map[string]config.HostAgentOverride{"claude": {Command: "/opt/bin/run-agent.sh"}}},
+		},
+	}
+	_, _, ts := newTestServer(t, Options{InstanceID: "effort-host", Config: cfg, Hosts: []string{"plain", "pathed", "wrapped"}, Agents: []string{"claude", "codex"}})
+
+	for _, c := range []struct {
+		id, host string
+		effort   string
+		want     int
+	}{
+		{"h-plain", "plain", "high", http.StatusCreated},
+		{"h-pathed", "pathed", "high", http.StatusCreated},
+		{"h-wrapped", "wrapped", "high", http.StatusBadRequest},
+		{"h-wrapped-none", "wrapped", "", http.StatusCreated},
+	} {
+		status, _, body := postJob(t, ts.URL, CreateJobRequest{RequestID: c.id, Title: "t", Agent: "claude", Host: c.host, Effort: c.effort})
+		if status != c.want {
+			t.Errorf("%s: status=%d body=%s, want %d", c.id, status, body, c.want)
+		}
+		if c.want == http.StatusBadRequest && !strings.Contains(body, "not the claude CLI") {
+			t.Errorf("%s: body=%s, want reason", c.id, body)
+		}
+	}
+}
+
+// Review item 4: where effort appears in each response shape (docs/21 §2).
+func TestCreateJobEffortResponsePaths(t *testing.T) {
+	now := time.Now()
+	url := selectorGateServer(t, config.SelectorModeOff, config.GateModeOff, healthySnap(now), now, nil)
+	resp := doJSON(t, http.MethodPost, url+"/jobs", "", CreateJobRequest{RequestID: "paths", Title: "t", Agent: "codex", Effort: "low"})
+	var created struct {
+		Job map[string]any `json:"job"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode POST: %v", err)
+	}
+	resp.Body.Close()
+	if created.Job["effort"] != "low" {
+		t.Fatalf("POST job.effort = %v", created.Job["effort"])
+	}
+	id := created.Job["id"]
+
+	resp = doJSON(t, http.MethodGet, url+"/jobs?status=queued", "", nil)
+	var list struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	resp.Body.Close()
+	if len(list.Jobs) != 1 || list.Jobs[0]["effort"] != "low" {
+		t.Fatalf("GET /jobs jobs[].effort = %v", list.Jobs)
+	}
+
+	resp = doJSON(t, http.MethodGet, fmt.Sprintf("%s/jobs/%v", url, id), "", nil)
+	var detail map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	resp.Body.Close()
+	if detail["effort"] != "low" {
+		t.Fatalf("GET /jobs/{id} top-level effort = %v", detail["effort"])
 	}
 }

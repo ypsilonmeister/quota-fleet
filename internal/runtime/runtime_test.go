@@ -1374,6 +1374,7 @@ func TestGateCheckerAutoReleaseSoonestResetAndFailureRetention(t *testing.T) {
 			Instructions: "do it",
 			Pool:         "claude",
 			AltPools:     []string{"codex"},
+			Effort:       "high", // docs/21: must survive the real release path
 		},
 		Reason: "exhausted:weekly",
 	})
@@ -1434,7 +1435,7 @@ func TestGateCheckerAutoReleaseSoonestResetAndFailureRetention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJob released: %v", err)
 	}
-	if createdJob.RequestID != "gc-rel-ok" || createdJob.Pool != "codex" || createdJob.Title != "Recoverable Held Job" {
+	if createdJob.RequestID != "gc-rel-ok" || createdJob.Pool != "codex" || createdJob.Title != "Recoverable Held Job" || createdJob.Effort != "high" {
 		t.Errorf("createdJob = %+v", createdJob)
 	}
 
