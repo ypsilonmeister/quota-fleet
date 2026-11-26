@@ -1119,6 +1119,16 @@ assert.strictEqual(crossedNY.labelText, "リセット (America/New_York):");
 assert.strictEqual(crossedNY.weeklyText, "週次 11/25 11:32");
 assert.strictEqual(crossedNY.shortText, "5h 15:07");
 
+// Across a DST transition with Intl intact, the single IANA timezone name still applies to both.
+const dstWithIntl = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-03T12:00:00Z",
+  short_reset_at: "2026-11-01T04:00:00Z"
+});
+assert.strictEqual(dstWithIntl.timeZone, "America/New_York");
+assert.strictEqual(dstWithIntl.labelText, "リセット (America/New_York):");
+assert.strictEqual(dstWithIntl.weeklyText, "週次 11/3 07:00");
+assert.strictEqual(dstWithIntl.shortText, "5h 00:00");
+
 console.log("ALL_UI_POOL_RESET_NY_TESTS_PASSED");
 `
 	cmdNY := exec.Command(nodeBin, "-e", scriptNY)
@@ -1126,6 +1136,91 @@ console.log("ALL_UI_POOL_RESET_NY_TESTS_PASSED");
 	outNY, err := cmdNY.CombinedOutput()
 	if err != nil || !strings.Contains(string(outNY), "ALL_UI_POOL_RESET_NY_TESTS_PASSED") {
 		t.Fatalf("node pool reset America/New_York tests failed: %v\n%s", err, string(outNY))
+	}
+
+	// DST transition with Intl unavailable: numeric offsets differ between weekly and short,
+	// so each timestamp shows its own offset and the card label does not show a misleading single offset.
+	scriptDSTFallback := `
+const assert = require("assert");
+globalThis.Intl = undefined;
+const i18n = require("./assets/i18n.js");
+const ui = require("./assets/app.js");
+
+// Fall-back DST transition (EDT -> EST): weekly in UTC-05:00, short in UTC-04:00.
+const fallBack = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-03T12:00:00Z",
+  short_reset_at: "2026-11-01T04:00:00Z"
+});
+assert.strictEqual(fallBack.timeZone, "");
+assert.strictEqual(fallBack.weeklyTimeZone, "UTC-05:00");
+assert.strictEqual(fallBack.shortTimeZone, "UTC-04:00");
+assert.strictEqual(fallBack.labelText, "リセット:");
+assert.strictEqual(fallBack.weeklyText, "週次 11/3 07:00 (UTC-05:00)");
+assert.strictEqual(fallBack.shortText, "5h 00:00 (UTC-04:00)");
+assert.strictEqual(fallBack.weeklyRaw, "2026-11-03T12:00:00Z");
+assert.strictEqual(fallBack.shortRaw, "2026-11-01T04:00:00Z");
+
+// Approx markers and custom short window preserve per-timestamp offsets.
+const fallBackApprox = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-03T12:00:00Z",
+  weekly_reset_at_approx: true,
+  short_reset_at: "2026-11-01T04:00:00Z",
+  short_reset_at_approx: true,
+  short_window: "1h"
+});
+assert.strictEqual(fallBackApprox.labelText, "リセット:");
+assert.strictEqual(fallBackApprox.weeklyText, "週次 ~11/3 07:00 (UTC-05:00)");
+assert.strictEqual(fallBackApprox.shortText, "1h ~00:00 (UTC-04:00)");
+
+// Spring-forward DST transition (EST -> EDT): weekly in UTC-04:00, short in UTC-05:00.
+const springForward = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-03-10T12:00:00Z",
+  short_reset_at: "2026-03-08T04:00:00Z"
+});
+assert.strictEqual(springForward.timeZone, "");
+assert.strictEqual(springForward.weeklyTimeZone, "UTC-04:00");
+assert.strictEqual(springForward.shortTimeZone, "UTC-05:00");
+assert.strictEqual(springForward.labelText, "リセット:");
+assert.strictEqual(springForward.weeklyText, "週次 3/10 08:00 (UTC-04:00)");
+assert.strictEqual(springForward.shortText, "5h 23:00 (UTC-05:00)");
+
+// When both dates share the same offset (both EST), the card label carries the single offset.
+const sameOffset = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-26T01:32:24+09:00",
+  short_reset_at: "2026-11-27T05:07:00+09:00"
+});
+assert.strictEqual(sameOffset.timeZone, "UTC-05:00");
+assert.strictEqual(sameOffset.labelText, "リセット (UTC-05:00):");
+assert.strictEqual(sameOffset.weeklyText, "週次 11/25 11:32");
+assert.strictEqual(sameOffset.shortText, "5h 15:07");
+
+// When only short is present (in EDT), the card label uses short's offset.
+const shortOnly = ui.formatPoolResetLabels({
+  weekly_reset_at: null,
+  short_reset_at: "2026-11-01T04:00:00Z"
+});
+assert.strictEqual(shortOnly.timeZone, "UTC-04:00");
+assert.strictEqual(shortOnly.labelText, "リセット (UTC-04:00):");
+assert.strictEqual(shortOnly.weeklyText, "週次 なし");
+assert.strictEqual(shortOnly.shortText, "5h 00:00");
+
+// EN locale output for mixed DST offsets.
+i18n.setLocale("en", false);
+const fallBackEN = ui.formatPoolResetLabels({
+  weekly_reset_at: "2026-11-03T12:00:00Z",
+  short_reset_at: "2026-11-01T04:00:00Z"
+});
+assert.strictEqual(fallBackEN.labelText, "Reset:");
+assert.strictEqual(fallBackEN.weeklyText, "Weekly 11/3 07:00 (UTC-05:00)");
+assert.strictEqual(fallBackEN.shortText, "5h 00:00 (UTC-04:00)");
+
+console.log("ALL_UI_POOL_RESET_DST_FALLBACK_TESTS_PASSED");
+`
+	cmdDSTFallback := exec.Command(nodeBin, "-e", scriptDSTFallback)
+	cmdDSTFallback.Env = append(os.Environ(), "TZ=America/New_York")
+	outDSTFallback, err := cmdDSTFallback.CombinedOutput()
+	if err != nil || !strings.Contains(string(outDSTFallback), "ALL_UI_POOL_RESET_DST_FALLBACK_TESTS_PASSED") {
+		t.Fatalf("node pool reset DST fallback tests failed: %v\n%s", err, string(outDSTFallback))
 	}
 
 	// POSIX / Etc/GMT fallback normalizes to readable UTC offset (no inverted Etc/GMT sign).

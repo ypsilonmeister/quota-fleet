@@ -798,23 +798,25 @@
     return formatUtcOffset(refDate);
   }
 
-  function formatWeeklyResetTime(iso) {
+  function parseValidDate(iso) {
     if (typeof iso !== "string" || iso.trim() === "") {
-      return "";
+      return null;
     }
     const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) {
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function formatWeeklyResetTime(iso) {
+    const d = parseValidDate(iso);
+    if (!d) {
       return "";
     }
     return (d.getMonth() + 1) + "/" + d.getDate() + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
   }
 
   function formatShortResetTime(iso) {
-    if (typeof iso !== "string" || iso.trim() === "") {
-      return "";
-    }
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) {
+    const d = parseValidDate(iso);
+    if (!d) {
       return "";
     }
     return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
@@ -828,22 +830,32 @@
     const weeklyRaw = typeof item.weekly_reset_at === "string" ? item.weekly_reset_at.trim() : "";
     const shortRaw = typeof item.short_reset_at === "string" ? item.short_reset_at.trim() : "";
 
-    const weeklyFormatted = formatWeeklyResetTime(weeklyRaw);
+    const weeklyDate = parseValidDate(weeklyRaw);
+    const shortDate = parseValidDate(shortRaw);
+    const weeklyFormatted = weeklyDate ? formatWeeklyResetTime(weeklyRaw) : "";
+    const shortFormatted = shortDate ? formatShortResetTime(shortRaw) : "";
+
+    const weeklyTz = weeklyDate ? getDisplayTimeZone(weeklyDate) : "";
+    const shortTz = shortDate ? getDisplayTimeZone(shortDate) : "";
+    const hasMixedTimeZones = Boolean(weeklyTz && shortTz && weeklyTz !== shortTz);
+    const timeZone = hasMixedTimeZones ? "" : (weeklyTz || shortTz);
+
     let weeklyText;
     let weeklyMissing = false;
     if (weeklyFormatted) {
-      const wt = item.weekly_reset_at_approx ? ("~" + weeklyFormatted) : weeklyFormatted;
+      const wt = (item.weekly_reset_at_approx ? ("~" + weeklyFormatted) : weeklyFormatted)
+        + (hasMixedTimeZones ? (" (" + weeklyTz + ")") : "");
       weeklyText = t("dashboard.weeklyReset", { time: wt });
     } else {
       weeklyText = t("dashboard.weeklyResetMissing");
       weeklyMissing = true;
     }
 
-    const shortFormatted = formatShortResetTime(shortRaw);
     let shortText;
     let shortMissing = false;
     if (shortFormatted) {
-      const st = item.short_reset_at_approx ? ("~" + shortFormatted) : shortFormatted;
+      const st = (item.short_reset_at_approx ? ("~" + shortFormatted) : shortFormatted)
+        + (hasMixedTimeZones ? (" (" + shortTz + ")") : "");
       shortText = t("dashboard.shortReset", { window: shortWindow, time: st });
     } else if (item.short_applicable === false) {
       shortText = t("dashboard.shortResetNotApplicable", { window: shortWindow });
@@ -853,9 +865,6 @@
       shortMissing = true;
     }
 
-    const hasFormattedTime = Boolean(weeklyFormatted || shortFormatted);
-    const refIso = weeklyFormatted ? weeklyRaw : (shortFormatted ? shortRaw : "");
-    const timeZone = hasFormattedTime ? getDisplayTimeZone(refIso ? new Date(refIso) : new Date()) : "";
     const labelText = timeZone
       ? t("dashboard.resetLabelWithTz", { tz: timeZone })
       : t("dashboard.resetLabel");
@@ -863,6 +872,8 @@
     return {
       labelText: labelText,
       timeZone: timeZone,
+      weeklyTimeZone: weeklyTz,
+      shortTimeZone: shortTz,
       weeklyText: weeklyText,
       weeklyMissing: weeklyMissing,
       weeklyRaw: weeklyFormatted ? weeklyRaw : "",
