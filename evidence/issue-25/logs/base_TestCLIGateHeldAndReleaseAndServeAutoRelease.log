@@ -1,0 +1,631 @@
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.09s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.07s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.08s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.09s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.08s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.08s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.09s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.09s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.08s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.09s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.16s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.16s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.09s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.09s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.16s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.08s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.08s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.08s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.07s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.05s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.10s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.09s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.13s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.07s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+    main_test.go:879: serve did not shut down within timeout
+--- FAIL: TestCLIGateHeldAndReleaseAndServeAutoRelease (5.07s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.12s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.15s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.11s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.14s)
+FAIL

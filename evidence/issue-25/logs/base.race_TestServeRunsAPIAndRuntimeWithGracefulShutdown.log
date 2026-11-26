@@ -1,0 +1,350 @@
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.30s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.28s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.17s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.17s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.33s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.33s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.27s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.22s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.27s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.17s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.36s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.27s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.30s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.29s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.22s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.28s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.23s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.26s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.28s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.28s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.22s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.23s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.29s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.26s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.28s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.32s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.29s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.33s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.26s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.23s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.31s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.22s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.40s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.22s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.29s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.33s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.29s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.29s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.26s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.28s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.33s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.34s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.25s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.22s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.28s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.27s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.22s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.27s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.17s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.25s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.22s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.25s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.34s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.31s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.18s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.20s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.21s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.17s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.23s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.28s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.19s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.17s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+    main_test.go:297: serve did not shut down gracefully within timeout
+--- FAIL: TestServeRunsAPIAndRuntimeWithGracefulShutdown (5.29s)
+FAIL

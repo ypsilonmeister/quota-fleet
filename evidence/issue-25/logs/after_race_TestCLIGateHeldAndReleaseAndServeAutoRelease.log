@@ -1,0 +1,602 @@
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.58s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.58s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.47s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.59s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.47s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.58s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.56s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.49s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.55s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.57s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.53s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.50s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.48s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.54s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.52s)
+=== RUN   TestCLIGateHeldAndReleaseAndServeAutoRelease
+--- PASS: TestCLIGateHeldAndReleaseAndServeAutoRelease (0.51s)
+PASS
+ok  	github.com/ypsilonmeister/quota-fleet/cmd/quota-fleet	158.557s

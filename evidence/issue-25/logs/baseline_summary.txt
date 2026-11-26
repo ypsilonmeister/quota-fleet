@@ -1,0 +1,9 @@
+base TestCLIGateHeldAndReleaseAndServeAutoRelease count=300 rc=1 pass=270 fail=30 race=0
+base.race TestCLIGateHeldAndReleaseAndServeAutoRelease count=150 rc=1 pass=99 fail=51 race=0
+base TestServeRunsAPIAndRuntimeWithGracefulShutdown count=300 rc=1 pass=266 fail=34 race=0
+base.race TestServeRunsAPIAndRuntimeWithGracefulShutdown count=150 rc=1 pass=101 fail=49 race=0
+base TestServeWiringWithWebhookNotifier count=300 rc=1 pass=276 fail=24 race=0
+base.race TestServeWiringWithWebhookNotifier count=150 rc=1 pass=96 fail=54 race=0
+base TestServeDefaultTypedDecisionEvaluatorWithTypedCriteria count=300 rc=0 pass=300 fail=0 race=0
+base.race TestServeDefaultTypedDecisionEvaluatorWithTypedCriteria count=150 rc=1 pass=140 fail=10 race=0
+ 00:44:11 up 5 days, 21:58,  2 users,  load average: 0.64, 0.48, 0.40

@@ -1,0 +1,355 @@
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.23s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.29s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.28s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.25s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.29s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.29s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.23s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.35s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.33s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.25s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.29s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.28s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.28s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.28s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.23s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.28s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.28s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.29s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.28s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.23s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.28s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.36s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.23s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.30s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.24s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.29s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.31s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.25s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.32s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.30s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.31s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.23s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.32s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.22s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.19s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.21s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.17s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.20s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.27s)
+=== RUN   TestServeWiringWithWebhookNotifier
+    main_test.go:1067: serve did not shut down gracefully within timeout
+--- FAIL: TestServeWiringWithWebhookNotifier (5.18s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.30s)
+=== RUN   TestServeWiringWithWebhookNotifier
+--- PASS: TestServeWiringWithWebhookNotifier (0.22s)
+FAIL

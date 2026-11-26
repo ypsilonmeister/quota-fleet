@@ -1,0 +1,602 @@
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.04s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.09s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.04s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.09s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.04s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.09s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.03s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.05s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.06s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.07s)
+=== RUN   TestServeRunsAPIAndRuntimeWithGracefulShutdown
+--- PASS: TestServeRunsAPIAndRuntimeWithGracefulShutdown (0.08s)
+PASS
+ok  	github.com/ypsilonmeister/quota-fleet/cmd/quota-fleet	21.116s
