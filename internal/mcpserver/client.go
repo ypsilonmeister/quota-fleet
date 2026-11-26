@@ -1031,6 +1031,7 @@ type CreateJobInput struct {
 	Pool               string        `json:"pool,omitempty" jsonschema:"Primary quota pool name"`
 	AltPools           []string      `json:"alt_pools,omitempty" jsonschema:"Alternative quota pool names"`
 	SessionID          string        `json:"session_id,omitempty" jsonschema:"Session identifier"`
+	Effort             string        `json:"effort,omitempty" jsonschema:"Optional reasoning effort: low, medium, high or xhigh. Supported for agents codex and claude only; rejected for agy (effort is part of its model ID) and for other agents. Omit for the agent default."`
 }
 
 // CreateJobOutput is the structured result returned by create_job.

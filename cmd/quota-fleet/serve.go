@@ -199,6 +199,11 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 			return mcpserver.NewHTTPHandler(backend, cfg.API.MCPAllowedOriginHosts)
 		}
 	}
+	// docs/21 §3: with a real adapter, POST /jobs asks the job's host whether its CLI takes the effort.
+	var hostAccess adapter.HostFileAccessProvider
+	if p, ok := execAdapter.(adapter.HostFileAccessProvider); ok {
+		hostAccess = p
+	}
 	apiSrv := api.NewServer(st, api.Options{
 		ReviewGateEnabled: cfg.ReviewGate.Enabled,
 		ReviewJudge:       decisionClient,
@@ -223,6 +228,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		Config:           cfg,
 		GateReleaser:     gateReleaserAdapter{checker: rt.GateChecker},
 		AgentChecker:     rt.AgentChecker,
+		HostAccess:       hostAccess,
 	})
 
 	httpSrv := &http.Server{

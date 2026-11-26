@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentmodels"
 	"github.com/ypsilonmeister/quota-fleet/internal/agentver"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
@@ -86,6 +87,12 @@ type Options struct {
 	GateReleaser GateReleaser
 	// AgentChecker handles POST /agents/check via immediate host×agent version probing.
 	AgentChecker AgentChecker
+	// HostAccess runs commands on configured hosts. When set, POST /jobs with an effort asks the
+	// job's host whether its agent CLI takes the effort option (docs/21 §3). Without it (mock
+	// adapter, tests) only the configuration is checked.
+	HostAccess adapter.HostFileAccessProvider
+	// EffortProbeTimeout bounds that host probe; zero means defaultEffortProbeTimeout.
+	EffortProbeTimeout time.Duration
 	// ReviewGateEnabled turns on POST /decision/review-verdict (docs/18). When false the
 	// endpoint answers 503.
 	ReviewGateEnabled bool
@@ -164,6 +171,7 @@ type Server struct {
 	cfg              *config.Config
 	gateReleaser     GateReleaser
 	agentChecker     AgentChecker
+	effortProbe      *effortProber
 	nowFn            func() time.Time
 	snapshotLoader   func() (*quota.Snapshot, error)
 	eventsHeartbeat  time.Duration
@@ -260,6 +268,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 		cfg:              opts.Config,
 		gateReleaser:     opts.GateReleaser,
 		agentChecker:     opts.AgentChecker,
+		effortProbe:      newEffortProber(opts.HostAccess, opts.EffortProbeTimeout, nowFn),
 		nowFn:            nowFn,
 		snapshotLoader:   opts.SnapshotLoader,
 		eventsHeartbeat:  eventsHeartbeat,
@@ -452,11 +461,23 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		AltPools:           req.AltPools,
 		SessionID:          req.SessionID,
 		CreatedBy:          createdBy,
+		Effort:             strings.TrimSpace(req.Effort),
 	}
 
 	// One usage snapshot per request, shared by the Selector and the Gate.
 	usage := &requestUsage{load: s.loadSnapshotForSelector}
 	s.applySelector(&params, req, usage)
+
+	// docs/21: effort is checked against the agent the job will actually run on (after the
+	// Selector filled it), before the Gate may hold the payload. Never silently dropped.
+	if err := store.ValidateEffort(params.Agent, params.Effort); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if status, err := s.checkEffortLaunch(r.Context(), params); err != nil {
+		writeError(w, status, err.Error())
+		return
+	}
 
 	if s.gateMode == config.GateModeEnforce {
 		s.handleCreateJobEnforce(w, r, req, params, usage)

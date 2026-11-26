@@ -39,8 +39,13 @@ func (s *Store) HoldJob(ctx context.Context, p HoldJobParams) (*HeldJob, bool, e
 		return nil, false, fmt.Errorf("%w: title must not be empty", ErrInvalidInput)
 	}
 
+	if err := ValidateEffort(p.Payload.Agent, p.Payload.Effort); err != nil {
+		return nil, false, err
+	}
+
 	payload := p.Payload
 	payload.RequestID = reqID
+	payload.Effort = strings.TrimSpace(payload.Effort)
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: encode payload: %v", ErrInvalidInput, err)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -311,6 +312,322 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 	return strings.Join(lines, "; "), notFoundMarker, nil
 }
 
+// effortArgs returns the CLI arguments that carry a job's effort (docs/21), or nil when the
+// effort is empty. codex takes it as a config override (`-c model_reasoning_effort=<v>`) and
+// claude as `--effort <v>`. Registration rejects effort for every other agent
+// (store.ValidateEffort), so nil for them never silently drops a stored effort that passed validation.
+func effortArgs(agentName, effort string) []string {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return nil
+	}
+	switch strings.TrimSpace(agentName) {
+	case "codex":
+		return []string{"-c", "model_reasoning_effort=" + effort}
+	case "claude":
+		return []string{"--effort", effort}
+	}
+	return nil
+}
+
+// insertBeforeOptionEnd inserts extra options into a command line (tokens[0] is the
+// executable). When the command has an end-of-options marker `--` (endIndex returns the index of
+// the token it starts at, or -1), the options go just before the first one, because a CLI treats
+// everything after `--` as positional arguments (docs/21 §3: `codex exec ... -- -c
+// model_reasoning_effort=low` fails with "unexpected argument"). Otherwise they are appended at
+// the end.
+func insertBeforeOptionEnd(tokens, extra []string, endIndex func([]string) int) []string {
+	if len(extra) == 0 {
+		return tokens
+	}
+	if i := endIndex(tokens); i >= 1 {
+		out := make([]string, 0, len(tokens)+len(extra))
+		out = append(out, tokens[:i]...)
+		out = append(out, extra...)
+		return append(out, tokens[i:]...)
+	}
+	return append(tokens, extra...)
+}
+
+// rawOptionEndIndex returns the index of the first argument (after the executable) whose raw
+// value is `--`, or -1. The Windows builder quotes every template token as a literal value, so
+// the value itself is what the CLI receives.
+func rawOptionEndIndex(tokens []string) int {
+	for i := 1; i < len(tokens); i++ {
+		if tokens[i] == "--" {
+			return i
+		}
+	}
+	return -1
+}
+
+// shellOptionEndIndex returns the index of the token that starts the first shell word (after
+// the executable) whose value is `--`, or -1 (docs/21 §3). The tokens come from strings.Fields
+// and are joined with single spaces into a POSIX shell command line (run.sh), so a quoted string
+// or an escaped space can span several tokens: in `--add-dir '/tmp/a -- b' --` the middle `--`
+// token is inside the quoted argument `/tmp/a -- b`, and only the last one is the terminator.
+// The quoting state is tracked over the whole command line, tokens are grouped into the words
+// the shell will see, and each word is compared after quote removal (isShellOptionEnd).
+func shellOptionEndIndex(tokens []string) int {
+	for i := 0; i < len(tokens); {
+		word, j := tokens[i], i
+		for shellWordContinues(word) && j+1 < len(tokens) {
+			j++
+			word += " " + tokens[j]
+		}
+		if i >= 1 && isShellOptionEnd(word) {
+			return i
+		}
+		i = j + 1
+	}
+	return -1
+}
+
+// shellWordContinues reports whether a shell word that ends where text ends would go on past a
+// following space: an open single or double quote, or a trailing backslash that escapes it.
+func shellWordContinues(text string) bool {
+	inSingle, inDouble := false, false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case c == '\\':
+			if i+1 >= len(text) {
+				return true
+			}
+			i++
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			}
+		case c == '\'':
+			inSingle = true
+		case c == '"':
+			inDouble = true
+		}
+	}
+	return inSingle || inDouble
+}
+
+// isShellOptionEnd reports whether a word of a POSIX shell command line (run.sh) becomes the
+// argument `--` after the shell removes quoting, e.g. `--`, `'--'`, `"--"`, `\-\-` or `'-'-`
+// (docs/21 §3), so the comparison follows the shell's quote removal, not the raw text.
+func isShellOptionEnd(word string) bool {
+	v, ok := shellWordValue(word)
+	return ok && v == "--"
+}
+
+// shellWordValue returns the value a POSIX shell gives a single word after quote removal. It
+// reports false when the word contains anything whose value is decided only at run time
+// (unquoted or double-quoted `$` / backquote, unquoted glob characters) or has unbalanced quotes,
+// so such a word is never taken for `--`.
+func shellWordValue(word string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(word); i++ {
+		c := word[i]
+		switch c {
+		case '\\':
+			if i+1 >= len(word) {
+				return "", false
+			}
+			i++
+			b.WriteByte(word[i])
+		case '\'':
+			j := strings.IndexByte(word[i+1:], '\'')
+			if j < 0 {
+				return "", false
+			}
+			b.WriteString(word[i+1 : i+1+j])
+			i += 1 + j
+		case '"':
+			closed := false
+			for i++; i < len(word); i++ {
+				d := word[i]
+				if d == '"' {
+					closed = true
+					break
+				}
+				if d == '$' || d == '`' {
+					return "", false
+				}
+				if d == '\\' && i+1 < len(word) && strings.IndexByte("$`\"\\\n", word[i+1]) >= 0 {
+					i++
+					d = word[i]
+				}
+				b.WriteByte(d)
+			}
+			if !closed {
+				return "", false
+			}
+		case '$', '`', '*', '?', '[', '~', '{':
+			return "", false
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), true
+}
+
+// CheckEffort reports why this driver cannot pass job.Effort to the agent CLI on launch, or nil
+// when it can as far as the configuration shows (or the job has no effort). The API calls it at
+// registration with the driver resolved for the job's host (docs/21 §3), before probing the
+// host's CLI itself (BuildEffortProbe).
+//
+// The effort arguments are CLI-specific (`--effort` for claude, `-c model_reasoning_effort=` for
+// codex), so the executable that the selected launch/resume template runs (after the per-host
+// `command` override) must be that agent's own CLI: its base name, without directory or a
+// Windows extension (.exe/.cmd/.bat/.ps1), must equal the agent name. A wrapper script or a
+// different binary may not accept the arguments, so it is rejected. A same-named CLI that is too
+// old for the arguments passes here and is caught by the probe (BuildEffortProbe). A relative
+// path (./claude) is rejected as well: it resolves from the job's workdir at launch, so a probe
+// run elsewhere could judge another file.
+func (d AgentDriver) CheckEffort(job *store.Job) error {
+	_, err := d.effortExecutable(job)
+	return err
+}
+
+// effortExecutable returns the executable that would receive job.Effort ("" when the job has no
+// effort), or why the effort cannot be passed to it.
+func (d AgentDriver) effortExecutable(job *store.Job) (string, error) {
+	if job == nil || strings.TrimSpace(job.Effort) == "" {
+		return "", nil
+	}
+	if effortArgs(d.Name, job.Effort) == nil {
+		return "", fmt.Errorf("adapter: effort is not supported for agent %q", d.Name)
+	}
+	tmpl, _ := d.selectLaunchTemplate(job)
+	exe := strings.TrimSpace(d.CommandOverride)
+	if exe == "" {
+		fields := strings.Fields(tmpl)
+		if len(fields) == 0 {
+			return "", fmt.Errorf("adapter: agent %q has empty launch template", d.Name)
+		}
+		exe = fields[0]
+	}
+	if !strings.EqualFold(commandBaseName(exe), strings.TrimSpace(d.Name)) {
+		return "", fmt.Errorf("adapter: agent %q is launched via %q, which is not the %s CLI, so the effort cannot be passed", d.Name, exe, d.Name)
+	}
+	if isRelativeCommandPath(exe) {
+		return "", fmt.Errorf("adapter: agent %q is launched via the relative path %q, which is resolved from the job's workdir at launch, so its effort support cannot be checked at registration; use an absolute path or a bare command name", d.Name, exe)
+	}
+	return exe, nil
+}
+
+// isRelativeCommandPath reports whether exe names a file by a path relative to the current
+// directory (./claude, bin/claude, .\claude.exe, \tools\claude.exe). The launcher runs it after
+// entering the job's workdir, so the file it reaches depends on that directory and the
+// registration probe, which runs elsewhere, cannot tell what will be launched (docs/21 §3). A bare
+// name (looked up in PATH), an absolute path (/..., C:\..., \\server\share\...) and a home path
+// (~/...) are not relative.
+func isRelativeCommandPath(exe string) bool {
+	exe = strings.Trim(strings.TrimSpace(exe), `"'`)
+	if !strings.ContainsAny(exe, `/\`) {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(exe, "/"), strings.HasPrefix(exe, `\\`), strings.HasPrefix(exe, "//"):
+		return false
+	case exe == "~" || strings.HasPrefix(exe, "~/") || strings.HasPrefix(exe, `~\`):
+		return false
+	case len(exe) >= 3 && exe[1] == ':' && (exe[2] == '\\' || exe[2] == '/') &&
+		((exe[0] >= 'a' && exe[0] <= 'z') || (exe[0] >= 'A' && exe[0] <= 'Z')):
+		return false
+	}
+	return true
+}
+
+// ErrEffortUnsupported marks a probe result that settles the question: the host's CLI has no way
+// to take the effort (its help lacks the option, or the executable is not there). The API answers
+// 400 for it; any other Classify error means the host could not be asked.
+var ErrEffortUnsupported = errors.New("effort is not supported by the CLI on the host")
+
+// effortHelpOption returns the pattern that the agent CLI's `--help` output contains when the CLI
+// takes the effort arguments effortArgs produces: claude lists `--effort <level>` and codex lists
+// `-c, --config <key=value>` (docs/21 §3.1).
+func effortHelpOption(agentName string) (*regexp.Regexp, string) {
+	switch strings.TrimSpace(agentName) {
+	case "claude":
+		return regexp.MustCompile(`(?m)(^|[\s,])--effort([\s=<\[]|$)`), "--effort"
+	case "codex":
+		return regexp.MustCompile(`(?m)(^|[\s,])--config([\s=<\[]|$)`), "-c/--config"
+	}
+	return nil, ""
+}
+
+// EffortProbe is the host command that asks the CLI receiving job.Effort for its help. Build it
+// with BuildEffortProbe, run it on the job's host, and pass the result to Classify.
+type EffortProbe struct {
+	// Command is the shell (Linux) or PowerShell (Windows) command for FileAccess.RunCommand.
+	Command string
+	// Executable is the CLI that the launch command would run.
+	Executable string
+
+	agent          string
+	notFoundMarker string
+}
+
+// BuildEffortProbe returns the probe for the CLI that would receive job.Effort on this driver's
+// host: `<executable> --help` with the host's env and the same not-found pre-check as the
+// version probe. It returns nil when the job has no effort, and CheckEffort's error when the
+// configuration already rules the effort out.
+func (d AgentDriver) BuildEffortProbe(job *store.Job, isWindows bool) (*EffortProbe, error) {
+	exe, err := d.effortExecutable(job)
+	if err != nil || exe == "" {
+		return nil, err
+	}
+	probeDrv := AgentDriver{Name: d.Name, CommandOverride: exe, Env: d.Env}
+	cmd, marker, err := probeDrv.BuildVersionCommand([]string{"--help"}, isWindows)
+	if err != nil {
+		return nil, err
+	}
+	return &EffortProbe{Command: cmd, Executable: exe, agent: d.Name, notFoundMarker: marker}, nil
+}
+
+// Classify interprets the probe's result. It returns nil when the help lists the effort option,
+// an error wrapping ErrEffortUnsupported when the CLI answered without it (an older CLI, even one
+// with the agent's name) or is absent, and another error when the command could not be run.
+func (p *EffortProbe) Classify(res ExecResult, runErr error) error {
+	if runErr != nil {
+		return fmt.Errorf("adapter: could not run %q --help to check effort support: %w", p.Executable, runErr)
+	}
+	out := res.Output
+	if out == "" {
+		out = res.Stdout + "\n" + res.Stderr
+	}
+	if res.ExitCode == 127 && strings.Contains(out, p.notFoundMarker) {
+		return fmt.Errorf("adapter: %w: %q was not found", ErrEffortUnsupported, p.Executable)
+	}
+	re, opt := effortHelpOption(p.agent)
+	if re == nil {
+		return fmt.Errorf("adapter: %w: agent %q", ErrEffortUnsupported, p.agent)
+	}
+	if re.MatchString(out) {
+		return nil
+	}
+	if res.ExitCode != 0 && strings.TrimSpace(out) == "" {
+		return fmt.Errorf("adapter: %q --help exited with code %d and no output", p.Executable, res.ExitCode)
+	}
+	return fmt.Errorf("adapter: %w: %q --help does not list %s", ErrEffortUnsupported, p.Executable, opt)
+}
+
+// commandBaseName returns the executable name without directory and Windows extension.
+func commandBaseName(exe string) string {
+	exe = strings.Trim(strings.TrimSpace(exe), `"'`)
+	if i := strings.LastIndexAny(exe, `/\`); i >= 0 {
+		exe = exe[i+1:]
+	}
+	lower := strings.ToLower(exe)
+	for _, ext := range []string{".exe", ".cmd", ".bat", ".ps1"} {
+		if strings.HasSuffix(lower, ext) {
+			return exe[:len(exe)-len(ext)]
+		}
+	}
+	return exe
+}
+
 // selectLaunchTemplate chooses the resume template when job.SessionID is set and the driver
 // supports resume, otherwise falling back to the standard launch template.
 func (d AgentDriver) selectLaunchTemplate(job *store.Job) (string, bool) {
@@ -392,6 +709,16 @@ func (d AgentDriver) BuildLaunchCommand(job *store.Job, workdir, promptFile, log
 
 		expanded = append(expanded, tok)
 	}
+
+	var effortToks []string
+	for _, a := range effortArgs(d.Name, job.Effort) {
+		if isSafeBareToken(a) {
+			effortToks = append(effortToks, a)
+		} else {
+			effortToks = append(effortToks, shellQuote(a))
+		}
+	}
+	expanded = insertBeforeOptionEnd(expanded, effortToks, shellOptionEndIndex)
 
 	if allowSandbox && strings.TrimSpace(d.SandboxFlag) != "" {
 		expanded = append(expanded, strings.Fields(d.SandboxFlag)...)
@@ -492,6 +819,8 @@ func (d AgentDriver) BuildWindowsLaunchCommand(job *store.Job, workdir, promptFi
 
 		rawTokens = append(rawTokens, tok)
 	}
+
+	rawTokens = insertBeforeOptionEnd(rawTokens, effortArgs(d.Name, job.Effort), rawOptionEndIndex)
 
 	if allowSandbox && strings.TrimSpace(d.SandboxFlag) != "" {
 		rawTokens = append(rawTokens, strings.Fields(d.SandboxFlag)...)

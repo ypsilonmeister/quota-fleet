@@ -109,6 +109,10 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs selection columns: %w", err)
 	}
+	if err := ensureJobsColumn(ctx, writeDB, "effort", `ALTER TABLE jobs ADD COLUMN effort TEXT NOT NULL DEFAULT ''`); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs.effort: %w", err)
+	}
 	if err := ensureHeldJobsColumns(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate held_jobs: %w", err)
@@ -303,6 +307,10 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: encode worktree_spec: %v", ErrInvalidInput, err)
 	}
+	effort := strings.TrimSpace(p.Effort)
+	if err := ValidateEffort(p.Agent, effort); err != nil {
+		return nil, false, err
+	}
 
 	var (
 		result  *Job
@@ -363,19 +371,22 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 				instructions, acceptance_criteria, parent_id,
 				claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
 				created_at, updated_at, model, pool, alt_pools, session_id, created_by,
-				selected_agent, selected_model, selected_pool, selection_reason, selection_mode
+				selected_agent, selected_model, selected_pool, selection_reason, selection_mode,
+				effort
 			) VALUES (
 				?, ?, ?, ?, ?, ?, ?, ?,
 				?, ?, ?,
 				'', NULL, 0, '', '', NULL,
 				?, ?, ?, ?, ?, ?, ?,
-				?, ?, ?, ?, ?
+				?, ?, ?, ?, ?,
+				?
 			)
 		`,
 			p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
 			p.Instructions, p.AcceptanceCriteria, parentArg,
 			nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy),
 			p.SelectedAgent, p.SelectedModel, p.SelectedPool, p.SelectionReason, p.SelectionMode,
+			effort,
 		)
 		if err != nil {
 			if isUniqueConstraintError(err) {
@@ -1557,7 +1568,8 @@ const jobColumns = `
 	instructions, acceptance_criteria, parent_id,
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
 	created_at, updated_at, model, pool, alt_pools, session_id, created_by,
-	selected_agent, selected_model, selected_pool, selection_reason, selection_mode
+	selected_agent, selected_model, selected_pool, selection_reason, selection_mode,
+	effort
 `
 
 func queryJobByID(ctx context.Context, q queryRower, jobID int64) (*Job, error) {
@@ -1597,6 +1609,7 @@ func scanJob(s rowScanner) (*Job, error) {
 		&j.ClaimedBy, &claimedAt, &j.Attempts, &j.ResultText, &j.LastError, &deliveredAt,
 		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy,
 		&j.SelectedAgent, &j.SelectedModel, &j.SelectedPool, &j.SelectionReason, &j.SelectionMode,
+		&j.Effort,
 	)
 	if err != nil {
 		return nil, err
