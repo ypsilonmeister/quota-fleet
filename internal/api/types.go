@@ -40,6 +40,9 @@ type JobDTO struct {
 	SelectedPool    string `json:"selected_pool,omitempty"`
 	SelectionReason string `json:"selection_reason,omitempty"`
 	SelectionMode   string `json:"selection_mode,omitempty"`
+
+	// Effort is the per-job reasoning effort (docs/21); omitted when unset (agent default).
+	Effort string `json:"effort,omitempty"`
 }
 
 func toJobDTO(j *store.Job) *JobDTO {
@@ -80,6 +83,7 @@ func toJobDTO(j *store.Job) *JobDTO {
 	dto.SelectedPool = j.SelectedPool
 	dto.SelectionReason = j.SelectionReason
 	dto.SelectionMode = j.SelectionMode
+	dto.Effort = j.Effort
 	return dto
 }
 
@@ -119,6 +123,8 @@ type CreateJobRequest struct {
 	// Selector hints (docs/19). Optional.
 	Role   string `json:"role"`
 	Weight string `json:"weight"`
+	// Effort is the optional per-job reasoning effort (docs/21): low|medium|high|xhigh.
+	Effort string `json:"effort"`
 }
 
 // CreateJobResponse is returned by POST /jobs.

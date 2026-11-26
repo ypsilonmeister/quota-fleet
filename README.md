@@ -147,6 +147,7 @@ the missing control plane around them.
 - `docs/15-pwa.md` — installable web UI (manifest, icons, app shell cache)
 - `docs/16-web-push.md` — Web Push on job completion (VAPID keys, setup, iOS limits)
 - `docs/17-i18n.md` — web UI internationalization (dictionary, how to add strings)
+- `docs/21-job-effort.md` — per-job reasoning effort (`effort`: codex / claude)
 
 ## License
 

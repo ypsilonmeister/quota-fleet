@@ -97,6 +97,9 @@ type Job struct {
 	SelectedPool    string
 	SelectionReason string
 	SelectionMode   string // explicit | recorded | applied
+
+	// Effort is the per-job reasoning effort (docs/21). Empty means the agent's default.
+	Effort string
 }
 
 // CreateJobParams holds input fields for CreateJob.
@@ -123,6 +126,9 @@ type CreateJobParams struct {
 	SelectedPool    string `json:"selected_pool,omitempty"`
 	SelectionReason string `json:"selection_reason,omitempty"`
 	SelectionMode   string `json:"selection_mode,omitempty"`
+
+	// Effort is the per-job reasoning effort (docs/21): low|medium|high|xhigh, empty = agent default.
+	Effort string `json:"effort,omitempty"`
 }
 
 // CompleteResult holds the outcome of Complete.

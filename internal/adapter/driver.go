@@ -311,6 +311,24 @@ func (d AgentDriver) BuildVersionCommand(versionArgs []string, isWindows bool) (
 	return strings.Join(lines, "; "), notFoundMarker, nil
 }
 
+// effortArgs returns the CLI arguments that carry a job's effort (docs/21), or nil when the
+// effort is empty. codex takes it as a config override (`-c model_reasoning_effort=<v>`) and
+// claude as `--effort <v>`. Registration rejects effort for every other agent
+// (store.ValidateEffort), so nil for them never silently drops a stored effort that passed validation.
+func effortArgs(agentName, effort string) []string {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return nil
+	}
+	switch strings.TrimSpace(agentName) {
+	case "codex":
+		return []string{"-c", "model_reasoning_effort=" + effort}
+	case "claude":
+		return []string{"--effort", effort}
+	}
+	return nil
+}
+
 // selectLaunchTemplate chooses the resume template when job.SessionID is set and the driver
 // supports resume, otherwise falling back to the standard launch template.
 func (d AgentDriver) selectLaunchTemplate(job *store.Job) (string, bool) {
@@ -391,6 +409,14 @@ func (d AgentDriver) BuildLaunchCommand(job *store.Job, workdir, promptFile, log
 		}
 
 		expanded = append(expanded, tok)
+	}
+
+	for _, a := range effortArgs(d.Name, job.Effort) {
+		if isSafeBareToken(a) {
+			expanded = append(expanded, a)
+		} else {
+			expanded = append(expanded, shellQuote(a))
+		}
 	}
 
 	if allowSandbox && strings.TrimSpace(d.SandboxFlag) != "" {
@@ -492,6 +518,8 @@ func (d AgentDriver) BuildWindowsLaunchCommand(job *store.Job, workdir, promptFi
 
 		rawTokens = append(rawTokens, tok)
 	}
+
+	rawTokens = append(rawTokens, effortArgs(d.Name, job.Effort)...)
 
 	if allowSandbox && strings.TrimSpace(d.SandboxFlag) != "" {
 		rawTokens = append(rawTokens, strings.Fields(d.SandboxFlag)...)

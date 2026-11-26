@@ -452,11 +452,19 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		AltPools:           req.AltPools,
 		SessionID:          req.SessionID,
 		CreatedBy:          createdBy,
+		Effort:             strings.TrimSpace(req.Effort),
 	}
 
 	// One usage snapshot per request, shared by the Selector and the Gate.
 	usage := &requestUsage{load: s.loadSnapshotForSelector}
 	s.applySelector(&params, req, usage)
+
+	// docs/21: effort is checked against the agent the job will actually run on (after the
+	// Selector filled it), before the Gate may hold the payload. Never silently dropped.
+	if err := store.ValidateEffort(params.Agent, params.Effort); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if s.gateMode == config.GateModeEnforce {
 		s.handleCreateJobEnforce(w, r, req, params, usage)

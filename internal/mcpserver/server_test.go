@@ -133,6 +133,27 @@ func TestToolsListSmoke(t *testing.T) {
 		t.Fatalf("tools/list mismatch:\n got: %v\nwant: %v", gotTools, wantTools)
 	}
 
+	// docs/21: create_job exposes the optional effort field.
+	if schemaJSON, err := json.Marshal(byName["create_job"].InputSchema); err != nil {
+		t.Errorf("marshal create_job inputSchema: %v", err)
+	} else {
+		var schema struct {
+			Properties map[string]any `json:"properties"`
+			Required   []string       `json:"required"`
+		}
+		if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+			t.Errorf("unmarshal create_job inputSchema: %v", err)
+		}
+		if _, ok := schema.Properties["effort"]; !ok {
+			t.Errorf("create_job inputSchema has no effort property: %s", schemaJSON)
+		}
+		for _, r := range schema.Required {
+			if r == "effort" {
+				t.Errorf("create_job effort must be optional")
+			}
+		}
+	}
+
 	// Ensure §2-3 excluded runtime operations are never exposed.
 	for _, forbidden := range []string{
 		"claim", "claim_job",
@@ -319,6 +340,7 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 			"model":               "claude-opus",
 			"pool":                "claude",
 			"alt_pools":           []string{"codex"},
+			"effort":              "high",
 			"worktree_spec": map[string]any{
 				"repo_path": "/repos/qf",
 				"base_ref":  "impl/phase1-core",
@@ -344,6 +366,9 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 	if sentBody["request_id"] != "req-1" || sentBody["title"] != "Build MCP" {
 		t.Errorf("unexpected create_job body: %+v", sentBody)
 	}
+	if sentBody["effort"] != "high" {
+		t.Errorf("create_job body effort = %v, want high", sentBody["effort"])
+	}
 
 	// 1b. create_job without request_id auto-generates one
 	res, err = session.CallTool(ctx, &mcp.CallToolParams{
@@ -356,6 +381,9 @@ func TestAllToolsHTTPMapping(t *testing.T) {
 	lr = lastReq()
 	sentBody = nil
 	_ = json.Unmarshal(lr.Body, &sentBody)
+	if _, ok := sentBody["effort"]; ok {
+		t.Errorf("create_job without effort must not send an effort key: %+v", sentBody)
+	}
 	if rid, _ := sentBody["request_id"].(string); !strings.HasPrefix(rid, "mcp-") {
 		t.Errorf("expected auto-generated mcp-* request_id, got %q", rid)
 	}

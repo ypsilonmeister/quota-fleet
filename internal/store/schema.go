@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     selected_model TEXT NOT NULL DEFAULT '',
     selected_pool TEXT NOT NULL DEFAULT '',
     selection_reason TEXT NOT NULL DEFAULT '',
-    selection_mode TEXT NOT NULL DEFAULT ''
+    selection_mode TEXT NOT NULL DEFAULT '',
+    effort TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_id ON jobs(status, id);
