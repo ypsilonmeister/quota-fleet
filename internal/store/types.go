@@ -299,6 +299,11 @@ type HeldJob struct {
 	ErrorCount      int
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	// CancelReason is the optional reason given when the entry was cancelled.
+	CancelReason string
+	// ParentStatus is the status of the job named by Payload.ParentID at read time.
+	// It is not stored on the held row; empty when there is no parent or no such job.
+	ParentStatus Status
 }
 
 // HoldJobParams holds input fields for HoldJob.

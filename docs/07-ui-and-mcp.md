@@ -37,6 +37,10 @@ UI と MCP はこの原則の下に置く。具体化は次のとおり。
 
 ### 1-3. API 側の追加・拡張（レビュー M3・M5）
 - `POST /gate/held/{id}/release` を追加する。意味は **「即時再評価による解放試行」**であり、強制解放ではない。再評価で健全ならジョブを作成して解放し、まだ枯渇中なら解放しない。応答契約: 解放成功は `200 {released: true, job_id}`、未回復で見送りは `409 {released: false, reason}`、既に解放／キャンセル済みは `409`、存在しない場合は `404`。強制解放オプションは v1 では設けない。serve は GateChecker（またはそのインターフェース）を api.Server へ注入する構成に変える。
+- 保持エントリの表現（`GET /gate/held` の各要素と、`POST /jobs`・`DELETE /gate/held/{id}` が返す `held`）は、運用時の見分けのために次を含む（Issue #30）。
+  - `held_at`: 保持された時刻（`created_at` と同じ値）。`held_seconds`: 保持されていた秒数。保持中は現在まで、解放・取消し後はその時点まで。
+  - `parent_id` と `parent_status`: 親ジョブを指定した保持にだけ含む。`parent_status` は応答を作る時点の親の状態で、該当ジョブがなければ `not_found`。
+  - `cancel_reason`: `DELETE /gate/held/{id}` の任意の本文 `{"reason": "..."}` で渡した取消理由（2048 バイトまでで切り詰める）。理由なしの取消しと、この項目の追加より前の取消しでは省く。
 - `GET /jobs` に `agent`、`host`、`q`（タイトル部分一致）、`parent_id` のフィルタを追加する（`status` 必須は維持）。
 - `GET /deliveries` に `status=undelivered|delivered|all` と `limit` を追加する。
 - `GET /gate/decisions` に `job_id`、`held_id`、`limit` のフィルタを追加する。

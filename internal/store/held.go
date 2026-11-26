@@ -16,7 +16,12 @@ const (
 	heldJobColumns = `
 		id, request_id, status, pool, alt_pools, payload_json, reason, snapshot_summary,
 		released_job_id, released_pool, released_at, cancelled_at,
-		last_error, error_count, created_at, updated_at
+		last_error, error_count, created_at, updated_at, cancel_reason,
+		(
+			SELECT jobs.status FROM jobs
+			WHERE jobs.id = CASE WHEN json_valid(held_jobs.payload_json)
+				THEN json_extract(held_jobs.payload_json, '$.parent_id') END
+		) AS parent_status
 	`
 )
 
@@ -241,10 +246,16 @@ func (s *Store) ListHeldJobsPage(ctx context.Context, filter ListHeldJobsFilter)
 
 // CancelHeldJob transitions a held entry from status='held' to status='cancelled' without
 // deleting the row so audit history and request_id uniqueness remain intact.
-func (s *Store) CancelHeldJob(ctx context.Context, heldID string) (*HeldJob, error) {
+// reason is optional; it is stored as cancel_reason, capped at maxHeldErrorBytes.
+func (s *Store) CancelHeldJob(ctx context.Context, heldID, reason string) (*HeldJob, error) {
 	heldID = strings.TrimSpace(heldID)
 	if heldID == "" {
 		return nil, fmt.Errorf("%w: held_id must not be empty", ErrInvalidInput)
+	}
+	reason = strings.TrimSpace(reason)
+	if len(reason) > maxHeldErrorBytes {
+		// Drop a rune split by the cut so the stored text stays valid UTF-8.
+		reason = strings.ToValidUTF8(reason[:maxHeldErrorBytes], "")
 	}
 
 	var out *HeldJob
@@ -253,10 +264,11 @@ func (s *Store) CancelHeldJob(ctx context.Context, heldID string) (*HeldJob, err
 		res, err := conn.ExecContext(ctx, `
 			UPDATE held_jobs
 			SET status = 'cancelled',
+				cancel_reason = ?,
 				cancelled_at = ?,
 				updated_at = ?
 			WHERE id = ? AND status = 'held'
-		`, nowStr, nowStr, heldID)
+		`, reason, nowStr, nowStr, heldID)
 		if err != nil {
 			return err
 		}
@@ -426,16 +438,19 @@ func scanHeldJob(s rowScanner) (*HeldJob, error) {
 		cancelledAt   sql.NullString
 		createdAt     string
 		updatedAt     string
+		parentStatus  sql.NullString
 	)
 	err := s.Scan(
 		&h.ID, &h.RequestID, &statusStr, &h.Pool, &altPoolsStr, &payloadStr, &h.Reason, &h.SnapshotSummary,
 		&releasedJobID, &h.ReleasedPool, &releasedAt, &cancelledAt,
-		&h.LastError, &h.ErrorCount, &createdAt, &updatedAt,
+		&h.LastError, &h.ErrorCount, &createdAt, &updatedAt, &h.CancelReason,
+		&parentStatus,
 	)
 	if err != nil {
 		return nil, err
 	}
 	h.Status = HeldStatus(statusStr)
+	h.ParentStatus = Status(parentStatus.String)
 	altPools, err := decodeAltPools(altPoolsStr)
 	if err != nil {
 		return nil, fmt.Errorf("decode held alt_pools: %w", err)
@@ -507,6 +522,7 @@ func ensureHeldJobsColumns(ctx context.Context, db *sql.DB) error {
 		{"cancelled_at", `ALTER TABLE held_jobs ADD COLUMN cancelled_at TEXT NULL`},
 		{"last_error", `ALTER TABLE held_jobs ADD COLUMN last_error TEXT NOT NULL DEFAULT ''`},
 		{"error_count", `ALTER TABLE held_jobs ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0`},
+		{"cancel_reason", `ALTER TABLE held_jobs ADD COLUMN cancel_reason TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, add := range additions {
 		if _, ok := existing[add.name]; ok {
