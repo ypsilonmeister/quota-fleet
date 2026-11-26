@@ -28,15 +28,20 @@ Issue #27 の実装メモ。ジョブ登録時に推論の深さ（effort）を�
 - 判定するエージェント名は、ジョブの `agent` そのもの（`claude` / `codex` / `agy`）。fleet.yaml で別名のエージェントを定義していても、名前が上の 2 つでなければ effort は 400。
 - 起動テンプレート（fleet.yaml の `launch` / `resume`）を上書きしていても、effort の引数は自動で付く。テンプレートにプレースホルダは要らない。
 - テンプレートにオプション終端 `--` があるとき（例: `codex exec --skip-git-repo-check --`）、effort の引数は **最初の `--` の直前** に入れる。`--` より後ろは位置引数として扱われ、codex-cli 0.169.1 では `codex exec ... -- -c model_reasoning_effort=low` が `unexpected argument 'model_reasoning_effort=low'` で失敗した（`-c ... --` の順なら `reasoning effort: low` で実行された）。
+  - Linux（run.sh）ではテンプレートのトークンをそのままシェルに渡すので、`--` かどうかは **シェルの引用除去後の値** で判定する。`'--'`、`"--"`、`\-\-` も終端として扱い、その直前に入れる（`codex exec --skip-git-repo-check '--'` で `-c` が後ろに付くと codex-cli 0.169.1 / 0.171.0 は `unexpected argument` で失敗した）。`$` やバッククォート、グロブ文字を含むトークンは実行時まで値が決まらないので終端とみなさない。
+  - Windows（agent-run.cmd）はテンプレートのトークンを値として引用し直すため、トークンが `--` そのものの場合だけが終端になる（`'--'` はリテラルの `'--'` として渡る）。
 - **登録時に実行先で渡せるかを確かめる**。`POST /jobs` は fleet.yaml からジョブの `host` と agent のドライバ（`launch` / `resume` テンプレートとホスト別 `command` 上書き）を解決し、実際に起動する実行ファイルがその agent 自身の CLI でなければ **400** にする。判定は実行ファイルのベース名（ディレクトリと Windows の拡張子 `.exe` / `.cmd` / `.bat` / `.ps1` を除く）が agent 名（`claude` / `codex`）と一致するか。`/home/u/.local/bin/claude` や `C:\...\npm\claude.cmd` は受理、`/opt/bin/run-agent.sh` のようなラッパーや別名のバイナリは、`--effort` / `-c` を受けるか分からないので拒否する。effort 未指定のジョブはこの判定をしない。
   - fleet.yaml を読み込んでいない API サーバー、または `host` が fleet.yaml に無いジョブではこの判定を省く（ホスト未定義は起動時に別途失敗する）。
-  - CLI の **バージョン** が `--effort` / `-c` を受けるかは判定しない（§3.1）。
+  - 続けて、サーバーが実ホストに届く構成（`runtime.adapter: ssh`）では **ジョブの host 上でその CLI に `--help` を実行** し、ヘルプに effort の指定手段（claude は `--effort`、codex は `-c, --config`）があるかを確かめる。無ければ **400**（例: `/opt/legacy/bin/claude` のように名前は claude でも `--effort` を持たない古い CLI）。実行ファイルが host に無い場合も 400。
+  - host に接続できない・プローブがタイムアウトした（15 秒）など、判定できなかったときは **503**（受理も「非対応」の断定もしない）。
+  - 判定が付いた結果（対応・非対応）は (host, agent, 実行ファイル) ごとに 10 分間再利用する。接続失敗は記憶しない。
+  - mock アダプタ（実ホストが無い）ではこのプローブを行わず、上の構成上の判定だけをする。
 - Windows（agent-run.cmd）でも同じ引数を付ける（`=` を含むため `"model_reasoning_effort=<値>"` と引用される）。
 
 ### 3.1 CLI の確認（2026-11-26、ubuntu 上のプローブ）
 - codex-cli 0.169.1: `codex exec --help` に `-c, --config <key=value>` がある。`-c model_reasoning_effort=low` で実行すると起動ヘッダに `reasoning effort: low` と出て応答が返った。`-c model_reasoning_effort=bogus` ではヘッダに `bogus` と出たうえで API が `invalid_enum_value`（受理値: none, minimal, low, medium, high, xhigh, max）で拒否した。値が API まで届いていることはこれで確認できる。
 - Claude Code 2.1.331: `claude --help` に `--effort <level>  Effort level for the current session (low, medium, high, xhigh, max)` がある。`claude -p --effort low` は正常終了した。ただし `--effort bogus` も **エラーにならず** に実行された（CLI は値を検証しない）。どの段で推論したかは CLI の出力からは確認できなかった。よって fleet 側の値検証（§1）が唯一の歯止め。
-- fleet の各ホスト（ubuntu-vm、home-win など）の CLI バージョンが `--effort` / `-c` を受けるかは未確認。古い CLI は未知のフラグとしてエラー終了し、ジョブの失敗として表に出る想定（この挙動自体は未検証）。
+- 登録時のプローブ（§3）は上記のヘルプ行で判定する。codex-cli 0.169.1 の `codex --help` に対してプローブを実行し、対応と判定されることを確認した。claude の判定はテスト用の偽 CLI（`--effort <level>` 行の有無）で確認しており、実機の Claude Code に対しては未実行。
 
 ## 4. 検証の順序
 1. Selector（docs/19）が空の agent / model / pool を埋める。**Selector は effort を選ばない・変えない**（登録者の指定をそのまま使う）。

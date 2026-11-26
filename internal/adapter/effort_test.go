@@ -1,6 +1,9 @@
 package adapter
 
 import (
+	"errors"
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
@@ -186,4 +189,143 @@ func TestCheckEffort(t *testing.T) {
 
 func hostWithCommand(agent, command string) config.HostConfig {
 	return config.HostConfig{Agents: map[string]config.HostAgentOverride{agent: {Command: command}}}
+}
+
+// Review item 8: run.sh hands template tokens to the shell as written, so a quoted terminator
+// such as `'--'` is still the argument `--` for the CLI. The effort must go before it (codex-cli
+// rejected `codex exec --skip-git-repo-check '--' -c model_reasoning_effort=low` with
+// "unexpected argument"). The shell's own argv is checked so the test follows real quote removal.
+func TestBuildLaunchCommandEffortBeforeQuotedDoubleDash(t *testing.T) {
+	cases := []struct {
+		launch, want string
+	}{
+		{`codex exec --skip-git-repo-check '--'`, `codex exec --skip-git-repo-check -c 'model_reasoning_effort=low' '--' < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		{`codex exec --skip-git-repo-check "--"`, `codex exec --skip-git-repo-check -c 'model_reasoning_effort=low' "--" < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		{`codex exec --skip-git-repo-check \-\-`, `codex exec --skip-git-repo-check -c 'model_reasoning_effort=low' \-\- < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		{`codex exec --skip-git-repo-check '-'-`, `codex exec --skip-git-repo-check -c 'model_reasoning_effort=low' '-'- < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		// Not a terminator after quote removal: the effort is appended as before.
+		{`codex exec --skip-git-repo-check '--x'`, `codex exec --skip-git-repo-check '--x' -c 'model_reasoning_effort=low' < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+		{`codex exec --skip-git-repo-check '-- '`, `codex exec --skip-git-repo-check '-- ' -c 'model_reasoning_effort=low' < '/w/prompt.txt' > '/w/agent.log' 2>&1`},
+	}
+	sh, shErr := exec.LookPath("sh")
+	for _, c := range cases {
+		cfg := &config.Config{Agents: map[string]config.AgentConfig{"codex": {Launch: c.launch}}}
+		drv, err := ResolveDriver(cfg, config.HostConfig{}, "codex")
+		if err != nil {
+			t.Fatalf("ResolveDriver: %v", err)
+		}
+		job := store.Job{ID: 1, Agent: "codex", Effort: "low"}
+		lin, err := drv.BuildLaunchCommand(&job, "/w", "/w/prompt.txt", "/w/agent.log", false)
+		if err != nil || lin != c.want {
+			t.Errorf("%s: linux = %q (err=%v)\n want %q", c.launch, lin, err, c.want)
+			continue
+		}
+		if shErr != nil {
+			continue
+		}
+		// Replace the executable with printf and drop the redirections to see the argv the
+		// shell builds: every option must come before the first `--` argument.
+		argsPart := strings.TrimPrefix(strings.SplitN(lin, " < ", 2)[0], "codex ")
+		out, err := exec.Command(sh, "-c", `printf '%s\n' `+argsPart).Output()
+		if err != nil {
+			t.Fatalf("%s: sh: %v", c.launch, err)
+		}
+		argv := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+		effortAt, endAt := -1, -1
+		for i, a := range argv {
+			if a == "model_reasoning_effort=low" && effortAt < 0 {
+				effortAt = i
+			}
+			if a == "--" && endAt < 0 {
+				endAt = i
+			}
+		}
+		if effortAt < 0 || (endAt >= 0 && effortAt > endAt) {
+			t.Errorf("%s: shell argv %q puts the effort after `--`", c.launch, argv)
+		}
+	}
+}
+
+func TestShellWordValue(t *testing.T) {
+	cases := []struct {
+		word, want string
+		ok         bool
+	}{
+		{`--`, "--", true},
+		{`'--'`, "--", true},
+		{`"--"`, "--", true},
+		{`\-\-`, "--", true},
+		{`"-"'-'`, "--", true},
+		{`"a\"b"`, `a"b`, true},
+		{`"a\b"`, `a\b`, true},
+		{`'--`, "", false},
+		{`"$X"`, "", false},
+		{`$X`, "", false},
+		{"`x`", "", false},
+		{`-*`, "", false},
+	}
+	for _, c := range cases {
+		got, ok := shellWordValue(c.word)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("shellWordValue(%s) = %q, %v; want %q, %v", c.word, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+// Review round 2, item 1: the host's CLI is asked for its help; a same-named CLI whose help lacks
+// the effort option is unsupported (ErrEffortUnsupported), while a failure to run the probe is not
+// a verdict.
+func TestEffortProbe(t *testing.T) {
+	drv, err := ResolveDriver(nil, hostWithCommand("claude", "/opt/legacy/bin/claude"), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := drv.BuildEffortProbe(&store.Job{Agent: "claude"}, false); p != nil || err != nil {
+		t.Fatalf("no effort: probe=%v err=%v, want nil, nil", p, err)
+	}
+	p, err := drv.BuildEffortProbe(&store.Job{Agent: "claude", Effort: "high"}, false)
+	if err != nil || p == nil {
+		t.Fatalf("BuildEffortProbe: %v", err)
+	}
+	if p.Executable != "/opt/legacy/bin/claude" || !strings.Contains(p.Command, "/opt/legacy/bin/claude") || !strings.Contains(p.Command, "--help") {
+		t.Errorf("probe = %+v", p)
+	}
+	win, err := drv.BuildEffortProbe(&store.Job{Agent: "claude", Effort: "high"}, true)
+	if err != nil || !strings.Contains(win.Command, "'--help'") || !strings.Contains(win.Command, "Get-Command") {
+		t.Errorf("windows probe = %+v (err=%v)", win, err)
+	}
+	wrapped, _ := ResolveDriver(nil, hostWithCommand("claude", "/opt/bin/run-agent.sh"), "claude")
+	if _, err := wrapped.BuildEffortProbe(&store.Job{Agent: "claude", Effort: "high"}, false); err == nil {
+		t.Error("wrapper: BuildEffortProbe err = nil, want not the claude CLI")
+	}
+
+	cases := []struct {
+		name        string
+		res         ExecResult
+		runErr      error
+		wantNil     bool
+		unsupported bool
+	}{
+		{"lists --effort", ExecResult{Output: "  --effort <level>  Effort level"}, nil, true, false},
+		{"legacy help", ExecResult{Output: "  -p, --print\n  --model <model>"}, nil, false, true},
+		{"similar option only", ExecResult{Output: "  --effort-budget <n>"}, nil, false, true},
+		{"not found", ExecResult{ExitCode: 127, Output: p.notFoundMarker + " /opt/legacy/bin/claude"}, nil, false, true},
+		{"unknown flag error", ExecResult{ExitCode: 1, Output: "error: unknown option '--help'"}, nil, false, true},
+		{"silent failure", ExecResult{ExitCode: 1}, nil, false, false},
+		{"transport error", ExecResult{}, errors.New("ssh: connection refused"), false, false},
+	}
+	for _, c := range cases {
+		err := p.Classify(c.res, c.runErr)
+		if (err == nil) != c.wantNil || (err != nil && errors.Is(err, ErrEffortUnsupported) != c.unsupported) {
+			t.Errorf("%s: Classify = %v, want nil=%v unsupported=%v", c.name, err, c.wantNil, c.unsupported)
+		}
+	}
+
+	codex := &EffortProbe{agent: "codex", Executable: "codex"}
+	if err := codex.Classify(ExecResult{Output: "  -c, --config <key=value>\n          Override"}, nil); err != nil {
+		t.Errorf("codex help with --config: %v", err)
+	}
+	if err := codex.Classify(ExecResult{Output: "  -m, --model <MODEL>"}, nil); !errors.Is(err, ErrEffortUnsupported) {
+		t.Errorf("codex help without --config: %v", err)
+	}
 }

@@ -2,12 +2,17 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 )
 
@@ -161,5 +166,104 @@ func TestCreateJobEffortResponsePaths(t *testing.T) {
 	resp.Body.Close()
 	if detail["effort"] != "low" {
 		t.Fatalf("GET /jobs/{id} top-level effort = %v", detail["effort"])
+	}
+}
+
+// fakeHostAccess runs probe commands locally (the real probe command through sh) for the hosts in
+// up and fails to reach any other host.
+type fakeHostAccess struct {
+	up map[string]bool
+}
+
+func (f fakeHostAccess) FileAccessForHost(host string) (adapter.FileAccess, error) {
+	if !f.up[host] {
+		return nil, errors.New("ssh: connect to host " + host + ": connection refused")
+	}
+	return adapter.NewLocalFileAccess(""), nil
+}
+
+// writeFakeCLI writes an executable that prints help to stdout and appends a line to calls on
+// each run.
+func writeFakeCLI(t *testing.T, path, help, calls string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\necho run >> '" + calls + "'\ncat <<'HELP'\n" + help + "\nHELP\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Review round 2, item 1: a CLI with the agent's own name that does not take the effort option
+// (an older release, e.g. /opt/legacy/bin/claude) must be rejected with 400 at registration. The
+// job's host is asked for the CLI's help, which has to list --effort (claude) or -c/--config
+// (codex).
+func TestCreateJobEffortHostCLIProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake CLIs are shell scripts")
+	}
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	legacyClaude := filepath.Join(dir, "opt/legacy/bin/claude")
+	currentClaude := filepath.Join(dir, "opt/current/bin/claude")
+	legacyCodex := filepath.Join(dir, "opt/legacy/bin/codex")
+	currentCodex := filepath.Join(dir, "opt/current/bin/codex")
+	writeFakeCLI(t, legacyClaude, "Usage: claude [options]\n  -p, --print  Print response\n  --model <model>  Model", calls)
+	writeFakeCLI(t, currentClaude, "Usage: claude [options]\n  -p, --print  Print response\n  --effort <level>  Effort level for the current session (low, medium, high, xhigh, max)", calls)
+	writeFakeCLI(t, legacyCodex, "Usage: codex [OPTIONS]\n  -m, --model <MODEL>", calls)
+	writeFakeCLI(t, currentCodex, "Usage: codex [OPTIONS]\n  -c, --config <key=value>\n          Override a configuration value", calls)
+
+	host := func(agent, command string) config.HostConfig {
+		return config.HostConfig{OS: "linux", Agents: map[string]config.HostAgentOverride{agent: {Command: command}}}
+	}
+	cfg := &config.Config{Hosts: map[string]config.HostConfig{
+		"legacy":        host("claude", legacyClaude),
+		"current":       host("claude", currentClaude),
+		"missing":       host("claude", filepath.Join(dir, "nowhere/bin/claude")),
+		"codex-legacy":  host("codex", legacyCodex),
+		"codex-current": host("codex", currentCodex),
+		"down":          host("claude", currentClaude),
+		"wrapped":       host("claude", filepath.Join(dir, "opt/bin/run-agent.sh")),
+	}}
+	up := map[string]bool{"legacy": true, "current": true, "missing": true, "codex-legacy": true, "codex-current": true, "wrapped": true}
+	names := make([]string, 0, len(cfg.Hosts))
+	for h := range cfg.Hosts {
+		names = append(names, h)
+	}
+	_, _, ts := newTestServer(t, Options{InstanceID: "effort-probe", Config: cfg, Hosts: names, Agents: []string{"claude", "codex"}, HostAccess: fakeHostAccess{up: up}})
+
+	runs := func() int {
+		b, _ := os.ReadFile(calls)
+		return strings.Count(string(b), "run")
+	}
+	for _, c := range []struct {
+		id, agent, host, effort string
+		want                    int
+		reason                  string
+		probes                  int // fake CLI runs caused by this request
+	}{
+		{"p-legacy", "claude", "legacy", "high", http.StatusBadRequest, "does not list --effort", 1},
+		{"p-legacy-again", "claude", "legacy", "low", http.StatusBadRequest, "does not list --effort", 0}, // settled result reused
+		{"p-legacy-none", "claude", "legacy", "", http.StatusCreated, "", 0},
+		{"p-current", "claude", "current", "high", http.StatusCreated, "", 1},
+		{"p-current-again", "claude", "current", "medium", http.StatusCreated, "", 0},
+		{"p-missing", "claude", "missing", "high", http.StatusBadRequest, "was not found", 0},
+		{"p-codex-legacy", "codex", "codex-legacy", "low", http.StatusBadRequest, "does not list -c/--config", 1},
+		{"p-codex-current", "codex", "codex-current", "low", http.StatusCreated, "", 1},
+		{"p-down", "claude", "down", "high", http.StatusServiceUnavailable, "cannot confirm effort support", 0},
+		{"p-wrapped", "claude", "wrapped", "high", http.StatusBadRequest, "not the claude CLI", 0},
+	} {
+		before := runs()
+		status, _, body := postJob(t, ts.URL, CreateJobRequest{RequestID: c.id, Title: "t", Agent: c.agent, Host: c.host, Effort: c.effort})
+		if status != c.want {
+			t.Errorf("%s: status=%d body=%s, want %d", c.id, status, body, c.want)
+		}
+		if c.reason != "" && !strings.Contains(body, c.reason) {
+			t.Errorf("%s: body=%s, want %q", c.id, body, c.reason)
+		}
+		if got := runs() - before; got != c.probes {
+			t.Errorf("%s: CLI ran %d times, want %d", c.id, got, c.probes)
+		}
 	}
 }
