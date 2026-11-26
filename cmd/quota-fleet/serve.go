@@ -23,6 +23,7 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
 	"github.com/ypsilonmeister/quota-fleet/internal/mcpserver"
 	"github.com/ypsilonmeister/quota-fleet/internal/push"
+	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/runtime"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
@@ -175,6 +176,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		SignalMaxBytes:      cfg.Runtime.EffectiveSignalMaxBytes(),
 		GateMode:            cfg.Quota.EffectiveGateMode(),
 		QuotaUsageFile:      cfg.Quota.UsageFile,
+		QuotaUsageFormat:    cfg.Quota.EffectiveUsageFormat(),
 		QuotaStaleAfter:     cfg.Quota.EffectiveStaleAfter(),
 		GateCheckInterval:   cfg.Quota.EffectiveGateCheckInterval(),
 		AgentsCheckInterval: cfg.EffectiveAgentsCheckInterval(),
@@ -224,6 +226,7 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		SelectorMode:     cfg.Selector.EffectiveMode(),
 		EvaluatorMode:    cfg.Evaluator.EffectiveMode(),
 		QuotaUsageFile:   cfg.Quota.UsageFile,
+		QuotaUsageFormat: cfg.Quota.EffectiveUsageFormat(),
 		QuotaStaleAfter:  cfg.Quota.EffectiveStaleAfter(),
 		Pools:            cfg.Pools,
 		Hosts:            sortedMapKeys(cfg.Hosts),
@@ -341,6 +344,14 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 		listen, cfg.InstanceID, dbPath, adapterName, evalMode, gateMode)
 	fmt.Fprintf(w, "  adapter:   %s\n", adapterName)
 	fmt.Fprintf(w, "  gate_mode: %s\n", gateMode)
+	usageFormat := cfg.Quota.EffectiveUsageFormat()
+	if gateMode != config.GateModeOff {
+		fmt.Fprintf(w, "  usage_format: %s\n", usageFormat)
+		if uf := strings.TrimSpace(cfg.Quota.UsageFile); uf != "" {
+			fmt.Fprintf(w, "  usage_file:   %s\n", uf)
+		}
+		fmt.Fprintf(w, "  stale_after:  %s\n", cfg.Quota.EffectiveStaleAfter())
+	}
 	fmt.Fprintf(w, "  evaluator: %s\n", evalMode)
 	reviewGateSummary := "disabled"
 	if cfg.ReviewGate.Enabled {
@@ -377,6 +388,38 @@ func printServeBanner(w io.Writer, logger *log.Logger, cfg *config.Config, liste
 			"review_gate.enabled is true but no Decision API key is configured; POST /decision/review-verdict will answer 503 (set %s or evaluator.api_key)",
 			apiKeyEnv,
 		))
+	}
+	if gateMode != config.GateModeOff {
+		if unmapped := cfg.UnmappedAgents(); len(unmapped) > 0 {
+			warn(fmt.Sprintf("unmapped agents (not covered by any pools.*.applies_to; gate will skip): %s", strings.Join(unmapped, ", ")))
+		}
+		if cfg.HasMeasuredPools() {
+			if strings.TrimSpace(cfg.Quota.UsageFile) == "" {
+				warn(fmt.Sprintf("quota.usage_file is empty while quota.gate_mode is %q (usage_format=%s)", gateMode, usageFormat))
+			} else {
+				vr := quota.ValidateUsageFile(quota.ValidateOptions{
+					File:       cfg.Quota.UsageFile,
+					Format:     usageFormat,
+					Config:     cfg,
+					StaleAfter: cfg.Quota.EffectiveStaleAfter(),
+				})
+				if vr.OK {
+					fmt.Fprintf(w, "  usage_check:  ok (format=%s, pools=%d)\n", vr.Format, len(vr.Pools))
+				} else {
+					var diagMsgs []string
+					for _, d := range vr.Diagnostics {
+						if d.Severity == quota.SeverityError || d.Severity == quota.SeverityDegraded {
+							diagMsgs = append(diagMsgs, fmt.Sprintf("%s: %s", d.Code, d.Message))
+						}
+					}
+					summary := strings.Join(diagMsgs, "; ")
+					if summary == "" {
+						summary = fmt.Sprintf("exit_code=%d", vr.ExitCode)
+					}
+					warn(fmt.Sprintf("initial usage check (format=%s, file=%s): %s", usageFormat, cfg.Quota.UsageFile, summary))
+				}
+			}
+		}
 	}
 }
 

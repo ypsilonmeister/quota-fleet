@@ -6,11 +6,29 @@ const (
 	// DefaultStaleAfter is the default staleness bound for usage snapshots (45m).
 	DefaultStaleAfter = 45 * time.Minute
 
-	// Canonical normalized pool names produced from usage.json.
+	// FutureSkewTolerance is the maximum allowed future clock skew for generated_at and measured_at (5m).
+	FutureSkewTolerance = 5 * time.Minute
+
+	// MeasuredAfterGeneratedTolerance is the maximum allowed amount by which a pool's measured_at
+	// may exceed the snapshot's generated_at (60s).
+	MeasuredAfterGeneratedTolerance = 60 * time.Second
+
+	// Usage snapshot format identifiers (matching config.UsageFormatLegacy / config.UsageFormatV1).
+	FormatLegacy = "legacy"
+	FormatV1     = "v1"
+
+	// Canonical normalized pool names produced from legacy usage.json.
 	PoolClaude    = "claude"
 	PoolCodex     = "codex"
 	PoolAgyGemini = "agy-gemini"
 	PoolAgy3P     = "agy-3p"
+
+	// Schema v1 pool entry status values.
+	PoolEntryStatusOK    = "ok"
+	PoolEntryStatusError = "error"
+
+	// DefaultShortWindowLabel is the default short rolling window label when omitted.
+	DefaultShortWindowLabel = "5h"
 )
 
 // PoolHealthStatus classifies a single pool's health from a snapshot.
@@ -42,30 +60,73 @@ const (
 
 // Reason constants provide machine-readable context for non-trivial verdicts.
 const (
-	ReasonNone             = ""
-	ReasonUnmeasured       = "unmeasured"
-	ReasonStale            = "stale"
-	ReasonShortWindowNull  = "short_window_null"
-	ReasonPoolNotFound     = "pool_not_found"
-	ReasonSnapshotError    = "snapshot_error"
-	ReasonNoCandidatePools = "no_candidate_pools"
+	ReasonNone                  = ""
+	ReasonUnmeasured            = "unmeasured"
+	ReasonStale                 = "stale"
+	ReasonShortWindowNull       = "short_window_null"
+	ReasonShortWindowMissing    = "short_window_missing"
+	ReasonShortWindowMismatch   = "short_window_mismatch"
+	ReasonPoolNotFound          = "pool_not_found"
+	ReasonPoolNotConfigured     = "pool_not_configured"
+	ReasonSnapshotError         = "snapshot_error"
+	ReasonFormatMismatch        = "format_mismatch"
+	ReasonTimestampFuture       = "timestamp_future"
+	ReasonTimestampInconsistent = "timestamp_inconsistent"
+	ReasonCollectorError        = "collector_error"
+	ReasonNoCandidatePools      = "no_candidate_pools"
 )
+
+// CollectorInfo holds optional diagnostic metadata from Schema v1 snapshots.
+type CollectorInfo struct {
+	Name            string `json:"name,omitempty"`
+	Version         string `json:"version,omitempty"`
+	Host            string `json:"host,omitempty"`
+	IntervalSeconds *int   `json:"interval_seconds,omitempty"`
+}
 
 // PoolSnapshot is the normalized quota measurement for a single pool.
 type PoolSnapshot struct {
+	Status                 string     `json:"status,omitempty"`
+	Error                  string     `json:"error,omitempty"`
+	WeeklyAbsent           bool       `json:"-"`
 	WeeklyRemainingPercent int        `json:"weekly_remaining_percent"`
 	WeeklyResetAt          *time.Time `json:"weekly_reset_at"`
+	WeeklyResetAtApprox    bool       `json:"weekly_reset_at_approx,omitempty"`
+	ShortApplicable        *bool      `json:"short_applicable,omitempty"`
 	ShortRemainingPercent  *int       `json:"short_remaining_percent"`
 	ShortResetAt           *time.Time `json:"short_reset_at"`
+	ShortResetAtApprox     bool       `json:"short_reset_at_approx,omitempty"`
+	ShortWindow            string     `json:"short_window,omitempty"`
+	ShortNormalized        bool       `json:"-"`
 	MeasuredAt             time.Time  `json:"measured_at"`
 	ServiceStale           bool       `json:"service_stale,omitempty"`
 	FetchedAt              *time.Time `json:"fetched_at,omitempty"`
 }
 
+// EffectiveStatus returns "ok" unless Status is explicitly "error".
+func (p PoolSnapshot) EffectiveStatus() string {
+	if p.Status == PoolEntryStatusError {
+		return PoolEntryStatusError
+	}
+	return PoolEntryStatusOK
+}
+
+// EffectiveShortWindow returns ShortWindow or DefaultShortWindowLabel ("5h").
+func (p PoolSnapshot) EffectiveShortWindow() string {
+	if p.ShortWindow == "" {
+		return DefaultShortWindowLabel
+	}
+	return p.ShortWindow
+}
+
 // Snapshot is a normalized collection of pool measurements taken at MeasuredAt.
 type Snapshot struct {
-	MeasuredAt time.Time               `json:"measured_at"`
-	Pools      map[string]PoolSnapshot `json:"pools"`
+	Format        string                  `json:"format,omitempty"`
+	SchemaVersion int                     `json:"schema_version,omitempty"`
+	GeneratedAt   time.Time               `json:"generated_at,omitempty"`
+	Collector     *CollectorInfo          `json:"collector,omitempty"`
+	MeasuredAt    time.Time               `json:"measured_at"`
+	Pools         map[string]PoolSnapshot `json:"pools"`
 }
 
 // PoolEvaluation is the health verdict for a single candidate pool.
@@ -74,20 +135,28 @@ type PoolEvaluation struct {
 	Status     PoolHealthStatus `json:"status"`
 	BlockedBy  string           `json:"blocked_by,omitempty"`
 	Reason     string           `json:"reason,omitempty"`
+	Detail     string           `json:"detail,omitempty"`
+	PoolError  string           `json:"pool_error,omitempty"`
+	AgeSeconds *int64           `json:"age_seconds,omitempty"`
 	Snapshot   *PoolSnapshot    `json:"snapshot,omitempty"`
 	Unmeasured bool             `json:"unmeasured,omitempty"`
 }
 
 // GateEvaluation is the full gate decision for a primary pool and optional alt pools.
 type GateEvaluation struct {
-	Decision      DecisionKind     `json:"decision"`
-	RequestedPool string           `json:"requested_pool"`
-	AltPools      []string         `json:"alt_pools,omitempty"`
-	SelectedPool  string           `json:"selected_pool,omitempty"`
-	BlockedBy     string           `json:"blocked_by,omitempty"`
-	Bypassed      bool             `json:"bypassed,omitempty"`
-	Reason        string           `json:"reason,omitempty"`
-	MeasuredAt    *time.Time       `json:"measured_at,omitempty"`
-	DecidedAt     time.Time        `json:"decided_at"`
-	Pools         []PoolEvaluation `json:"pools,omitempty"`
+	Format         string           `json:"format,omitempty"`
+	Decision       DecisionKind     `json:"decision"`
+	RequestedPool  string           `json:"requested_pool"`
+	AltPools       []string         `json:"alt_pools,omitempty"`
+	SelectedPool   string           `json:"selected_pool,omitempty"`
+	BlockedBy      string           `json:"blocked_by,omitempty"`
+	Bypassed       bool             `json:"bypassed,omitempty"`
+	Reason         string           `json:"reason,omitempty"`
+	Detail         string           `json:"detail,omitempty"`
+	PoolError      string           `json:"pool_error,omitempty"`
+	AgeSeconds     *int64           `json:"age_seconds,omitempty"`
+	UndefinedPools []string         `json:"undefined_pools,omitempty"`
+	MeasuredAt     *time.Time       `json:"measured_at,omitempty"`
+	DecidedAt      time.Time        `json:"decided_at"`
+	Pools          []PoolEvaluation `json:"pools,omitempty"`
 }

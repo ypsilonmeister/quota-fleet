@@ -546,6 +546,9 @@ limits: { max_claimed: 1, attempts_cap: 1 }
 	if got := cfg.Quota.EffectiveGateCheckInterval(); got != DefaultQuotaGateCheckInterval {
 		t.Errorf("EffectiveGateCheckInterval() = %v, want %v", got, DefaultQuotaGateCheckInterval)
 	}
+	if got := cfg.Quota.EffectiveUsageFormat(); got != UsageFormatLegacy {
+		t.Errorf("EffectiveUsageFormat() = %q, want %q", got, UsageFormatLegacy)
+	}
 
 	cfgDry, err := Parse([]byte(`
 instance_id: "inst-q-dry"
@@ -654,6 +657,148 @@ quota:
 		},
 	}
 	for _, tc := range invalidCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Parse([]byte(tc.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestQuotaUsageFormatAndShortWindowValidation(t *testing.T) {
+	cfgV1, err := Parse([]byte(`
+instance_id: "inst-v1"
+limits: { max_claimed: 1, attempts_cap: 1 }
+agents:
+  claude: { launch: "claude -p" }
+  codex: { launch: "codex exec" }
+pools:
+  demo-pool:
+    applies_to: [{ agent: claude }]
+  weekly-only:
+    short_window: false
+    applies_to: [{ agent: claude }]
+  unmeasured-alt:
+    unmeasured: true
+quota:
+  usage_file: "./usage-v1.json"
+  usage_format: "v1"
+  gate_mode: "enforce"
+`))
+	if err != nil {
+		t.Fatalf("Parse v1: %v", err)
+	}
+	if err := cfgV1.Validate(); err != nil {
+		t.Fatalf("Validate v1: %v", err)
+	}
+	if got := cfgV1.Quota.EffectiveUsageFormat(); got != UsageFormatV1 {
+		t.Errorf("EffectiveUsageFormat() = %q, want %q", got, UsageFormatV1)
+	}
+	if !cfgV1.Pools["demo-pool"].EffectiveShortWindow() {
+		t.Errorf("demo-pool EffectiveShortWindow() = false, want true")
+	}
+	if cfgV1.Pools["weekly-only"].EffectiveShortWindow() {
+		t.Errorf("weekly-only EffectiveShortWindow() = true, want false")
+	}
+	unmapped := cfgV1.UnmappedAgents()
+	if len(unmapped) != 1 || unmapped[0] != "codex" {
+		t.Errorf("UnmappedAgents() = %v, want [codex]", unmapped)
+	}
+
+	// Legacy mode allows empty usage_file even with measured pools + enforce (backward compat).
+	cfgLegacyEmpty, err := Parse([]byte(`
+instance_id: "inst-legacy-empty"
+limits: { max_claimed: 1, attempts_cap: 1 }
+pools:
+  claude: { provider: claude-usage }
+quota:
+  usage_format: "legacy"
+  gate_mode: "enforce"
+`))
+	if err != nil {
+		t.Fatalf("Parse legacy empty: %v", err)
+	}
+	if err := cfgLegacyEmpty.Validate(); err != nil {
+		t.Fatalf("Validate legacy empty should pass, got: %v", err)
+	}
+
+	// v1 mode allows empty usage_file when gate_mode is off or all pools are unmeasured.
+	for _, yml := range []string{
+		`
+instance_id: "inst-v1-off"
+limits: { max_claimed: 1, attempts_cap: 1 }
+pools:
+  demo: {}
+quota:
+  usage_format: "v1"
+  gate_mode: "off"
+`,
+		`
+instance_id: "inst-v1-unmeasured"
+limits: { max_claimed: 1, attempts_cap: 1 }
+pools:
+  unmeas: { unmeasured: true }
+quota:
+  usage_format: "v1"
+  gate_mode: "enforce"
+`,
+	} {
+		c, err := Parse([]byte(yml))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("Validate should succeed: %v", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "unsupported usage_format auto",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+quota:
+  usage_format: "auto"
+`,
+			wantErr: "quota.usage_format",
+		},
+		{
+			name: "v1 enforce empty usage_file with measured pool",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+pools:
+  demo: {}
+quota:
+  usage_format: "v1"
+  gate_mode: "enforce"
+`,
+			wantErr: "quota.usage_file",
+		},
+		{
+			name: "v1 dry-run empty usage_file with measured pool",
+			yaml: `
+instance_id: "inst"
+limits: { max_claimed: 1, attempts_cap: 1 }
+pools:
+  demo: {}
+quota:
+  usage_format: "v1"
+  gate_mode: "dry-run"
+`,
+			wantErr: "quota.usage_file",
+		},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := Parse([]byte(tc.yaml))
 			if err != nil {

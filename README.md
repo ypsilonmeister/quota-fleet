@@ -65,6 +65,52 @@ trustworthy enough to merge.
    ```bash
    ./quota-fleet mcp config --binary "$PWD/quota-fleet"
    ```
+4. **Enable the Quota Gate (Optional)**:
+   The Quota Gate reads a normalized JSON snapshot file (**Schema v1**,
+   `schema_version: 1`) defined in [docs/23-usage-snapshot.md](docs/23-usage-snapshot.md).
+   `quota-fleet` itself only reads and validates this file contract — it never
+   stores or handles subscription credentials.
+
+   Minimal Schema v1 snapshot example:
+   ```json
+   {
+     "schema_version": 1,
+     "generated_at": "2026-11-26T20:30:12Z",
+     "pools": {
+       "demo-pool": {
+         "status": "ok",
+         "measured_at": "2026-11-26T20:30:10Z",
+         "weekly": { "remaining_percent": 80, "reset_at": "2026-12-03T00:00:00Z" },
+         "short":  { "remaining_percent": 60, "reset_at": "2026-11-27T01:30:00Z", "window": "5h" }
+       }
+     }
+   }
+   ```
+
+   **Smoke-test with an arbitrary pool** (uncomment `pools:` and `quota:` in `fleet.yaml`, setting `usage_format: "v1"` and `gate_mode: "dry-run"`):
+   ```bash
+   python3 examples/usage-generator/generate_sample.py \
+     --pool demo-pool --weekly 80 --short 60 --out ./usage.json
+   ./quota-fleet usage validate --file ./usage.json --config fleet.yaml --format v1
+   ./quota-fleet gate check --config fleet.yaml --pool demo-pool
+   ```
+   > **Warning:** `examples/usage-generator/generate_sample.py` generates synthetic
+   > data for **smoke-testing and configuration verification only**. Never use it
+   > as operational input for `gate_mode: enforce`.
+
+   **Connecting real collection & public scope**:
+   - Deploy snapshots from your collector host using exclusive locking and
+     generation protection (`flock` + `quota-fleet usage validate --format v1 --check-deploy --reject-older-than "$DEST"` + atomic `mv`; see [`examples/usage-generator/atomic_deploy.sh`](examples/usage-generator/atomic_deploy.sh) and [docs/23-usage-snapshot.md](docs/23-usage-snapshot.md)).
+   - Planned Phase 2 reference collectors in this public repository will cover a
+     generic runner and an official CLI-based Antigravity (`agy`) probe (which
+     carries PTY/TUI parsing maintenance). Probes that rely on private APIs
+     (such as Claude / Codex) are out of scope for this public repository;
+     operators supply their own external measurement script writing Schema v1.
+   - Before enabling `gate_mode: enforce`, measure end-to-end collect + sync
+     latency over 24–48 hours to tune `quota.stale_after`, verify
+     `quota-fleet usage validate --config fleet.yaml` exits `0`, and check
+     failure diagnostics via `usage validate`, `gate check`, `gate held`, and
+     `serve` logs (details in [docs/23-usage-snapshot.md](docs/23-usage-snapshot.md)).
 
 ## Supported OS boundaries (v1)
 
@@ -128,7 +174,8 @@ the missing control plane around them.
 
 ## Repository layout
 
-- `cmd/quota-fleet/` — CLI entrypoint (`init`, `serve`, `job`, `gate`, `agents`, `mcp`, `mcp config`, `config check`, `status`)
+- `cmd/quota-fleet/` — CLI entrypoint (`init`, `serve`, `job`, `gate`, `usage validate`, `agents`, `chain`, `mcp`, `mcp config`, `config check`, `status`)
+- `examples/usage-generator/` — smoke-test Schema v1 snapshot generator (non-operational) and `flock` atomic deploy helper
 - `internal/` — store, config, API server, runtime, SSH/local adapter, quota gate, evaluator, web UI, MCP server, agent version and model probes
 - `docs/01-architecture.md` — components and how they interact
 - `docs/02-job-model.md` — job states, claims, chains, failure semantics
@@ -148,6 +195,8 @@ the missing control plane around them.
 - `docs/16-web-push.md` — Web Push on job completion (VAPID keys, setup, iOS limits)
 - `docs/17-i18n.md` — web UI internationalization (dictionary, how to add strings)
 - `docs/21-job-effort.md` — per-job reasoning effort (`effort`: codex / claude)
+- `docs/22-chain-runs.md` — self-driving chain runs
+- `docs/23-usage-snapshot.md` — Schema v1 usage snapshot contract, validation CLI, and atomic deployment
 
 ## License
 

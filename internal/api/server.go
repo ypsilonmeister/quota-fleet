@@ -61,11 +61,12 @@ type Options struct {
 	// Quota Gate integration settings (off | dry-run | enforce).
 	GateMode string
 	// SelectorMode is off | record | apply (docs/19). Empty means off.
-	SelectorMode    string
-	EvaluatorMode   string
-	QuotaUsageFile  string
-	QuotaStaleAfter time.Duration
-	Pools           map[string]config.PoolConfig
+	SelectorMode     string
+	EvaluatorMode    string
+	QuotaUsageFile   string
+	QuotaUsageFormat string
+	QuotaStaleAfter  time.Duration
+	Pools            map[string]config.PoolConfig
 	// Non-sensitive configured names exposed by GET /meta.
 	Hosts  []string
 	Agents []string
@@ -176,6 +177,7 @@ type Server struct {
 	selectorMode     string
 	evaluatorMode    string
 	quotaUsageFile   string
+	quotaUsageFormat string
 	quotaStaleAfter  time.Duration
 	pools            map[string]config.PoolConfig
 	hosts            []string
@@ -261,6 +263,11 @@ func NewServer(st *store.Store, opts Options) *Server {
 		eventsHeartbeat = defaultEventsHeartbeat
 	}
 
+	usageFormat := strings.TrimSpace(opts.QuotaUsageFormat)
+	if usageFormat == "" {
+		usageFormat = config.UsageFormatLegacy
+	}
+
 	s := &Server{
 		reviewGateEnabled: opts.ReviewGateEnabled,
 		reviewJudge:       opts.ReviewJudge,
@@ -275,6 +282,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 		selectorMode:     selectorMode,
 		evaluatorMode:    evaluatorMode,
 		quotaUsageFile:   strings.TrimSpace(opts.QuotaUsageFile),
+		quotaUsageFormat: usageFormat,
 		quotaStaleAfter:  staleAfter,
 		pools:            opts.Pools,
 		hosts:            normalizeSortedNames(hostNames),
@@ -295,9 +303,11 @@ func NewServer(st *store.Store, opts Options) *Server {
 		Pools:        opts.Pools,
 		StaleAfter:   staleAfter,
 		UsageFile:    strings.TrimSpace(opts.QuotaUsageFile),
+		UsageFormat:  usageFormat,
 		Now:          nowFn,
 		LoadSnapshot: opts.SnapshotLoader,
 		GetJob:       st.GetJob,
+		Logger:       logger,
 	})
 
 	if len(s.tokens) == 0 && !s.requireAuth {
@@ -494,6 +504,10 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := s.adm.ValidateExplicitPools(req.Pool, req.AltPools); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	params := admReq.Params
 	params.Pool = s.adm.ResolvePool(req.Agent, req.Model, req.Pool)
@@ -604,6 +618,10 @@ func (s *Server) handleCreateJobEnforce(w http.ResponseWriter, r *http.Request, 
 
 	// Gate input is the pool the job will actually run on (after the Selector).
 	dec := s.adm.Gate(params, req.AltPools, usage)
+	if dec.Kind == admission.KindReject {
+		writeError(w, http.StatusBadRequest, dec.Reject.Error())
+		return
+	}
 	if dec.SnapshotErr != nil {
 		s.logger.Printf("WARNING: quota gate enforce evaluation for request_id=%s failed to load snapshot: %v", reqID, dec.SnapshotErr)
 	}
@@ -1248,6 +1266,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		Now:        s.nowFn(),
 		StaleAfter: s.quotaStaleAfter,
 		Pools:      s.pools,
+		Format:     s.quotaUsageFormat,
 	}
 	summaries := make([]PoolSummaryDTO, 0, len(poolNames))
 	for _, name := range poolNames {
@@ -1413,7 +1432,7 @@ func (s *Server) loadSnapshotForMeta() *quota.Snapshot {
 	if s.quotaUsageFile == "" {
 		return nil
 	}
-	snap, err := quota.LoadUsageFile(s.quotaUsageFile)
+	snap, err := quota.LoadUsageFileWithFormat(s.quotaUsageFile, s.quotaUsageFormat)
 	if err != nil {
 		return nil
 	}

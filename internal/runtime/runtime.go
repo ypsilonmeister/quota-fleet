@@ -37,6 +37,7 @@ type Options struct {
 	SignalMaxBytes      int64
 	GateMode            string
 	QuotaUsageFile      string
+	QuotaUsageFormat    string
 	QuotaStaleAfter     time.Duration
 	GateCheckInterval   time.Duration
 	AgentsCheckInterval time.Duration
@@ -178,9 +179,11 @@ func New(opts Options) (*Runtime, error) {
 			Pools:        opts.Pools,
 			StaleAfter:   opts.QuotaStaleAfter,
 			UsageFile:    opts.QuotaUsageFile,
+			UsageFormat:  opts.QuotaUsageFormat,
 			Now:          opts.Now,
 			LoadSnapshot: opts.SnapshotLoader,
 			GetJob:       opts.Store.GetJob,
+			Logger:       logger,
 		}),
 		Notifier:       notifier,
 		LauncherNotify: notifyCh,
@@ -204,6 +207,7 @@ func New(opts Options) (*Runtime, error) {
 		Store:          opts.Store,
 		GateMode:       opts.GateMode,
 		UsageFile:      opts.QuotaUsageFile,
+		UsageFormat:    opts.QuotaUsageFormat,
 		StaleAfter:     opts.QuotaStaleAfter,
 		Pools:          opts.Pools,
 		Interval:       opts.GateCheckInterval,

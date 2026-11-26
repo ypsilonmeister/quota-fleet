@@ -18,6 +18,9 @@ The gate has three jobs:
 
 - A collector periodically publishes a snapshot: per pool, the remaining
   percentage and reset time of the weekly window, and of the short window.
+  See [docs/23-usage-snapshot.md](23-usage-snapshot.md) for the formal
+  Schema v1 JSON contract, strict validation (`quota-fleet usage validate`),
+  `quota.usage_format: legacy | v1`, and atomic deployment recipe.
 - A pool is **healthy** when both windows have remaining quota above zero.
   Which window blocked a pool is recorded (`weekly` / `short`).
 - If the snapshot is older than the staleness bound (45 minutes in the

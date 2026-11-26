@@ -238,7 +238,7 @@ Adapter の内部構造（決定論的コードとして実装するもの）:
 
 移行後のホスト構成（現行4ホスト）: `serve` は自宅 Ubuntu に置き、ワーカーホストは penguin／home-win／ubuntu（自宅 Ubuntu 自身は LocalTransport）／ubuntu-vm の4つを当面すべて残す。
 
-Quota Collector も同じ思想で、コアは**正規化スナップショットの JSON スキーマ**だけを持つ: プールごとに `weekly_remaining_pct`、`weekly_reset_at`、`short_remaining_pct`（nullable）、`short_reset_at`（nullable）、`fetched_at`、`stale` を数値・時刻フィールドで定義し、表示文字列（`subText`）のパースは廃止する。実測プロバイダ（各サービスの非公開 API 等）はプラグインとして分離し、コアに含めない。
+Quota Collector も同じ思想で、コアは**正規化スナップショットの JSON スキーマ**だけを持つ（正式仕様・厳格検証 CLI・`usage_format: legacy | v1`・原子的配置手順は [docs/23-usage-snapshot.md](23-usage-snapshot.md) を参照）。実測プロバイダ（各サービスの非公開 API 等）はコアに含めない。
 
 Quota Gate 側の修正もここに含める: 全体の `updated_at` だけでなく**プール単位の `stale`／`fetched_at`** を見ること、**short 窓がリセット直後で null のときの健全判定**（「使用量ゼロ＝満額」として扱うか、未測定として保持するか）を仕様として明文化すること（§7-5）。
 
@@ -287,7 +287,7 @@ Quota Gate 側の修正もここに含める: 全体の `updated_at` だけで�
 
    PR の作成は、チェーンの publish 工程（エージェントのジョブ）または Coordinator が行い、Shepherd は行わない。
 5. **Reconciler の claimed 介入の既定値**: 検証レポートは仕様準拠の `report-only` を既定に提案し、v1 の本書は現行実績を尊重して `salvage` を既定に提案した。OSS の既定としては誤判定・勝手な reset のリスクが小さい **`report-only` を既定とし、自宅運用の `fleet.yaml` で `salvage` を有効にする**案を推奨に改める。どちらにするか。
-6. **short 窓が null（リセット直後）の健全判定**: 「満額として健全」とみなすか、「未測定として解放しない」か。実測の意味づけの問題なので、Collector の実挙動を見て決めたい。
+6. **short 窓が null（リセット直後）の健全判定**: **確定（2026-11-26 ゆうや決定、Issue #36 / [docs/23-usage-snapshot.md](23-usage-snapshot.md)）**。明示的で妥当な利用率 0（残量 100%）の数値観測がある場合だけ 100% とし、短期オブジェクト欠落・キー欠落・明示 `null` は欠測（`weekly > 0` なら `short_window_missing`、Schema v1 `enforce` で Hold）として扱う。短期窓の有無は `fleet.yaml` の `pools.<name>.short_window`（既定 `true`）で管理する。
 7. **部品間通信**: Shepherd 等を同一プロセス内の goroutine にするか、HTTP API 経由の別プロセスにするか。前者は単純、後者は部品単位の再起動と差し替えが効く。本書は同一プロセスを既定としつつ、Store アクセスを API 互換の内部インターフェースに寄せておくことを提案。
 8. **自宅サーバーの運用境界**: (a) HTTP API の公開方法（tailnet 直接＋Bearer トークン／Tailscale Serve の HTTPS／SSH ポートフォワード）、(b) 納品の橋渡し方式（Webhook 押し込み／Coordinator 側ポーリング。Phase 0 の通信検証結果に依存）、(c) 自宅 Ubuntu から各ワーカーホストへの専用 SSH 鍵を新規発行してよいか、(d) SQLite DB のバックアップ先と保持期間。
 9. **Quota Collector の移管範囲**: 現行の収集（collect.py）はウィジェット向け配信も兼ねている。自宅 Ubuntu へ統合移管するか並存させるか。また、OSS に含めない非公開プロバイダ実測プラグインをどこで管理するか（別プライベートリポジトリ等）。
