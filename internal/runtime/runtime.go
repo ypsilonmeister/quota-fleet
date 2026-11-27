@@ -195,6 +195,10 @@ func New(opts Options) (*Runtime, error) {
 	reconciler := NewReconciler(ReconcilerOptions{
 		Store:                 opts.Store,
 		Adapter:               opts.Adapter,
+		Shepherd:              shepherd,
+		Evaluator:             eval,
+		LauncherNotify:        notifyCh,
+		MaxEvalRetries:        opts.MaxEvalRetries,
 		Notifier:              notifier,
 		Interval:              reconcileInterval,
 		StaleClaimedAfter:     staleAfter,

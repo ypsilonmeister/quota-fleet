@@ -347,9 +347,9 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 		for _, want := range []string{
 			"@echo off\r\n",
 			`cd /d "C:\Users\worker\agent-work\job-201" || exit /b 1`,
-			`C:\Users\worker\.local\bin\claude.exe -p --model fable --permission-mode bypassPermissions < prompt.txt > agent.log 2> agent.err.log`,
-			`agent.exit.tmp`,
-			`agent.exit`,
+			`C:\Users\worker\.local\bin\claude.exe -p --model fable --permission-mode bypassPermissions < C:\Users\worker\agent-work\job-201\.fleet\runs\201\prompt.txt > C:\Users\worker\agent-work\job-201\.fleet\runs\201\agent.log 2> C:\Users\worker\agent-work\job-201\.fleet\runs\201\agent.err.log`,
+			`C:\Users\worker\agent-work\job-201\.fleet\runs\201\agent.exit.tmp`,
+			`C:\Users\worker\agent-work\job-201\.fleet\runs\201\agent.exit`,
 			`echo EXIT:%QF_RC%`,
 		} {
 			if !strings.Contains(runCmd, want) {
@@ -361,14 +361,17 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 		wmiCmd := calls[1].Command
 		for _, want := range []string{
 			"Invoke-WmiMethod -Class Win32_Process -Name Create",
-			`C:\Users\worker\agent-work\job-201\agent-run.cmd`,
+			`C:\Users\worker\agent-work\job-201\.fleet\runs\201\agent-run.cmd`,
 			"ReturnValue -ne 0",
-			`C:\Users\worker\agent-work\job-201\agent.pid`,
+			`C:\Users\worker\agent-work\job-201\.fleet\runs\201\agent.pid`,
 			"Write-Output $r.ProcessId",
 		} {
 			if !strings.Contains(wmiCmd, want) {
 				t.Errorf("WMI launch cmd missing %q:\n%s", want, wmiCmd)
 			}
+		}
+		if info.Meta["run_dir"] != `C:\Users\worker\agent-work\job-201\.fleet\runs\201` {
+			t.Errorf("run_dir = %q", info.Meta["run_dir"])
 		}
 		if strings.Contains(wmiCmd, "Start-Process") {
 			t.Errorf("Windows launcher must NEVER use Start-Process:\n%s", wmiCmd)
@@ -400,7 +403,7 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 		}
 
 		_, runCmd := extractWindowsBase64Payloads(t, fake.Calls()[0].Command)
-		wantLine := `C:\Users\worker\.local\bin\claude.exe -p --resume sess-9876-abcd --permission-mode bypassPermissions < prompt.txt > agent.log 2> agent.err.log`
+		wantLine := `C:\Users\worker\.local\bin\claude.exe -p --resume sess-9876-abcd --permission-mode bypassPermissions < C:\Users\worker\agent-work\job-202\.fleet\runs\202\prompt.txt > C:\Users\worker\agent-work\job-202\.fleet\runs\202\agent.log 2> C:\Users\worker\agent-work\job-202\.fleet\runs\202\agent.err.log`
 		if !strings.Contains(runCmd, wantLine) {
 			t.Errorf("claude resume agent-run.cmd missing %q:\n%s", wantLine, runCmd)
 		}
@@ -434,7 +437,7 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 
 		_, runCmd := extractWindowsBase64Payloads(t, fake.Calls()[0].Command)
 		assertStrictCRLF(t, runCmd)
-		wantLine := `C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --dangerously-bypass-approvals-and-sandbox - < prompt.txt > agent.log 2> agent.err.log`
+		wantLine := `C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --dangerously-bypass-approvals-and-sandbox - < E:\worktrees\wt-203\.fleet\runs\203\prompt.txt > E:\worktrees\wt-203\.fleet\runs\203\agent.log 2> E:\worktrees\wt-203\.fleet\runs\203\agent.err.log`
 		if !strings.Contains(runCmd, wantLine) {
 			t.Errorf("codex agent-run.cmd missing %q:\n%s", wantLine, runCmd)
 		}
@@ -465,7 +468,7 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 		}
 
 		_, runCmd := extractWindowsBase64Payloads(t, fake.Calls()[0].Command)
-		wantLine := `C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < prompt.txt > agent.log 2> agent.err.log`
+		wantLine := `C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < C:\Users\worker\agent-work\job-2031\.fleet\runs\2031\prompt.txt > C:\Users\worker\agent-work\job-2031\.fleet\runs\2031\agent.log 2> C:\Users\worker\agent-work\job-2031\.fleet\runs\2031\agent.err.log`
 		if !strings.Contains(runCmd, wantLine) {
 			t.Errorf("codex builtin default agent-run.cmd missing %q:\n%s", wantLine, runCmd)
 		}
@@ -525,8 +528,8 @@ func TestWindowsAdapterLaunchWMIAndDrivers(t *testing.T) {
 		_, runCmd := extractWindowsBase64Payloads(t, fake.Calls()[0].Command)
 		for _, want := range []string{
 			`C:\Users\worker\.local\bin\agy.exe`,
-			`ReadAllText('prompt.txt', [System.Text.Encoding]::UTF8)`,
-			`< NUL > agent.log 2> agent.err.log`,
+			`ReadAllText('C:\Users\worker\agent-work\job-206\.fleet\runs\206\prompt.txt', [System.Text.Encoding]::UTF8)`,
+			`< NUL > C:\Users\worker\agent-work\job-206\.fleet\runs\206\agent.log 2> C:\Users\worker\agent-work\job-206\.fleet\runs\206\agent.err.log`,
 		} {
 			if !strings.Contains(runCmd, want) {
 				t.Errorf("agy agent-run.cmd missing %q:\n%s", want, runCmd)
@@ -645,8 +648,23 @@ func TestWindowsAdapterStatusThreeStates(t *testing.T) {
 			t.Fatalf("Status running = (%+v, %v)", st, err)
 		}
 		cmd := fake.Calls()[0].Command
-		if !strings.Contains(cmd, "Get-Process -Id") || !strings.Contains(cmd, "agent.exit") || !strings.Contains(cmd, "agent.pid") {
+		if !strings.Contains(cmd, "Get-Process -Id") ||
+			!strings.Contains(cmd, `C:\Users\worker\agent-work\job-401\.fleet\runs\401\agent.exit`) ||
+			!strings.Contains(cmd, `C:\Users\worker\agent-work\job-401\.fleet\runs\401\agent.pid`) ||
+			!strings.Contains(cmd, `C:\Users\worker\agent-work\job-401\.fleet\runs\401\agent.log`) ||
+			!strings.Contains(cmd, `C:\Users\worker\agent-work\job-401\.fleet\runs\401\agent.err.log`) {
 			t.Errorf("unexpected windows status probe command:\n%s", cmd)
+		}
+	})
+
+	t.Run("corrupt agent.exit classified as missing", func(t *testing.T) {
+		fake := NewFakeTransport()
+		fake.SetDefault(CommandResult{Stdout: "EXITED:corrupt\r\n"}, nil)
+		a := NewSSHAdapter(cfg, SSHAdapterOptions{Transport: fake})
+
+		st, err := a.Status(ctx, job)
+		if err != nil || st.State != StateMissing || !strings.Contains(st.Detail, "invalid_exit_file") {
+			t.Fatalf("Status corrupt exit = (%+v, %v), want StateMissing", st, err)
 		}
 	})
 
@@ -731,7 +749,7 @@ func TestWindowsAdapterCollectEvidence(t *testing.T) {
 	t.Run("codex evidence with git status, diff --stat, agent.err.log, and unknown exit code", func(t *testing.T) {
 		fake := NewFakeTransport()
 		fake.OnContains("status --porcelain", CommandResult{
-			Stdout: " M internal/adapter/windows_launcher.go\r\n?? prompt.txt\r\n?? agent-run.cmd\r\n?? agent.log\r\n?? agent.err.log\r\n?? agent.pid\r\n?? summary.md\r\n",
+			Stdout: " M internal/adapter/windows_launcher.go\r\n?? .fleet/\r\n?? .fleet/runs/501/agent.log\r\n?? prompt.txt\r\n?? agent-run.cmd\r\n?? agent.log\r\n?? agent.err.log\r\n?? agent.pid\r\n?? summary.md\r\n",
 		}, nil)
 		fake.OnContains("diff --stat", CommandResult{
 			Stdout: " internal/adapter/windows_launcher.go | 120 ++++++++++++++++++++\r\n 1 file changed, 120 insertions(+)\r\n",
@@ -760,9 +778,9 @@ func TestWindowsAdapterCollectEvidence(t *testing.T) {
 		if !strings.Contains(ev.DiffSummary, "windows_launcher.go") || !strings.Contains(ev.DiffSummary, "1 file changed") {
 			t.Errorf("DiffSummary missing status or diff --stat: %q", ev.DiffSummary)
 		}
-		for _, ctrl := range []string{"prompt.txt", "agent-run.cmd", "agent.log", "agent.err.log", "agent.pid"} {
+		for _, ctrl := range []string{".fleet", "prompt.txt", "agent-run.cmd", "agent.log", "agent.err.log", "agent.pid"} {
 			if strings.Contains(ev.DiffSummary, ctrl) {
-				t.Errorf("DiffSummary should filter control file %q: %q", ctrl, ev.DiffSummary)
+				t.Errorf("DiffSummary should filter control path %q: %q", ctrl, ev.DiffSummary)
 			}
 		}
 		if ev.CommandOutputs["git_status"] == "" || ev.CommandOutputs["git_diff_stat"] == "" {
@@ -782,6 +800,18 @@ func TestWindowsAdapterCollectEvidence(t *testing.T) {
 		}
 		if len(ev.Notes) == 0 || !strings.Contains(ev.Notes[0], "exit code unknown") {
 			t.Errorf("Notes should note unknown exit code, got %+v", ev.Notes)
+		}
+
+		// Verify run artifacts use per-job runDir while summary.md stays at workdir root.
+		calls := fake.Calls()
+		if !strings.Contains(calls[2].Command, `'E:\worktrees\wt-501\.fleet\runs\501\agent.log'`) ||
+			!strings.Contains(calls[2].Command, `'E:\worktrees\wt-501\summary.md'`) {
+			t.Errorf("artifact check command unexpected:\n%s", calls[2].Command)
+		}
+		if !strings.Contains(calls[3].Command, `'E:\worktrees\wt-501\.fleet\runs\501\agent.log'`) ||
+			!strings.Contains(calls[4].Command, `'E:\worktrees\wt-501\.fleet\runs\501\agent.err.log'`) ||
+			!strings.Contains(calls[5].Command, `'E:\worktrees\wt-501\.fleet\runs\501\agent.exit'`) {
+			t.Errorf("log/exit commands did not use per-job runDir")
 		}
 	})
 
@@ -873,8 +903,9 @@ func TestBuildWindowsRunScriptCRLFNormalization(t *testing.T) {
 	t.Run("standard single-line launchCmd has no bare LF and ends every line with CRLF", func(t *testing.T) {
 		script := BuildWindowsRunScript(
 			`C:\Users\worker\agent-work\job-900`,
+			`C:\Users\worker\agent-work\job-900\.fleet\runs\900`,
 			baseDriver,
-			`C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < prompt.txt > agent.log 2> agent.err.log`,
+			`C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < C:\Users\worker\agent-work\job-900\.fleet\runs\900\prompt.txt > C:\Users\worker\agent-work\job-900\.fleet\runs\900\agent.log 2> C:\Users\worker\agent-work\job-900\.fleet\runs\900\agent.err.log`,
 		)
 		assertStrictCRLF(t, script)
 		if !strings.Contains(script, "@echo off\r\nset \"FOO=bar\"\r\ncd /d \"C:\\Users\\worker\\agent-work\\job-900\" || exit /b 1\r\n") {
@@ -884,7 +915,7 @@ func TestBuildWindowsRunScriptCRLFNormalization(t *testing.T) {
 
 	t.Run("launchCmd containing bare LF and mixed CRLF is normalized without double CR", func(t *testing.T) {
 		mixedLaunch := "echo step1\necho step2\r\necho step3\nC:\\tools\\codex.cmd exec - < prompt.txt > agent.log 2> agent.err.log\r\n"
-		script := BuildWindowsRunScript(`C:\Users\worker\agent-work\job-901`, baseDriver, mixedLaunch)
+		script := BuildWindowsRunScript(`C:\Users\worker\agent-work\job-901`, `C:\Users\worker\agent-work\job-901\.fleet\runs\901`, baseDriver, mixedLaunch)
 		assertStrictCRLF(t, script)
 
 		want := "echo step1\r\necho step2\r\necho step3\r\nC:\\tools\\codex.cmd exec - < prompt.txt > agent.log 2> agent.err.log\r\n"
@@ -895,7 +926,7 @@ func TestBuildWindowsRunScriptCRLFNormalization(t *testing.T) {
 
 	t.Run("launchCmd containing bare CR or double CR before LF is normalized to strict CRLF", func(t *testing.T) {
 		weirdLaunch := "echo a\recho b\r\r\necho c"
-		script := BuildWindowsRunScript(`C:\Users\worker\agent-work\job-902`, AgentDriver{Name: "codex"}, weirdLaunch)
+		script := BuildWindowsRunScript(`C:\Users\worker\agent-work\job-902`, `C:\Users\worker\agent-work\job-902\.fleet\runs\902`, AgentDriver{Name: "codex"}, weirdLaunch)
 		assertStrictCRLF(t, script)
 
 		want := "echo a\r\necho b\r\necho c\r\n"
@@ -920,8 +951,9 @@ func TestBuildWindowsRunScriptOmitsSetlocal(t *testing.T) {
 
 	script := BuildWindowsRunScript(
 		`C:\Users\worker\agent-work\job-903`,
+		`C:\Users\worker\agent-work\job-903\.fleet\runs\903`,
 		driver,
-		`C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < prompt.txt > agent.log 2> agent.err.log`,
+		`C:\Users\worker\AppData\Roaming\npm\codex.cmd exec --skip-git-repo-check - < C:\Users\worker\agent-work\job-903\.fleet\runs\903\prompt.txt > C:\Users\worker\agent-work\job-903\.fleet\runs\903\agent.log 2> C:\Users\worker\agent-work\job-903\.fleet\runs\903\agent.err.log`,
 	)
 
 	if strings.Contains(strings.ToLower(script), "setlocal") {

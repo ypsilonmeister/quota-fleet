@@ -246,19 +246,22 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		for _, want := range []string{
 			"#!/bin/sh",
 			`cd "$HOME"/'agent-work/job-10' || exit 1`,
-			`claude -p --model 'claude-sonnet-4-6' --permission-mode bypassPermissions < "$HOME"/'agent-work/job-10/prompt.txt' > "$HOME"/'agent-work/job-10/agent.log' 2>&1`,
+			`claude -p --model 'claude-sonnet-4-6' --permission-mode bypassPermissions < "$HOME"/'agent-work/job-10/.fleet/runs/10/prompt.txt' > "$HOME"/'agent-work/job-10/.fleet/runs/10/agent.log' 2>&1`,
 			`rc=$?`,
-			`agent.exit.tmp`,
-			`agent.exit`,
+			`agent-work/job-10/.fleet/runs/10/agent.exit.tmp`,
+			`agent-work/job-10/.fleet/runs/10/agent.exit`,
 		} {
 			if !strings.Contains(runSh, want) {
 				t.Errorf("claude run.sh missing %q:\n%s", want, runSh)
 			}
 		}
 
-		if !strings.Contains(calls[1].Command, `setsid nohup sh "$HOME"/'agent-work/job-10/run.sh'`) ||
-			!strings.Contains(calls[1].Command, `agent.pid`) {
+		if !strings.Contains(calls[1].Command, `setsid nohup sh "$HOME"/'agent-work/job-10/.fleet/runs/10/run.sh'`) ||
+			!strings.Contains(calls[1].Command, `agent-work/job-10/.fleet/runs/10/agent.pid`) {
 			t.Errorf("unexpected detach command: %s", calls[1].Command)
+		}
+		if info.Meta["run_dir"] != "~/agent-work/job-10/.fleet/runs/10" {
+			t.Errorf("run_dir = %q, want ~/agent-work/job-10/.fleet/runs/10", info.Meta["run_dir"])
 		}
 	})
 
@@ -291,7 +294,7 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		if !strings.Contains(runSh, `export PATH="$HOME/.config/nvm/versions/node/v24.18.1/bin:$PATH"`) {
 			t.Errorf("codex run.sh missing nvm PATH export:\n%s", runSh)
 		}
-		wantCmd := `codex exec --dangerously-bypass-approvals-and-sandbox < '/home/worker/agent-work/job-11/prompt.txt' > '/home/worker/agent-work/job-11/agent.log' 2>&1`
+		wantCmd := `codex exec --dangerously-bypass-approvals-and-sandbox < '/home/worker/agent-work/job-11/.fleet/runs/11/prompt.txt' > '/home/worker/agent-work/job-11/.fleet/runs/11/agent.log' 2>&1`
 		if !strings.Contains(runSh, wantCmd) {
 			t.Errorf("codex run.sh missing expected launch line %q:\n%s", wantCmd, runSh)
 		}
@@ -324,7 +327,7 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		}
 
 		_, runSh := extractBase64Payloads(t, fake.Calls()[0].Command)
-		wantCmd := `codex exec --skip-git-repo-check < '/home/worker/agent-work/job-111/prompt.txt' > '/home/worker/agent-work/job-111/agent.log' 2>&1`
+		wantCmd := `codex exec --skip-git-repo-check < '/home/worker/agent-work/job-111/.fleet/runs/111/prompt.txt' > '/home/worker/agent-work/job-111/.fleet/runs/111/agent.log' 2>&1`
 		if !strings.Contains(runSh, wantCmd) {
 			t.Errorf("codex builtin default run.sh missing %q:\n%s", wantCmd, runSh)
 		}
@@ -358,11 +361,11 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		if !strings.Contains(promptText, "Summarize changes with $HOME and 'quotes'.") {
 			t.Errorf("promptText = %q", promptText)
 		}
-		wantCmd := `"$HOME"/'.local/bin/agy' --print "$(cat "$HOME"/'agent-work/job-12/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-12/agent.log' 2>&1`
+		wantCmd := `"$HOME"/'.local/bin/agy' --print "$(cat "$HOME"/'agent-work/job-12/.fleet/runs/12/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-12/.fleet/runs/12/agent.log' 2>&1`
 		if !strings.Contains(runSh, wantCmd) {
 			t.Errorf("agy run.sh missing expected launch line %q:\n%s", wantCmd, runSh)
 		}
-		if strings.Contains(runSh, "< \"$HOME\"/'agent-work/job-12/prompt.txt'") {
+		if strings.Contains(runSh, "< \"$HOME\"/'agent-work/job-12/.fleet/runs/12/prompt.txt'") {
 			t.Errorf("agy run.sh must not pass prompt via stdin redirection:\n%s", runSh)
 		}
 		if strings.Contains(runSh, "Summarize changes") {
@@ -397,7 +400,7 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		}
 
 		_, runSh := extractBase64Payloads(t, fake.Calls()[0].Command)
-		wantCmd := `"$HOME"/'.local/bin/agy' --model 'gemini-2.5-pro' --print "$(cat "$HOME"/'agent-work/job-13/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-13/agent.log' 2>&1`
+		wantCmd := `"$HOME"/'.local/bin/agy' --model 'gemini-2.5-pro' --print "$(cat "$HOME"/'agent-work/job-13/.fleet/runs/13/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-13/.fleet/runs/13/agent.log' 2>&1`
 		if !strings.Contains(runSh, wantCmd) {
 			t.Errorf("agy run.sh missing expected model launch line %q:\n%s", wantCmd, runSh)
 		}
@@ -430,7 +433,7 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 			t.Fatalf("Launch agy stdin override: %v", err)
 		}
 		_, agyRunSh := extractBase64Payloads(t, fake.Calls()[0].Command)
-		wantAgy := `"$HOME"/'.local/bin/agy' --print < "$HOME"/'agent-work/job-14/prompt.txt' > "$HOME"/'agent-work/job-14/agent.log' 2>&1`
+		wantAgy := `"$HOME"/'.local/bin/agy' --print < "$HOME"/'agent-work/job-14/.fleet/runs/14/prompt.txt' > "$HOME"/'agent-work/job-14/.fleet/runs/14/agent.log' 2>&1`
 		if !strings.Contains(agyRunSh, wantAgy) {
 			t.Errorf("agy stdin override run.sh missing %q:\n%s", wantAgy, agyRunSh)
 		}
@@ -448,7 +451,7 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 			t.Fatalf("Launch claude argument override: %v", err)
 		}
 		_, claudeRunSh := extractBase64Payloads(t, fake.Calls()[2].Command)
-		wantClaude := `claude -p --model 'claude-sonnet-4-6' --permission-mode bypassPermissions "$(cat "$HOME"/'agent-work/job-15/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-15/agent.log' 2>&1`
+		wantClaude := `claude -p --model 'claude-sonnet-4-6' --permission-mode bypassPermissions "$(cat "$HOME"/'agent-work/job-15/.fleet/runs/15/prompt.txt')" </dev/null > "$HOME"/'agent-work/job-15/.fleet/runs/15/agent.log' 2>&1`
 		if !strings.Contains(claudeRunSh, wantClaude) {
 			t.Errorf("claude argument override run.sh missing %q:\n%s", wantClaude, claudeRunSh)
 		}
@@ -457,6 +460,10 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 	// 6. Verify generated argument-style run.sh actually passes prompt.txt verbatim under POSIX /bin/sh.
 	t.Run("argument style run.sh executes cleanly under sh with special chars", func(t *testing.T) {
 		workdir := t.TempDir()
+		runDir := filepath.Join(workdir, ".fleet", "runs", "16")
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatalf("mkdir runDir: %v", err)
+		}
 		binPath := filepath.Join(workdir, "fake-agy.sh")
 		capturePath := filepath.Join(workdir, "captured-arg.txt")
 		fakeBin := "#!/bin/sh\n" +
@@ -480,9 +487,9 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 			PromptStyle:     PromptStyleArgument,
 			CommandOverride: binPath,
 		}
-		promptPath := filepath.Join(workdir, promptFileName)
-		logPath := filepath.Join(workdir, logFileName)
-		runShPath := filepath.Join(workdir, runScriptName)
+		promptPath := filepath.Join(runDir, promptFileName)
+		logPath := filepath.Join(runDir, logFileName)
+		runShPath := filepath.Join(runDir, runScriptName)
 
 		promptText := BuildPromptText(job)
 		if err := os.WriteFile(promptPath, []byte(promptText), 0o600); err != nil {
@@ -492,7 +499,7 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildLaunchCommand: %v", err)
 		}
-		runScript := BuildRunScript(workdir, drv, launchCmd)
+		runScript := BuildRunScript(workdir, runDir, drv, launchCmd)
 		if err := os.WriteFile(runShPath, []byte(runScript), 0o700); err != nil {
 			t.Fatalf("write run.sh: %v", err)
 		}
@@ -510,7 +517,7 @@ func TestSSHAdapterLaunchDriversAndCodexTrap(t *testing.T) {
 		if string(gotArg) != wantArg {
 			t.Errorf("captured arg = %q, want %q", string(gotArg), wantArg)
 		}
-		exitBytes, err := os.ReadFile(filepath.Join(workdir, exitFileName))
+		exitBytes, err := os.ReadFile(filepath.Join(runDir, exitFileName))
 		if err != nil || strings.TrimSpace(string(exitBytes)) != "0" {
 			t.Errorf("agent.exit = %q (err=%v), want 0", string(exitBytes), err)
 		}
@@ -642,8 +649,10 @@ func TestSSHAdapterStatusThreeStates(t *testing.T) {
 	if err != nil || st.State != StateRunning || st.Detail != "pid=54321" {
 		t.Fatalf("Status running = (%+v, %v)", st, err)
 	}
-	if !strings.Contains(fake.Calls()[0].Command, "kill -0") {
-		t.Errorf("expected kill -0 in status probe command: %s", fake.Calls()[0].Command)
+	if !strings.Contains(fake.Calls()[0].Command, "kill -0") ||
+		!strings.Contains(fake.Calls()[0].Command, "agent-work/job-30/.fleet/runs/30/agent.exit") ||
+		!strings.Contains(fake.Calls()[0].Command, "agent-work/job-30/.fleet/runs/30/agent.pid") {
+		t.Errorf("expected per-job paths and kill -0 in status probe command: %s", fake.Calls()[0].Command)
 	}
 
 	// Exited with 0.
@@ -658,6 +667,13 @@ func TestSSHAdapterStatusThreeStates(t *testing.T) {
 	st, err = a.Status(ctx, job)
 	if err != nil || st.State != StateExited || st.ExitCode != 13 {
 		t.Fatalf("Status exited(13) = (%+v, %v)", st, err)
+	}
+
+	// Corrupt/unparseable agent.exit -> classified as StateMissing so Reconciler can reset.
+	fake.SetDefault(CommandResult{Stdout: "EXITED:not-a-number\n"}, nil)
+	st, err = a.Status(ctx, job)
+	if err != nil || st.State != StateMissing || !strings.Contains(st.Detail, "invalid_exit_file") {
+		t.Fatalf("Status corrupt exit = (%+v, %v), want StateMissing", st, err)
 	}
 
 	// Missing (pid dead).
@@ -687,11 +703,11 @@ func TestSSHAdapterCollectEvidence(t *testing.T) {
 	ctx := context.Background()
 	job := &store.Job{ID: 40, Host: "penguin", Workdir: "/home/worker/agent-work/job-40"}
 
-	// 1. Diff present (with control files filtered out), artifacts checked, log tail and exit code collected.
+	// 1. Diff present (with control files and .fleet/ filtered out), artifacts checked, log tail and exit code collected.
 	t.Run("diff artifacts log and exit code", func(t *testing.T) {
 		fake := NewFakeTransport()
 		fake.OnContains("status --porcelain", CommandResult{
-			Stdout: " M internal/adapter/ssh_adapter.go\n?? prompt.txt\n?? run.sh\n?? agent.log\n?? agent.exit\n?? agent.pid\n?? summary.md\n",
+			Stdout: " M internal/adapter/ssh_adapter.go\n?? .fleet/\n?? .fleet/runs/40/agent.log\n?? prompt.txt\n?? run.sh\n?? agent.log\n?? agent.exit\n?? agent.pid\n?? summary.md\n",
 		}, nil)
 		fake.OnContains("printf '1:", CommandResult{
 			Stdout: "1:agent.log\n1:agent.exit\n1:summary.md\n0:result.txt\n",
@@ -714,9 +730,9 @@ func TestSSHAdapterCollectEvidence(t *testing.T) {
 		if !strings.Contains(ev.DiffSummary, "ssh_adapter.go") || !strings.Contains(ev.DiffSummary, "summary.md") {
 			t.Errorf("DiffSummary missing real changes: %q", ev.DiffSummary)
 		}
-		for _, ctrl := range []string{"prompt.txt", "run.sh", "agent.log", "agent.exit", "agent.pid"} {
+		for _, ctrl := range []string{".fleet", "prompt.txt", "run.sh", "agent.log", "agent.exit", "agent.pid"} {
 			if strings.Contains(ev.DiffSummary, ctrl) {
-				t.Errorf("DiffSummary should filter out control file %q: %q", ctrl, ev.DiffSummary)
+				t.Errorf("DiffSummary should filter out control path %q: %q", ctrl, ev.DiffSummary)
 			}
 		}
 		if !ev.Artifacts["agent.log"] || !ev.Artifacts["summary.md"] || ev.Artifacts["result.txt"] {
@@ -728,13 +744,26 @@ func TestSSHAdapterCollectEvidence(t *testing.T) {
 		if ev.ExitCode != 0 {
 			t.Errorf("ExitCode = %d, want 0", ev.ExitCode)
 		}
+
+		// Verify run artifacts were queried under .fleet/runs/40 while deliverables stayed in workdir.
+		calls := fake.Calls()
+		if !strings.Contains(calls[1].Command, "'/home/worker/agent-work/job-40/.fleet/runs/40/agent.log'") ||
+			!strings.Contains(calls[1].Command, "'/home/worker/agent-work/job-40/summary.md'") {
+			t.Errorf("artifact check paths unexpected: %s", calls[1].Command)
+		}
+		if !strings.Contains(calls[2].Command, "'/home/worker/agent-work/job-40/.fleet/runs/40/agent.log'") {
+			t.Errorf("log tail command did not use per-job runDir: %s", calls[2].Command)
+		}
+		if !strings.Contains(calls[3].Command, "'/home/worker/agent-work/job-40/.fleet/runs/40/agent.exit'") {
+			t.Errorf("exit read command did not use per-job runDir: %s", calls[3].Command)
+		}
 	})
 
-	// 2. Only adapter control files untracked -> HasDiff must be false.
+	// 2. Only adapter control files and .fleet/ untracked -> HasDiff must be false.
 	t.Run("only control files yields no diff", func(t *testing.T) {
 		fake := NewFakeTransport()
 		fake.OnContains("status --porcelain", CommandResult{
-			Stdout: "?? prompt.txt\n?? run.sh\n?? agent.pid\n?? agent.exit\n?? agent.log\n",
+			Stdout: "?? .fleet/\n?? prompt.txt\n?? run.sh\n?? agent.pid\n?? agent.exit\n?? agent.log\n",
 		}, nil)
 		fake.OnContains("printf '1:", CommandResult{Stdout: "1:agent.log\n"}, nil)
 		fake.OnContains("tail -n", CommandResult{Stdout: "done\n"}, nil)

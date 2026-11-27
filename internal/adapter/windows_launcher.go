@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -12,6 +13,16 @@ import (
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
+
+func windowsRunDir(winWorkdir string, job *store.Job) (string, error) {
+	if job == nil {
+		return "", ErrNilJob
+	}
+	if job.ID <= 0 {
+		return "", errors.New("adapter: job id must be positive")
+	}
+	return joinWindowsPath(winWorkdir, fmt.Sprintf(`%s\%d`, strings.ReplaceAll(runArtifactsRunsRel, "/", `\`), job.ID)), nil
+}
 
 // windowsDefaultArtifactFiles lists the standard files checked on Windows hosts during CollectEvidence.
 var windowsDefaultArtifactFiles = []string{
@@ -181,32 +192,38 @@ func buildOwnerFixupCommand(host config.HostConfig, targets []string) string {
 
 func (w *windowsLauncher) Launch(ctx context.Context, host config.HostConfig, job *store.Job, workdir string, spec LaunchSpec) (LaunchInfo, error) {
 	winWorkdir := normalizeWindowsPath(workdir)
-	promptPath := joinWindowsPath(winWorkdir, promptFileName)
-	runCmdPath := joinWindowsPath(winWorkdir, winRunScriptName)
-	pidPath := joinWindowsPath(winWorkdir, pidFileName)
-	exitPath := joinWindowsPath(winWorkdir, exitFileName)
-	exitTmpPath := joinWindowsPath(winWorkdir, exitTmpFileName)
-	legacyLaunchPath := joinWindowsPath(winWorkdir, legacyLaunchPS1)
-
-	promptText := BuildPromptText(job)
-	_, isResume := spec.Driver.selectLaunchTemplate(job)
-	launchCmd, err := spec.Driver.BuildWindowsLaunchCommand(job, winWorkdir, promptFileName, logFileName, errLogFileName, spec.AllowSandbox)
+	winRunDir, err := windowsRunDir(winWorkdir, job)
 	if err != nil {
 		return LaunchInfo{}, err
 	}
-	runScript := BuildWindowsRunScript(winWorkdir, spec.Driver, launchCmd)
+	promptPath := joinWindowsPath(winRunDir, promptFileName)
+	runCmdPath := joinWindowsPath(winRunDir, winRunScriptName)
+	pidPath := joinWindowsPath(winRunDir, pidFileName)
+	exitPath := joinWindowsPath(winRunDir, exitFileName)
+	exitTmpPath := joinWindowsPath(winRunDir, exitTmpFileName)
+	logPath := joinWindowsPath(winRunDir, logFileName)
+	errLogPath := joinWindowsPath(winRunDir, errLogFileName)
+	legacyLaunchPath := joinWindowsPath(winRunDir, legacyLaunchPS1)
+
+	promptText := BuildPromptText(job)
+	_, isResume := spec.Driver.selectLaunchTemplate(job)
+	launchCmd, err := spec.Driver.BuildWindowsLaunchCommand(job, winWorkdir, promptPath, logPath, errLogPath, spec.AllowSandbox)
+	if err != nil {
+		return LaunchInfo{}, err
+	}
+	runScript := BuildWindowsRunScript(winWorkdir, winRunDir, spec.Driver, launchCmd)
 
 	promptB64 := base64.StdEncoding.EncodeToString([]byte(promptText))
 	scriptB64 := base64.StdEncoding.EncodeToString([]byte(runScript))
 
-	// Stage prompt.txt (raw UTF-8 without BOM) and agent-run.cmd (CRLF) via Base64 to avoid
-	// PowerShell 5.1 encoding / BOM issues and remove stale launcher or status files first.
+	// Stage prompt.txt (raw UTF-8 without BOM) and agent-run.cmd (CRLF) in the per-job runDir
+	// via Base64 to avoid PowerShell 5.1 encoding / BOM issues and remove stale launcher or status files first.
 	stagePS := fmt.Sprintf(
 		"New-Item -ItemType Directory -Force -Path %s | Out-Null; "+
 			"Remove-Item -Force -ErrorAction SilentlyContinue %s,%s,%s,%s,%s; "+
 			"[System.IO.File]::WriteAllBytes(%s, [System.Convert]::FromBase64String(%s)); "+
 			"[System.IO.File]::WriteAllBytes(%s, [System.Convert]::FromBase64String(%s))",
-		psExpr(winWorkdir),
+		psExpr(winRunDir),
 		psExpr(legacyLaunchPath),
 		psExpr(exitPath),
 		psExpr(exitTmpPath),
@@ -256,6 +273,7 @@ func (w *windowsLauncher) Launch(ctx context.Context, host config.HostConfig, jo
 			"agent":           job.Agent,
 			"host":            job.Host,
 			"workdir":         winWorkdir,
+			"run_dir":         winRunDir,
 			"sandbox_relaxed": strconv.FormatBool(spec.AllowSandbox),
 		},
 	}
@@ -266,12 +284,16 @@ func (w *windowsLauncher) Launch(ctx context.Context, host config.HostConfig, jo
 	return info, nil
 }
 
-func (w *windowsLauncher) Status(ctx context.Context, host config.HostConfig, _ *store.Job, workdir string) (RunState, error) {
+func (w *windowsLauncher) Status(ctx context.Context, host config.HostConfig, job *store.Job, workdir string) (RunState, error) {
 	winWorkdir := normalizeWindowsPath(workdir)
-	exitPath := joinWindowsPath(winWorkdir, exitFileName)
-	pidPath := joinWindowsPath(winWorkdir, pidFileName)
-	logPath := joinWindowsPath(winWorkdir, logFileName)
-	errLogPath := joinWindowsPath(winWorkdir, errLogFileName)
+	winRunDir, err := windowsRunDir(winWorkdir, job)
+	if err != nil {
+		return RunState{}, err
+	}
+	exitPath := joinWindowsPath(winRunDir, exitFileName)
+	pidPath := joinWindowsPath(winRunDir, pidFileName)
+	logPath := joinWindowsPath(winRunDir, logFileName)
+	errLogPath := joinWindowsPath(winRunDir, errLogFileName)
 
 	probePS := fmt.Sprintf(
 		"$exitFile = %s; $pidFile = %s; $logFile = %s; $errFile = %s; "+
@@ -315,7 +337,10 @@ func (w *windowsLauncher) Status(ctx context.Context, host config.HostConfig, _ 
 		rawCode := strings.TrimPrefix(line, "EXITED:")
 		code, err := parseExitCode(rawCode)
 		if err != nil {
-			return RunState{}, fmt.Errorf("parse windows agent.exit %q: %w", rawCode, err)
+			return RunState{
+				State:  StateMissing,
+				Detail: fmt.Sprintf("invalid_exit_file:%q", rawCode),
+			}, nil
 		}
 		return RunState{
 			State:           StateExited,
@@ -348,8 +373,12 @@ func (w *windowsLauncher) Status(ctx context.Context, host config.HostConfig, _ 
 	}
 }
 
-func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostConfig, _ *store.Job, workdir string) (Evidence, error) {
+func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostConfig, job *store.Job, workdir string) (Evidence, error) {
 	winWorkdir := normalizeWindowsPath(workdir)
+	winRunDir, err := windowsRunDir(winWorkdir, job)
+	if err != nil {
+		return Evidence{}, err
+	}
 	ev := Evidence{
 		Artifacts:      make(map[string]bool, len(w.artifactFiles)),
 		CommandOutputs: make(map[string]string),
@@ -400,12 +429,16 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 		}
 	}
 
-	// 2. Check artifact files existence.
+	// 2. Check artifact files existence (run artifacts in winRunDir, deliverables in winWorkdir).
 	if len(w.artifactFiles) > 0 {
 		checks := make([]string, 0, len(w.artifactFiles)+1)
 		checks = append(checks, "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8")
 		for _, name := range w.artifactFiles {
-			full := joinWindowsPath(winWorkdir, name)
+			base := winWorkdir
+			if isRunArtifactFile(name) {
+				base = winRunDir
+			}
+			full := joinWindowsPath(base, name)
 			checks = append(checks, fmt.Sprintf(
 				"if (Test-Path -LiteralPath %s) { Write-Output %s } else { Write-Output %s }",
 				psExpr(full), psExpr("1:"+name), psExpr("0:"+name),
@@ -428,8 +461,8 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 		}
 	}
 
-	// 3. Collect tail of agent.log.
-	logPath := joinWindowsPath(winWorkdir, logFileName)
+	// 3. Collect tail of per-job agent.log.
+	logPath := joinWindowsPath(winRunDir, logFileName)
 	logPS := fmt.Sprintf(
 		"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "+
 			"if (Test-Path -LiteralPath %s) { Get-Content -LiteralPath %s -Encoding UTF8 -Tail %d }",
@@ -441,8 +474,8 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 	}
 	logReport := trimLogTailUTF8(strings.TrimSpace(strings.ReplaceAll(logRes.Stdout, "\r\n", "\n")), w.logMaxBytes)
 
-	// 4. Collect tail of agent.err.log (critical on home-win Codex where final answer + tokens used appear here).
-	errLogPath := joinWindowsPath(winWorkdir, errLogFileName)
+	// 4. Collect tail of per-job agent.err.log (critical on home-win Codex where final answer + tokens used appear here).
+	errLogPath := joinWindowsPath(winRunDir, errLogFileName)
 	errLogPS := fmt.Sprintf(
 		"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "+
 			"if (Test-Path -LiteralPath %s) { Get-Content -LiteralPath %s -Encoding UTF8 -Tail %d }",
@@ -460,8 +493,8 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 		ev.FinalReport = errReport
 	}
 
-	// 5. Read agent.exit (or fallback to trailing EXIT:<code> in agent.log); mark unknown if absent.
-	exitPath := joinWindowsPath(winWorkdir, exitFileName)
+	// 5. Read per-job agent.exit (or fallback to trailing EXIT:<code> in agent.log); mark unknown if absent.
+	exitPath := joinWindowsPath(winRunDir, exitFileName)
 	exitPS := fmt.Sprintf(
 		"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "+
 			"if (Test-Path -LiteralPath %s) { ([System.IO.File]::ReadAllText(%s, [System.Text.Encoding]::UTF8)).Trim() }",
@@ -496,7 +529,8 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 
 // BuildWindowsRunScript generates the CRLF batch wrapper (agent-run.cmd) executed via WMI.
 // It applies per-host env vars, enters workdir, invokes the agent command, and records
-// agent.exit + EXIT:<code> whenever control returns to the wrapper.
+// runDir\agent.exit + EXIT:<code> (in runDir\agent.log) whenever control returns to the wrapper.
+// If runDir is empty, it defaults to workdir.
 // The final output is normalized to strict CRLF regardless of any line endings in launchCmd.
 //
 // Do NOT emit `setlocal` here: field experiments on home-win established that when a
@@ -504,19 +538,26 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 // C:\Windows\System32 as their working directory instead of the `cd /d` target.
 // Because each invocation runs in a dedicated WMI cmd.exe process, plain `set` lines
 // are already isolated to that process without `setlocal`.
-func BuildWindowsRunScript(workdir string, driver AgentDriver, launchCmd string) string {
+func BuildWindowsRunScript(workdir, runDir string, driver AgentDriver, launchCmd string) string {
 	winWorkdir := normalizeWindowsPath(workdir)
+	winRunDir := normalizeWindowsPath(runDir)
+	if winRunDir == "" {
+		winRunDir = winWorkdir
+	}
+	exitPath := joinWindowsPath(winRunDir, exitFileName)
+	exitTmpPath := joinWindowsPath(winRunDir, exitTmpFileName)
+	logPath := joinWindowsPath(winRunDir, logFileName)
 
 	var lines []string
 	lines = append(lines, "@echo off")
 	lines = append(lines, formatCmdEnvSets(driver.Env)...)
 	lines = append(lines, fmt.Sprintf("cd /d %s || exit /b 1", cmdQuoteAlways(winWorkdir)))
-	lines = append(lines, fmt.Sprintf(`del /f /q "%s" "%s" 2>nul`, exitFileName, exitTmpFileName))
+	lines = append(lines, fmt.Sprintf(`del /f /q %s %s 2>nul`, cmdQuoteAlways(exitPath), cmdQuoteAlways(exitTmpPath)))
 	lines = append(lines, launchCmd)
 	lines = append(lines, `set "QF_RC=%ERRORLEVEL%"`)
-	lines = append(lines, fmt.Sprintf(`> "%s" echo %%QF_RC%%`, exitTmpFileName))
-	lines = append(lines, fmt.Sprintf(`move /y "%s" "%s" >nul`, exitTmpFileName, exitFileName))
-	lines = append(lines, fmt.Sprintf(`>> "%s" echo EXIT:%%QF_RC%%`, logFileName))
+	lines = append(lines, fmt.Sprintf(`> %s echo %%QF_RC%%`, cmdQuoteAlways(exitTmpPath)))
+	lines = append(lines, fmt.Sprintf(`move /y %s %s >nul`, cmdQuoteAlways(exitTmpPath), cmdQuoteAlways(exitPath)))
+	lines = append(lines, fmt.Sprintf(`>> %s echo EXIT:%%QF_RC%%`, cmdQuoteAlways(logPath)))
 	lines = append(lines, `exit /b %QF_RC%`)
 	return normalizeCRLF(strings.Join(lines, "\n") + "\n")
 }
