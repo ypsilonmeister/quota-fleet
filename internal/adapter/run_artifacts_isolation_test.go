@@ -288,6 +288,127 @@ func TestStatusDoesNotMisidentifyOtherJobRunningInSameWorkdirLinux(t *testing.T)
 	}
 }
 
+func TestLinuxExitAndPIDFileWhitespaceValidation(t *testing.T) {
+	ctx := context.Background()
+	workdir := t.TempDir()
+
+	cfg := &config.Config{
+		Hosts: map[string]config.HostConfig{
+			"local-linux": {
+				Transport: "local",
+				OS:        "linux",
+			},
+		},
+		Agents: map[string]config.AgentConfig{
+			"claude": {
+				Launch:      "claude",
+				PromptStyle: config.PromptStyleStdin,
+			},
+		},
+	}
+	a := NewSSHAdapter(cfg, SSHAdapterOptions{
+		Transport: NewLocalTransport(LocalTransportOptions{}),
+	})
+
+	validExitCases := []struct {
+		name     string
+		jobID    int64
+		content  string
+		wantCode int
+	}{
+		{name: "bare zero with newline", jobID: 501, content: "0\n", wantCode: 0},
+		{name: "leading and trailing spaces tabs CRLF", jobID: 502, content: " \t 0 \t\r\n", wantCode: 0},
+		{name: "leading and trailing newlines around single code", jobID: 503, content: "\n  7\n\n", wantCode: 7},
+		{name: "EXIT prefix with surrounding whitespace", jobID: 504, content: "  EXIT:13 \r\n", wantCode: 13},
+	}
+	for _, tc := range validExitCases {
+		t.Run("valid_exit/"+tc.name, func(t *testing.T) {
+			runDir := filepath.Join(workdir, ".fleet", "runs", fmt.Sprintf("%d", tc.jobID))
+			if err := os.MkdirAll(runDir, 0o700); err != nil {
+				t.Fatalf("mkdir %q: %v", runDir, err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, exitFileName), []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write agent.exit: %v", err)
+			}
+			job := &store.Job{ID: tc.jobID, Host: "local-linux", Workdir: workdir}
+			st, err := a.Status(ctx, job)
+			if err != nil {
+				t.Fatalf("Status: %v", err)
+			}
+			if st.State != StateExited || st.ExitCode != tc.wantCode {
+				t.Fatalf("Status = %+v, want StateExited(%d)", st, tc.wantCode)
+			}
+			ev, err := a.CollectEvidence(ctx, job)
+			if err != nil {
+				t.Fatalf("CollectEvidence: %v", err)
+			}
+			if ev.ExitCode != tc.wantCode || ev.ExitCodeUnknown {
+				t.Fatalf("CollectEvidence exit = (code=%d, unknown=%v), want (%d, false)", ev.ExitCode, ev.ExitCodeUnknown, tc.wantCode)
+			}
+		})
+	}
+
+	invalidExitCases := []struct {
+		name    string
+		jobID   int64
+		content string
+	}{
+		{name: "multiline duplicate zeros", jobID: 511, content: "0\n0\n"},
+		{name: "space separated values", jobID: 512, content: "0 0\n"},
+		{name: "multiline distinct values", jobID: 513, content: "0\n1\n"},
+		{name: "CRLF multiline duplicate zeros", jobID: 514, content: "0\r\n0\r\n"},
+		{name: "EXIT prefix followed by second line", jobID: 515, content: "EXIT:0\n0\n"},
+		{name: "whitespace only", jobID: 516, content: " \t\n"},
+		{name: "empty file", jobID: 517, content: ""},
+	}
+	for _, tc := range invalidExitCases {
+		t.Run("invalid_exit/"+tc.name, func(t *testing.T) {
+			runDir := filepath.Join(workdir, ".fleet", "runs", fmt.Sprintf("%d", tc.jobID))
+			if err := os.MkdirAll(runDir, 0o700); err != nil {
+				t.Fatalf("mkdir %q: %v", runDir, err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, exitFileName), []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write agent.exit: %v", err)
+			}
+			job := &store.Job{ID: tc.jobID, Host: "local-linux", Workdir: workdir}
+			st, err := a.Status(ctx, job)
+			if err != nil {
+				t.Fatalf("Status: %v", err)
+			}
+			if st.State != StateMissing || !strings.Contains(st.Detail, "invalid_exit_file") {
+				t.Fatalf("Status(%q) = %+v, want StateMissing(invalid_exit_file)", tc.content, st)
+			}
+			ev, err := a.CollectEvidence(ctx, job)
+			if err != nil {
+				t.Fatalf("CollectEvidence: %v", err)
+			}
+			if strings.TrimSpace(tc.content) != "" && !ev.ExitCodeUnknown {
+				t.Fatalf("CollectEvidence(%q) ExitCodeUnknown = false (ExitCode=%d), want true", tc.content, ev.ExitCode)
+			}
+		})
+	}
+
+	// Multiline / space-separated agent.pid must not concatenate digits into a different PID.
+	myPID := fmt.Sprintf("%d", os.Getpid())
+	if len(myPID) >= 2 {
+		splitPID := myPID[:1] + "\n" + myPID[1:] + "\n"
+		runDir := filepath.Join(workdir, ".fleet", "runs", "520")
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatalf("mkdir %q: %v", runDir, err)
+		}
+		if err := os.WriteFile(filepath.Join(runDir, pidFileName), []byte(splitPID), 0o600); err != nil {
+			t.Fatalf("write split agent.pid: %v", err)
+		}
+		st, err := a.Status(ctx, &store.Job{ID: 520, Host: "local-linux", Workdir: workdir})
+		if err != nil {
+			t.Fatalf("Status split pid: %v", err)
+		}
+		if st.State != StateMissing || !strings.Contains(st.Detail, "invalid_pid") {
+			t.Fatalf("Status split pid %q = %+v, want StateMissing(invalid_pid)", splitPID, st)
+		}
+	}
+}
+
 // Regression tests (a) and (c) on Windows: sequential jobs sharing one workdir stage,
 // probe, and collect evidence strictly under <workdir>\.fleet\runs\<job_id>\ without
 // overwriting or misidentifying sibling jobs.

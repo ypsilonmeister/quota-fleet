@@ -196,6 +196,17 @@ func (s *Shepherd) finishExitedJobFrom(ctx context.Context, job *store.Job, stat
 	}
 	defer s.releaseFinishing(job.ID)
 
+	current, err := s.store.GetJob(ctx, job.ID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) && ctx.Err() == nil {
+			s.logger.Printf("%s recheck job #%d error: %v", source, job.ID, err)
+		}
+		return nil
+	}
+	if current.Status != store.StatusClaimed || current.ClaimedBy != job.ClaimedBy {
+		return nil
+	}
+
 	ev, err := s.adapter.CollectEvidence(ctx, job)
 	if err != nil {
 		if ctx.Err() == nil {

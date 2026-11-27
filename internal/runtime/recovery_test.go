@@ -471,4 +471,268 @@ func TestReconcilerRecoversMissedCompletionWithoutRelaunch(t *testing.T) {
 			t.Errorf("normal Shepherd completion should not be tagged recovered_by: reconciler:\n%s", got.ResultText)
 		}
 	})
+
+	t.Run("multiline corrupt agent.exit is treated as Missing and reset to queued even with passing deliverables", func(t *testing.T) {
+		st, _ := openTestStore(t, "recover-multiline-corrupt-exit")
+		workdir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(workdir, "summary.md"), []byte("PASS_MARKER\n"), 0o644); err != nil {
+			t.Fatalf("write summary.md: %v", err)
+		}
+		sshAdapter := newLocalLinuxSSHAdapter("/bin/false")
+
+		job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+			RequestID:          "multiline-corrupt-exit-1",
+			Title:              "Multiline corrupt exit file",
+			Agent:              "claude",
+			Host:               "local-linux",
+			Workdir:            workdir,
+			AcceptanceCriteria: "file_nonempty: summary.md\ncontains: summary.md :: PASS_MARKER",
+		})
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		claimed, ok, err := st.Claim(ctx, 2)
+		if err != nil || !ok || claimed.ID != job.ID {
+			t.Fatalf("Claim: ok=%v err=%v", ok, err)
+		}
+
+		// Corrupt multi-line agent.exit must NOT collapse via tr -d into "00" == 0.
+		writePerJobArtifacts(t, workdir, claimed.ID, "0\n0\n", "some log\n", "")
+
+		eval := evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{
+			CommandTimeout: 5 * time.Second,
+			Getenv:         func(string) string { return "" },
+		})
+		fakeNow := time.Now().UTC().Add(30 * time.Minute)
+		reconciler := NewReconciler(ReconcilerOptions{
+			Store:             st,
+			Adapter:           sshAdapter,
+			Evaluator:         eval,
+			Notifier:          &recordingNotifier{},
+			StaleClaimedAfter: 10 * time.Minute,
+			AttemptsCap:       3,
+			Now:               func() time.Time { return fakeNow },
+			Logger:            discardLogger(),
+		})
+
+		if err := reconciler.ReconcileOnce(ctx); err != nil {
+			t.Fatalf("ReconcileOnce: %v", err)
+		}
+
+		got, err := st.GetJob(ctx, claimed.ID)
+		if err != nil {
+			t.Fatalf("GetJob: %v", err)
+		}
+		if got.Status != store.StatusQueued {
+			t.Fatalf("status = %s, want queued (multiline agent.exit must be Missing -> reset, not Exited/done)", got.Status)
+		}
+	})
+
+	t.Run("staggered Shepherd and Reconciler do not re-run acceptance command after guard release", func(t *testing.T) {
+		st, _ := openTestStore(t, "recover-staggered-race")
+		workdir := t.TempDir()
+		counterFile := filepath.Join(t.TempDir(), "eval-command-runs.log")
+
+		sshAdapter := newLocalLinuxSSHAdapter("/bin/false")
+		job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+			RequestID:          "staggered-race-1",
+			Title:              "Staggered Shepherd/Reconciler completion race",
+			Agent:              "claude",
+			Host:               "local-linux",
+			Workdir:            workdir,
+			AcceptanceCriteria: fmt.Sprintf("command: printf 'run\\n' >> %q", counterFile),
+		})
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		claimed, ok, err := st.Claim(ctx, 2)
+		if err != nil || !ok || claimed.ID != job.ID {
+			t.Fatalf("Claim: ok=%v err=%v", ok, err)
+		}
+		writePerJobArtifacts(t, workdir, claimed.ID, "0\n", "done\n", "999996\n")
+
+		// Wrap adapter so the first Status call (Reconciler) pauses after listing the claimed job,
+		// allowing Shepherd to finish completely and release the finishing guard before Reconciler
+		// receives Exited and reaches finishExitedJobFrom.
+		reconcilerEnteredStatus := make(chan struct{})
+		releaseReconcilerStatus := make(chan struct{})
+		wrapped := &staggeredStatusAdapter{
+			base:           sshAdapter,
+			blockFirstCall: true,
+			entered:        reconcilerEnteredStatus,
+			release:        releaseReconcilerStatus,
+		}
+
+		eval := evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{
+			CommandTimeout: 5 * time.Second,
+			Getenv:         func(string) string { return "" },
+		})
+		recNotifier := &recordingNotifier{}
+		shepherd := NewShepherd(ShepherdOptions{
+			Store:     st,
+			Adapter:   wrapped,
+			Evaluator: eval,
+			Notifier:  recNotifier,
+			Logger:    discardLogger(),
+		})
+		fakeNow := time.Now().UTC().Add(30 * time.Minute)
+		reconciler := NewReconciler(ReconcilerOptions{
+			Store:             st,
+			Adapter:           wrapped,
+			Shepherd:          shepherd,
+			Notifier:          recNotifier,
+			StaleClaimedAfter: 10 * time.Minute,
+			AttemptsCap:       3,
+			Now:               func() time.Time { return fakeNow },
+			Logger:            discardLogger(),
+		})
+
+		reconcilerDone := make(chan error, 1)
+		go func() {
+			reconcilerDone <- reconciler.ReconcileOnce(ctx)
+		}()
+
+		// Wait until Reconciler has already listed the claimed job and entered Status().
+		<-reconcilerEnteredStatus
+
+		// Now run Shepherd to full completion (commits done, delivers, and releases finishing guard).
+		if err := shepherd.SweepOnce(ctx); err != nil {
+			t.Fatalf("Shepherd SweepOnce: %v", err)
+		}
+		midJob, err := st.GetJob(ctx, claimed.ID)
+		if err != nil || midJob.Status != store.StatusDone {
+			t.Fatalf("job after Shepherd = (%+v, %v), want done", midJob, err)
+		}
+
+		// Resume Reconciler so it observes Exited and acquires the now-released guard with its stale job snapshot.
+		close(releaseReconcilerStatus)
+		if err := <-reconcilerDone; err != nil {
+			t.Fatalf("Reconciler ReconcileOnce: %v", err)
+		}
+
+		if gotCollect := wrapped.CollectCount(); gotCollect != 1 {
+			t.Errorf("CollectEvidence calls = %d, want 1 (stale snapshot must skip before collection)", gotCollect)
+		}
+		counterBytes, err := os.ReadFile(counterFile)
+		if err != nil {
+			t.Fatalf("read counterFile: %v", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(counterBytes)), "\n")
+		if len(lines) != 1 {
+			t.Errorf("acceptance command executed %d times, want 1; content=%q", len(lines), string(counterBytes))
+		}
+		if reports := recNotifier.Reports(); len(reports) != 0 {
+			t.Errorf("unexpected reconciler recovery reports after Shepherd already finished: %+v", reports)
+		}
+		finalJob, _ := st.GetJob(ctx, claimed.ID)
+		if finalJob.Status != store.StatusDone || strings.Contains(finalJob.ResultText, "recovered_by: reconciler") {
+			t.Errorf("unexpected final job state: status=%s result=%q", finalJob.Status, finalJob.ResultText)
+		}
+	})
+
+	t.Run("stale claim token snapshot skips collection and evaluation after reset and reclaim", func(t *testing.T) {
+		st, _ := openTestStore(t, "recover-stale-token")
+		workdir := t.TempDir()
+		counterFile := filepath.Join(t.TempDir(), "eval-token-runs.log")
+
+		sshAdapter := newLocalLinuxSSHAdapter("/bin/false")
+		job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+			RequestID:          "stale-token-1",
+			Title:              "Stale claim token snapshot",
+			Agent:              "claude",
+			Host:               "local-linux",
+			Workdir:            workdir,
+			AcceptanceCriteria: fmt.Sprintf("command: printf 'run\\n' >> %q", counterFile),
+		})
+		if err != nil {
+			t.Fatalf("CreateJob: %v", err)
+		}
+		firstClaim, ok, err := st.Claim(ctx, 2)
+		if err != nil || !ok || firstClaim.ID != job.ID {
+			t.Fatalf("first Claim: ok=%v err=%v", ok, err)
+		}
+		writePerJobArtifacts(t, workdir, firstClaim.ID, "0\n", "old attempt\n", "999995\n")
+
+		// Reset and reclaim so the job is still StatusClaimed, but with a NEW ClaimedBy token.
+		if _, err := st.Reset(ctx, firstClaim.ID); err != nil {
+			t.Fatalf("Reset: %v", err)
+		}
+		secondClaim, ok, err := st.Claim(ctx, 2)
+		if err != nil || !ok || secondClaim.ClaimedBy == firstClaim.ClaimedBy {
+			t.Fatalf("second Claim: ok=%v err=%v tok1=%q tok2=%q", ok, err, firstClaim.ClaimedBy, secondClaim.ClaimedBy)
+		}
+
+		wrapped := &staggeredStatusAdapter{base: sshAdapter}
+		eval := evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{
+			CommandTimeout: 5 * time.Second,
+			Getenv:         func(string) string { return "" },
+		})
+		shepherd := NewShepherd(ShepherdOptions{
+			Store:     st,
+			Adapter:   wrapped,
+			Evaluator: eval,
+			Notifier:  &recordingNotifier{},
+			Logger:    discardLogger(),
+		})
+
+		// Calling finishExitedJobFrom with the stale firstClaim snapshot must abort before CollectEvidence/Evaluate.
+		if got := shepherd.finishExitedJobFrom(ctx, firstClaim, adapter.RunState{State: adapter.StateExited, ExitCode: 0}, "reconciler"); got != nil {
+			t.Fatalf("finishExitedJobFrom(stale token) = %+v, want nil", got)
+		}
+		if gotCollect := wrapped.CollectCount(); gotCollect != 0 {
+			t.Errorf("CollectEvidence calls = %d, want 0", gotCollect)
+		}
+		if _, err := os.Stat(counterFile); !os.IsNotExist(err) {
+			t.Errorf("acceptance command should not have executed for stale claim token (err=%v)", err)
+		}
+	})
+}
+
+type staggeredStatusAdapter struct {
+	base           *adapter.SSHAdapter
+	blockFirstCall bool
+	entered        chan struct{}
+	release        chan struct{}
+
+	mu           sync.Mutex
+	statusCalls  int
+	collectCalls int
+}
+
+func (a *staggeredStatusAdapter) PrepareWorkdir(ctx context.Context, job *store.Job) error {
+	return a.base.PrepareWorkdir(ctx, job)
+}
+
+func (a *staggeredStatusAdapter) Launch(ctx context.Context, job *store.Job) (adapter.LaunchInfo, error) {
+	return a.base.Launch(ctx, job)
+}
+
+func (a *staggeredStatusAdapter) Status(ctx context.Context, job *store.Job) (adapter.RunState, error) {
+	a.mu.Lock()
+	a.statusCalls++
+	callNum := a.statusCalls
+	a.mu.Unlock()
+
+	if a.blockFirstCall && callNum == 1 {
+		close(a.entered)
+		<-a.release
+	}
+	return a.base.Status(ctx, job)
+}
+
+func (a *staggeredStatusAdapter) CollectEvidence(ctx context.Context, job *store.Job) (adapter.Evidence, error) {
+	a.mu.Lock()
+	a.collectCalls++
+	a.mu.Unlock()
+	return a.base.CollectEvidence(ctx, job)
+}
+
+func (a *staggeredStatusAdapter) FileAccessFor(job *store.Job) (evaluator.FileAccess, error) {
+	return a.base.FileAccessFor(job)
+}
+
+func (a *staggeredStatusAdapter) CollectCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.collectCalls
 }

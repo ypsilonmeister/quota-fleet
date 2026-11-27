@@ -278,11 +278,13 @@ func (l *linuxLauncher) Status(ctx context.Context, host config.HostConfig, job 
 	pidPath := joinRemotePath(runDir, pidFileName)
 
 	cmd := fmt.Sprintf(
-		"if [ -f %s ]; then printf 'EXITED:%%s\\n' \"$(tr -d ' \\t\\r\\n' < %s)\"; "+
-			"elif [ -f %s ]; then pid=\"$(tr -d ' \\t\\r\\n' < %s)\"; "+
-			"case \"$pid\" in ''|*[!0-9]*) printf 'MISSING:invalid_pid:%%s\\n' \"$pid\" ;; "+
+		"if [ -f %s ]; then printf 'EXITED:'; cat %s; "+
+			"elif [ -f %s ]; then raw=\"$(cat %s)\" || exit $?; "+
+			"set -f; IFS=$(printf ' \\t\\r\\nx'); IFS=${IFS%%x}; set -- $raw; "+
+			"if [ \"$#\" -ne 1 ]; then printf 'MISSING:invalid_pid:%%s\\n' \"$*\"; "+
+			"else pid=\"$1\"; case \"$pid\" in ''|*[!0-9]*) printf 'MISSING:invalid_pid:%%s\\n' \"$pid\" ;; "+
 			"*) if [ \"$pid\" -gt 0 ] && kill -0 \"$pid\" 2>/dev/null; then printf 'RUNNING:%%s\\n' \"$pid\"; "+
-			"else printf 'MISSING:pid_dead:%%s\\n' \"$pid\"; fi ;; esac; "+
+			"else printf 'MISSING:pid_dead:%%s\\n' \"$pid\"; fi ;; esac; fi; "+
 			"else printf 'MISSING:no_files\\n'; fi",
 		shellPath(exitPath), shellPath(exitPath),
 		shellPath(pidPath), shellPath(pidPath),
@@ -397,7 +399,7 @@ func (l *linuxLauncher) CollectEvidence(ctx context.Context, host config.HostCon
 
 	// 4. Read per-job agent.exit if present.
 	exitPath := joinRemotePath(runDir, exitFileName)
-	exitCmd := fmt.Sprintf("if [ -f %s ]; then tr -d ' \\t\\r\\n' < %s; fi", shellPath(exitPath), shellPath(exitPath))
+	exitCmd := fmt.Sprintf("if [ -f %s ]; then cat %s; fi", shellPath(exitPath), shellPath(exitPath))
 	exitRes, err := l.transport.Run(ctx, host, exitCmd)
 	if err != nil {
 		return Evidence{}, fmt.Errorf("collect agent.exit: %w", err)
@@ -405,6 +407,9 @@ func (l *linuxLauncher) CollectEvidence(ctx context.Context, host config.HostCon
 	if raw := strings.TrimSpace(exitRes.Stdout); raw != "" {
 		if code, perr := parseExitCode(raw); perr == nil {
 			ev.ExitCode = code
+		} else {
+			ev.ExitCodeUnknown = true
+			ev.Notes = append(ev.Notes, fmt.Sprintf("exit code unknown: unparseable agent.exit (%q)", raw))
 		}
 	}
 
