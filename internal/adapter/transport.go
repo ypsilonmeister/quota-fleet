@@ -287,10 +287,14 @@ func expandLocalTilde(p string) string {
 }
 
 // parseExitCode parses either a bare integer ("0", "1") or "EXIT:<code>" into an int.
+// Only leading and trailing ASCII whitespace (space, tab, CR, LF) is permitted;
+// NUL bytes, non-ASCII/control whitespace, internal whitespace, and multi-token inputs are rejected.
 func parseExitCode(raw string) (int, error) {
-	s := strings.TrimSpace(raw)
+	if strings.IndexByte(raw, 0) >= 0 {
+		return 0, errors.New("exit code contains NUL byte")
+	}
+	s := strings.Trim(raw, " \t\r\n")
 	s = strings.TrimPrefix(s, "EXIT:")
-	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, errors.New("empty exit code")
 	}

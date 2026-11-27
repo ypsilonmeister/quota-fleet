@@ -14,6 +14,9 @@ import (
 )
 
 const (
+	runArtifactsDirName = ".fleet"
+	runArtifactsRunsRel = ".fleet/runs"
+
 	promptFileName   = "prompt.txt"
 	runScriptName    = "run.sh"
 	winRunScriptName = "agent-run.cmd"
@@ -36,7 +39,8 @@ var DefaultArtifactFiles = []string{
 	"result.txt",
 }
 
-// adapterControlFiles are ignored when determining whether git status --porcelain shows real diffs.
+// adapterControlFiles are ignored when determining whether git status --porcelain shows real diffs,
+// and are routed to the per-job run artifacts directory (<workdir>/.fleet/runs/<job_id>/).
 var adapterControlFiles = map[string]bool{
 	promptFileName:   true,
 	runScriptName:    true,
@@ -47,6 +51,29 @@ var adapterControlFiles = map[string]bool{
 	exitTmpFileName:  true,
 	logFileName:      true,
 	errLogFileName:   true,
+}
+
+func isRunArtifactFile(name string) bool {
+	return adapterControlFiles[strings.TrimSpace(name)]
+}
+
+func isAdapterControlPath(filePath string) bool {
+	norm := strings.ReplaceAll(strings.TrimSpace(filePath), `\`, "/")
+	norm = strings.TrimPrefix(norm, "./")
+	if adapterControlFiles[norm] {
+		return true
+	}
+	return norm == runArtifactsDirName || strings.HasPrefix(norm, runArtifactsDirName+"/")
+}
+
+func linuxRunDir(workdir string, job *store.Job) (string, error) {
+	if job == nil {
+		return "", ErrNilJob
+	}
+	if job.ID <= 0 {
+		return "", errors.New("adapter: job id must be positive")
+	}
+	return joinRemotePath(workdir, fmt.Sprintf("%s/%d", runArtifactsRunsRel, job.ID)), nil
 }
 
 // ErrUnsupportedOS is returned when a host's OS has no OSLauncher implementation yet.
@@ -166,26 +193,33 @@ func (l *linuxLauncher) PrepareWorkdir(ctx context.Context, host config.HostConf
 }
 
 func (l *linuxLauncher) Launch(ctx context.Context, host config.HostConfig, job *store.Job, workdir string, spec LaunchSpec) (LaunchInfo, error) {
-	promptPath := joinRemotePath(workdir, promptFileName)
-	runShPath := joinRemotePath(workdir, runScriptName)
-	pidPath := joinRemotePath(workdir, pidFileName)
-	exitPath := joinRemotePath(workdir, exitFileName)
-	logPath := joinRemotePath(workdir, logFileName)
+	runDir, err := linuxRunDir(workdir, job)
+	if err != nil {
+		return LaunchInfo{}, err
+	}
+	promptPath := joinRemotePath(runDir, promptFileName)
+	runShPath := joinRemotePath(runDir, runScriptName)
+	pidPath := joinRemotePath(runDir, pidFileName)
+	exitPath := joinRemotePath(runDir, exitFileName)
+	exitTmpPath := joinRemotePath(runDir, exitTmpFileName)
+	logPath := joinRemotePath(runDir, logFileName)
 
 	promptText := BuildPromptText(job)
 	launchCmd, err := spec.Driver.BuildLaunchCommand(job, workdir, promptPath, logPath, spec.AllowSandbox)
 	if err != nil {
 		return LaunchInfo{}, err
 	}
-	runScript := BuildRunScript(workdir, spec.Driver, launchCmd)
+	runScript := BuildRunScript(workdir, runDir, spec.Driver, launchCmd)
 
 	promptB64 := base64.StdEncoding.EncodeToString([]byte(promptText))
 	scriptB64 := base64.StdEncoding.EncodeToString([]byte(runScript))
 
 	stageCmd := fmt.Sprintf(
-		"mkdir -p %s && rm -f %s %s && printf '%%s' %s | base64 -d > %s && printf '%%s' %s | base64 -d > %s && chmod 700 %s",
+		"mkdir -p %s %s && rm -f %s %s %s && printf '%%s' %s | base64 -d > %s && printf '%%s' %s | base64 -d > %s && chmod 700 %s",
 		shellPath(workdir),
+		shellPath(runDir),
 		shellPath(exitPath),
+		shellPath(exitTmpPath),
 		shellPath(pidPath),
 		shellQuote(promptB64),
 		shellPath(promptPath),
@@ -201,7 +235,7 @@ func (l *linuxLauncher) Launch(ctx context.Context, host config.HostConfig, job 
 		return LaunchInfo{}, fmt.Errorf("stage prompt.txt and run.sh failed (exit %d): %s", stageRes.ExitCode, strings.TrimSpace(stageRes.Stderr))
 	}
 
-	// Detach via setsid + nohup so the agent survives SSH disconnect; record PID in agent.pid.
+	// Detach via setsid + nohup so the agent survives SSH disconnect; record PID in per-job agent.pid.
 	detachCmd := fmt.Sprintf(
 		"setsid nohup sh %s >/dev/null 2>&1 </dev/null & pid=$!; printf '%%d\\n' \"$pid\" > %s; printf '%%d\\n' \"$pid\"",
 		shellPath(runShPath),
@@ -229,20 +263,32 @@ func (l *linuxLauncher) Launch(ctx context.Context, host config.HostConfig, job 
 			"agent":           job.Agent,
 			"host":            job.Host,
 			"workdir":         workdir,
+			"run_dir":         runDir,
 			"sandbox_relaxed": strconv.FormatBool(spec.AllowSandbox),
 		},
 	}, nil
 }
 
-func (l *linuxLauncher) Status(ctx context.Context, host config.HostConfig, _ *store.Job, workdir string) (RunState, error) {
-	exitPath := joinRemotePath(workdir, exitFileName)
-	pidPath := joinRemotePath(workdir, pidFileName)
+func (l *linuxLauncher) Status(ctx context.Context, host config.HostConfig, job *store.Job, workdir string) (RunState, error) {
+	runDir, err := linuxRunDir(workdir, job)
+	if err != nil {
+		return RunState{}, err
+	}
+	exitPath := joinRemotePath(runDir, exitFileName)
+	pidPath := joinRemotePath(runDir, pidFileName)
 
 	cmd := fmt.Sprintf(
-		"if [ -f %s ]; then printf 'EXITED:%%s\\n' \"$(tr -d ' \\t\\r\\n' < %s)\"; "+
-			"elif [ -f %s ]; then pid=\"$(tr -d ' \\t\\r\\n' < %s)\"; "+
-			"if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then printf 'RUNNING:%%s\\n' \"$pid\"; "+
-			"else printf 'MISSING:pid_dead:%%s\\n' \"$pid\"; fi; "+
+		"if [ -f %s ]; then "+
+			"if { printf 'EXITED:'; cat; } 2>/dev/null < %s; then :; "+
+			"else printf 'MISSING:unreadable_exit_file\\n'; fi; "+
+			"elif [ -f %s ]; then "+
+			"if raw=\"$(LC_ALL=C tr '\\000' '?' 2>/dev/null < %s)\"; then "+
+			"set -f; IFS=$(printf ' \\t\\r\\nx'); IFS=${IFS%%x}; set -- $raw; "+
+			"if [ \"$#\" -ne 1 ]; then printf 'MISSING:invalid_pid:%%s\\n' \"$*\"; "+
+			"else pid=\"$1\"; case \"$pid\" in ''|0*|*[!0123456789]*|??????????*) printf 'MISSING:invalid_pid:%%s\\n' \"$pid\" ;; "+
+			"*) if [ \"$pid\" -gt 0 ] && kill -0 \"$pid\" 2>/dev/null; then printf 'RUNNING:%%s\\n' \"$pid\"; "+
+			"else printf 'MISSING:pid_dead:%%s\\n' \"$pid\"; fi ;; esac; fi; "+
+			"else printf 'MISSING:unreadable_pid_file\\n'; fi; "+
 			"else printf 'MISSING:no_files\\n'; fi",
 		shellPath(exitPath), shellPath(exitPath),
 		shellPath(pidPath), shellPath(pidPath),
@@ -256,37 +302,44 @@ func (l *linuxLauncher) Status(ctx context.Context, host config.HostConfig, _ *s
 		return RunState{}, fmt.Errorf("status probe failed (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
-	line := strings.TrimSpace(res.Stdout)
+	stdout := res.Stdout
 	switch {
-	case strings.HasPrefix(line, "EXITED:"):
-		rawCode := strings.TrimPrefix(line, "EXITED:")
+	case strings.HasPrefix(stdout, "EXITED:"):
+		rawCode := strings.TrimPrefix(stdout, "EXITED:")
 		code, err := parseExitCode(rawCode)
 		if err != nil {
-			return RunState{}, fmt.Errorf("parse agent.exit %q: %w", rawCode, err)
+			return RunState{
+				State:  StateMissing,
+				Detail: fmt.Sprintf("invalid_exit_file:%q", rawCode),
+			}, nil
 		}
 		return RunState{
 			State:    StateExited,
 			ExitCode: code,
 			Detail:   fmt.Sprintf("agent.exit=%d", code),
 		}, nil
-	case strings.HasPrefix(line, "RUNNING:"):
-		pid := strings.TrimPrefix(line, "RUNNING:")
+	case strings.HasPrefix(stdout, "RUNNING:"):
+		pid := strings.TrimSpace(strings.TrimPrefix(stdout, "RUNNING:"))
 		return RunState{
 			State:  StateRunning,
 			Detail: "pid=" + pid,
 		}, nil
-	case strings.HasPrefix(line, "MISSING:"):
-		detail := strings.TrimPrefix(line, "MISSING:")
+	case strings.HasPrefix(stdout, "MISSING:"):
+		detail := strings.TrimSpace(strings.TrimPrefix(stdout, "MISSING:"))
 		return RunState{
 			State:  StateMissing,
 			Detail: detail,
 		}, nil
 	default:
-		return RunState{}, fmt.Errorf("unexpected status probe output: %q", line)
+		return RunState{}, fmt.Errorf("unexpected status probe output: %q", strings.TrimSpace(stdout))
 	}
 }
 
-func (l *linuxLauncher) CollectEvidence(ctx context.Context, host config.HostConfig, _ *store.Job, workdir string) (Evidence, error) {
+func (l *linuxLauncher) CollectEvidence(ctx context.Context, host config.HostConfig, job *store.Job, workdir string) (Evidence, error) {
+	runDir, err := linuxRunDir(workdir, job)
+	if err != nil {
+		return Evidence{}, err
+	}
 	ev := Evidence{
 		Artifacts: make(map[string]bool, len(l.artifactFiles)),
 	}
@@ -305,11 +358,15 @@ func (l *linuxLauncher) CollectEvidence(ctx context.Context, host config.HostCon
 		}
 	}
 
-	// 2. Check artifact files existence.
+	// 2. Check artifact files existence (run artifacts in runDir, deliverables in workdir).
 	if len(l.artifactFiles) > 0 {
 		var checks []string
 		for _, name := range l.artifactFiles {
-			full := joinRemotePath(workdir, name)
+			base := workdir
+			if isRunArtifactFile(name) {
+				base = runDir
+			}
+			full := joinRemotePath(base, name)
 			checks = append(checks, fmt.Sprintf("if [ -e %s ]; then printf '1:%s\\n'; else printf '0:%s\\n'; fi",
 				shellPath(full), escapePrintfLiteral(name), escapePrintfLiteral(name)))
 		}
@@ -331,8 +388,8 @@ func (l *linuxLauncher) CollectEvidence(ctx context.Context, host config.HostCon
 		}
 	}
 
-	// 3. Collect tail of agent.log into FinalReport.
-	logPath := joinRemotePath(workdir, logFileName)
+	// 3. Collect tail of per-job agent.log into FinalReport.
+	logPath := joinRemotePath(runDir, logFileName)
 	logCmd := fmt.Sprintf("if [ -f %s ]; then tail -n %d %s; fi", shellPath(logPath), l.logTailLines, shellPath(logPath))
 	logRes, err := l.transport.Run(ctx, host, logCmd)
 	if err != nil {
@@ -344,16 +401,26 @@ func (l *linuxLauncher) CollectEvidence(ctx context.Context, host config.HostCon
 	}
 	ev.FinalReport = report
 
-	// 4. Read agent.exit if present.
-	exitPath := joinRemotePath(workdir, exitFileName)
-	exitCmd := fmt.Sprintf("if [ -f %s ]; then tr -d ' \\t\\r\\n' < %s; fi", shellPath(exitPath), shellPath(exitPath))
+	// 4. Read per-job agent.exit if present (preserving raw bytes so NUL/control chars cannot collapse).
+	exitPath := joinRemotePath(runDir, exitFileName)
+	exitCmd := fmt.Sprintf("if [ -f %s ]; then cat 2>/dev/null < %s; else exit 42; fi", shellPath(exitPath), shellPath(exitPath))
 	exitRes, err := l.transport.Run(ctx, host, exitCmd)
 	if err != nil {
 		return Evidence{}, fmt.Errorf("collect agent.exit: %w", err)
 	}
-	if raw := strings.TrimSpace(exitRes.Stdout); raw != "" {
-		if code, perr := parseExitCode(raw); perr == nil {
+	switch {
+	case exitRes.ExitCode == 42:
+		ev.ExitCodeUnknown = true
+		ev.Notes = append(ev.Notes, "exit code unknown: agent.exit not found")
+	case exitRes.ExitCode != 0:
+		ev.ExitCodeUnknown = true
+		ev.Notes = append(ev.Notes, "exit code unknown: unreadable agent.exit")
+	default:
+		if code, perr := parseExitCode(exitRes.Stdout); perr == nil {
 			ev.ExitCode = code
+		} else {
+			ev.ExitCodeUnknown = true
+			ev.Notes = append(ev.Notes, fmt.Sprintf("exit code unknown: unparseable agent.exit (%q)", exitRes.Stdout))
 		}
 	}
 
@@ -385,10 +452,14 @@ func BuildPromptText(job *store.Job) string {
 }
 
 // BuildRunScript generates the POSIX shell wrapper script (run.sh) that sets per-host env vars,
-// enters workdir, runs the agent command, atomically records the exit code to agent.exit, and exits.
-func BuildRunScript(workdir string, driver AgentDriver, launchCmd string) string {
-	exitPath := joinRemotePath(workdir, exitFileName)
-	exitTmpPath := joinRemotePath(workdir, exitTmpFileName)
+// enters workdir, runs the agent command, atomically records the exit code to runDir/agent.exit, and exits.
+// If runDir is empty, it defaults to workdir.
+func BuildRunScript(workdir, runDir string, driver AgentDriver, launchCmd string) string {
+	if strings.TrimSpace(runDir) == "" {
+		runDir = workdir
+	}
+	exitPath := joinRemotePath(runDir, exitFileName)
+	exitTmpPath := joinRemotePath(runDir, exitTmpFileName)
 
 	var lines []string
 	lines = append(lines, "#!/bin/sh")
@@ -416,7 +487,7 @@ func filterPorcelainLines(stdout string) []string {
 			filePath = strings.TrimSpace(raw[3:])
 		}
 		filePath = strings.Trim(filePath, `"`)
-		if adapterControlFiles[filePath] {
+		if isAdapterControlPath(filePath) {
 			continue
 		}
 		out = append(out, raw)

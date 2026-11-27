@@ -9,6 +9,7 @@ import (
 
 	"github.com/ypsilonmeister/quota-fleet/internal/adapter"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/evaluator"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -16,6 +17,10 @@ import (
 type ReconcilerOptions struct {
 	Store             *store.Store
 	Adapter           adapter.Adapter
+	Shepherd          *Shepherd
+	Evaluator         evaluator.Evaluator
+	LauncherNotify    chan<- struct{}
+	MaxEvalRetries    int
 	Notifier          Notifier
 	Interval          time.Duration
 	StaleClaimedAfter time.Duration
@@ -28,12 +33,17 @@ type ReconcilerOptions struct {
 }
 
 // Reconciler periodically checks for:
-//  (a) undelivered done/failed jobs and delivers them via Notifier,
-//  (b) claimed jobs older than StaleClaimedAfter whose Adapter.Status is Missing (resetting them to queued),
-//  (c) waiting jobs whose parent is already in a terminal state (reporting once per dedup key).
+//
+//	(a) undelivered done/failed jobs and delivers them via Notifier,
+//	(b) claimed jobs older than StaleClaimedAfter:
+//	    - if Adapter.Status is Exited, recovers completion without re-running the agent
+//	      (collecting evidence, running acceptance evaluation, committing done/failed),
+//	    - if Adapter.Status is Missing, resets them to queued (or cancels if chain ended),
+//	(c) waiting jobs whose parent is already in a terminal state (reporting once per dedup key).
 type Reconciler struct {
 	store             *store.Store
 	adapter           adapter.Adapter
+	shepherd          *Shepherd
 	notifier          Notifier
 	interval          time.Duration
 	staleClaimedAfter time.Duration
@@ -61,9 +71,22 @@ func NewReconciler(opts ReconcilerOptions) *Reconciler {
 	if logger == nil {
 		logger = log.Default()
 	}
+	shepherd := opts.Shepherd
+	if shepherd == nil && opts.Evaluator != nil {
+		shepherd = NewShepherd(ShepherdOptions{
+			Store:          opts.Store,
+			Adapter:        opts.Adapter,
+			Evaluator:      opts.Evaluator,
+			Notifier:       opts.Notifier,
+			LauncherNotify: opts.LauncherNotify,
+			MaxEvalRetries: opts.MaxEvalRetries,
+			Logger:         logger,
+		})
+	}
 	return &Reconciler{
 		store:             opts.Store,
 		adapter:           opts.Adapter,
+		shepherd:          shepherd,
 		notifier:          opts.Notifier,
 		interval:          interval,
 		staleClaimedAfter: staleAfter,
@@ -161,6 +184,27 @@ func (r *Reconciler) reconcileStaleClaimed(ctx context.Context) error {
 			if ctx.Err() == nil {
 				r.logger.Printf("reconciler status check error for job #%d: %v", job.ID, err)
 			}
+			continue
+		}
+		if state.State == adapter.StateExited {
+			if r.shepherd == nil {
+				r.logger.Printf("reconciler observed exited claimed job #%d (%s) but no evaluator/shepherd is configured; skipping recovery", job.ID, state.Detail)
+				continue
+			}
+			terminalJob := r.shepherd.finishExitedJobFrom(ctx, job, state, "reconciler")
+			if terminalJob == nil {
+				continue
+			}
+			r.logger.Printf("reconciler recovered exited claimed job #%d -> %s (exit_code=%d, exit_code_unknown=%v, detail=%s)",
+				job.ID, terminalJob.Status, state.ExitCode, state.ExitCodeUnknown, state.Detail)
+			dedupKey := fmt.Sprintf("stale-claimed-recovered:%d:%s", job.ID, job.ClaimedBy)
+			r.reportOnce(ctx, Report{
+				DedupKey:  dedupKey,
+				Kind:      "stale_claimed_recovered",
+				JobID:     job.ID,
+				Message:   fmt.Sprintf("job #%d (%q) remained claimed after exit (%s); recovered without relaunch to %s", job.ID, job.Title, state.Detail, terminalJob.Status),
+				Timestamp: now,
+			})
 			continue
 		}
 		if state.State != adapter.StateMissing {
