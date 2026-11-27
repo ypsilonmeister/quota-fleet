@@ -409,6 +409,78 @@ func TestLinuxExitAndPIDFileWhitespaceValidation(t *testing.T) {
 	}
 }
 
+func TestLinuxUnreadableExitAndPIDFilesReturnMissing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses 000 file read permissions")
+	}
+
+	ctx := context.Background()
+	workdir := t.TempDir()
+	cfg := &config.Config{
+		Hosts: map[string]config.HostConfig{
+			"local-linux": {
+				Transport: "local",
+				OS:        "linux",
+			},
+		},
+		Agents: map[string]config.AgentConfig{
+			"claude": {
+				Launch:      "claude",
+				PromptStyle: config.PromptStyleStdin,
+			},
+		},
+	}
+	a := NewSSHAdapter(cfg, SSHAdapterOptions{
+		Transport: NewLocalTransport(LocalTransportOptions{}),
+	})
+
+	t.Run("unreadable agent.exit returns Missing instead of error", func(t *testing.T) {
+		runDir := filepath.Join(workdir, ".fleet", "runs", "531")
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatalf("mkdir %q: %v", runDir, err)
+		}
+		exitPath := filepath.Join(runDir, exitFileName)
+		if err := os.WriteFile(exitPath, []byte("0\n"), 0o600); err != nil {
+			t.Fatalf("write agent.exit: %v", err)
+		}
+		if err := os.Chmod(exitPath, 0o000); err != nil {
+			t.Fatalf("chmod 000 agent.exit: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(exitPath, 0o600) })
+
+		st, err := a.Status(ctx, &store.Job{ID: 531, Host: "local-linux", Workdir: workdir})
+		if err != nil {
+			t.Fatalf("Status unreadable agent.exit returned error: %v", err)
+		}
+		if st.State != StateMissing || !strings.Contains(st.Detail, "unreadable_exit_file") {
+			t.Fatalf("Status unreadable agent.exit = %+v, want StateMissing(unreadable_exit_file)", st)
+		}
+	})
+
+	t.Run("unreadable agent.pid returns Missing instead of error", func(t *testing.T) {
+		runDir := filepath.Join(workdir, ".fleet", "runs", "532")
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatalf("mkdir %q: %v", runDir, err)
+		}
+		pidPath := filepath.Join(runDir, pidFileName)
+		if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+			t.Fatalf("write agent.pid: %v", err)
+		}
+		if err := os.Chmod(pidPath, 0o000); err != nil {
+			t.Fatalf("chmod 000 agent.pid: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(pidPath, 0o600) })
+
+		st, err := a.Status(ctx, &store.Job{ID: 532, Host: "local-linux", Workdir: workdir})
+		if err != nil {
+			t.Fatalf("Status unreadable agent.pid returned error: %v", err)
+		}
+		if st.State != StateMissing || !strings.Contains(st.Detail, "unreadable_pid_file") {
+			t.Fatalf("Status unreadable agent.pid = %+v, want StateMissing(unreadable_pid_file)", st)
+		}
+	})
+}
+
 // Regression tests (a) and (c) on Windows: sequential jobs sharing one workdir stage,
 // probe, and collect evidence strictly under <workdir>\.fleet\runs\<job_id>\ without
 // overwriting or misidentifying sibling jobs.

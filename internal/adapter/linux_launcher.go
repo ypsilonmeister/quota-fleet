@@ -278,13 +278,17 @@ func (l *linuxLauncher) Status(ctx context.Context, host config.HostConfig, job 
 	pidPath := joinRemotePath(runDir, pidFileName)
 
 	cmd := fmt.Sprintf(
-		"if [ -f %s ]; then printf 'EXITED:'; cat %s; "+
-			"elif [ -f %s ]; then raw=\"$(cat %s)\" || exit $?; "+
+		"if [ -f %s ]; then "+
+			"if raw=\"$(cat %s 2>/dev/null)\"; then printf 'EXITED:%%s\\n' \"$raw\"; "+
+			"else printf 'MISSING:unreadable_exit_file\\n'; fi; "+
+			"elif [ -f %s ]; then "+
+			"if raw=\"$(cat %s 2>/dev/null)\"; then "+
 			"set -f; IFS=$(printf ' \\t\\r\\nx'); IFS=${IFS%%x}; set -- $raw; "+
 			"if [ \"$#\" -ne 1 ]; then printf 'MISSING:invalid_pid:%%s\\n' \"$*\"; "+
 			"else pid=\"$1\"; case \"$pid\" in ''|*[!0-9]*) printf 'MISSING:invalid_pid:%%s\\n' \"$pid\" ;; "+
 			"*) if [ \"$pid\" -gt 0 ] && kill -0 \"$pid\" 2>/dev/null; then printf 'RUNNING:%%s\\n' \"$pid\"; "+
 			"else printf 'MISSING:pid_dead:%%s\\n' \"$pid\"; fi ;; esac; fi; "+
+			"else printf 'MISSING:unreadable_pid_file\\n'; fi; "+
 			"else printf 'MISSING:no_files\\n'; fi",
 		shellPath(exitPath), shellPath(exitPath),
 		shellPath(pidPath), shellPath(pidPath),

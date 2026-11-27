@@ -528,6 +528,100 @@ func TestReconcilerRecoversMissedCompletionWithoutRelaunch(t *testing.T) {
 		}
 	})
 
+	t.Run("unreadable agent.exit and agent.pid are treated as Missing and reset stale claimed to queued", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses 000 file read permissions")
+		}
+
+		cases := []struct {
+			name        string
+			requestID   string
+			exitContent string
+			pidContent  string
+			chmodFile   string
+		}{
+			{
+				name:        "mode 000 agent.exit",
+				requestID:   "unreadable-exit-1",
+				exitContent: "0\n",
+				chmodFile:   "agent.exit",
+			},
+			{
+				name:       "mode 000 agent.pid",
+				requestID:  "unreadable-pid-1",
+				pidContent: fmt.Sprintf("%d\n", os.Getpid()),
+				chmodFile:  "agent.pid",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				st, _ := openTestStore(t, "recover-"+tc.requestID)
+				workdir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(workdir, "summary.md"), []byte("PASS_MARKER\n"), 0o644); err != nil {
+					t.Fatalf("write summary.md: %v", err)
+				}
+				sshAdapter := newLocalLinuxSSHAdapter("/bin/false")
+
+				job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+					RequestID:          tc.requestID,
+					Title:              "Unreadable run artifact " + tc.name,
+					Agent:              "claude",
+					Host:               "local-linux",
+					Workdir:            workdir,
+					AcceptanceCriteria: "file_nonempty: summary.md\ncontains: summary.md :: PASS_MARKER",
+				})
+				if err != nil {
+					t.Fatalf("CreateJob: %v", err)
+				}
+				claimed, ok, err := st.Claim(ctx, 2)
+				if err != nil || !ok || claimed.ID != job.ID {
+					t.Fatalf("Claim: ok=%v err=%v", ok, err)
+				}
+
+				runDir := writePerJobArtifacts(t, workdir, claimed.ID, tc.exitContent, "some log\n", tc.pidContent)
+				targetPath := filepath.Join(runDir, tc.chmodFile)
+				if err := os.Chmod(targetPath, 0o000); err != nil {
+					t.Fatalf("chmod 000 %q: %v", targetPath, err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(targetPath, 0o600) })
+
+				eval := evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{
+					CommandTimeout: 5 * time.Second,
+					Getenv:         func(string) string { return "" },
+				})
+				recNotifier := &recordingNotifier{}
+				fakeNow := time.Now().UTC().Add(30 * time.Minute)
+				reconciler := NewReconciler(ReconcilerOptions{
+					Store:             st,
+					Adapter:           sshAdapter,
+					Evaluator:         eval,
+					Notifier:          recNotifier,
+					StaleClaimedAfter: 10 * time.Minute,
+					AttemptsCap:       3,
+					Now:               func() time.Time { return fakeNow },
+					Logger:            discardLogger(),
+				})
+
+				if err := reconciler.ReconcileOnce(ctx); err != nil {
+					t.Fatalf("ReconcileOnce: %v", err)
+				}
+
+				got, err := st.GetJob(ctx, claimed.ID)
+				if err != nil {
+					t.Fatalf("GetJob: %v", err)
+				}
+				if got.Status != store.StatusQueued {
+					t.Fatalf("status = %s, want queued (unreadable %s must be Missing -> reset, not stuck in claimed)", got.Status, tc.chmodFile)
+				}
+				reports := recNotifier.Reports()
+				if len(reports) != 1 || reports[0].Kind != "stale_claimed_reset" {
+					t.Fatalf("reports = %+v, want 1 stale_claimed_reset report", reports)
+				}
+			})
+		}
+	})
+
 	t.Run("staggered Shepherd and Reconciler do not re-run acceptance command after guard release", func(t *testing.T) {
 		st, _ := openTestStore(t, "recover-staggered-race")
 		workdir := t.TempDir()
