@@ -528,6 +528,97 @@ func TestReconcilerRecoversMissedCompletionWithoutRelaunch(t *testing.T) {
 		}
 	})
 
+	t.Run("NUL and control-char corrupted agent.exit is treated as Missing and reset stale claimed to queued even with passing deliverables", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			requestID   string
+			exitContent string
+		}{
+			{
+				name:        "NUL after zero (0\\x00\\n)",
+				requestID:   "nul-corrupt-exit-1",
+				exitContent: "0\x00\n",
+			},
+			{
+				name:        "NUL before zero (\\x000\\n)",
+				requestID:   "nul-corrupt-exit-2",
+				exitContent: "\x000\n",
+			},
+			{
+				name:        "EXIT prefix separated by newline",
+				requestID:   "exit-nl-corrupt-exit-3",
+				exitContent: "EXIT:\n0\n",
+			},
+			{
+				name:        "vertical tab trailing zero",
+				requestID:   "vt-corrupt-exit-4",
+				exitContent: "0\x0b\n",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				st, _ := openTestStore(t, "recover-"+tc.requestID)
+				workdir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(workdir, "summary.md"), []byte("PASS_MARKER\n"), 0o644); err != nil {
+					t.Fatalf("write summary.md: %v", err)
+				}
+				sshAdapter := newLocalLinuxSSHAdapter("/bin/false")
+
+				job, _, err := st.CreateJob(ctx, store.CreateJobParams{
+					RequestID:          tc.requestID,
+					Title:              "Corrupt exit evidence " + tc.name,
+					Agent:              "claude",
+					Host:               "local-linux",
+					Workdir:            workdir,
+					AcceptanceCriteria: "file_nonempty: summary.md\ncontains: summary.md :: PASS_MARKER",
+				})
+				if err != nil {
+					t.Fatalf("CreateJob: %v", err)
+				}
+				claimed, ok, err := st.Claim(ctx, 2)
+				if err != nil || !ok || claimed.ID != job.ID {
+					t.Fatalf("Claim: ok=%v err=%v", ok, err)
+				}
+
+				writePerJobArtifacts(t, workdir, claimed.ID, tc.exitContent, "some log\n", "")
+
+				eval := evaluator.NewTypedDecision(evaluator.TypedDecisionOptions{
+					CommandTimeout: 5 * time.Second,
+					Getenv:         func(string) string { return "" },
+				})
+				recNotifier := &recordingNotifier{}
+				fakeNow := time.Now().UTC().Add(30 * time.Minute)
+				reconciler := NewReconciler(ReconcilerOptions{
+					Store:             st,
+					Adapter:           sshAdapter,
+					Evaluator:         eval,
+					Notifier:          recNotifier,
+					StaleClaimedAfter: 10 * time.Minute,
+					AttemptsCap:       3,
+					Now:               func() time.Time { return fakeNow },
+					Logger:            discardLogger(),
+				})
+
+				if err := reconciler.ReconcileOnce(ctx); err != nil {
+					t.Fatalf("ReconcileOnce: %v", err)
+				}
+
+				got, err := st.GetJob(ctx, claimed.ID)
+				if err != nil {
+					t.Fatalf("GetJob: %v", err)
+				}
+				if got.Status != store.StatusQueued {
+					t.Fatalf("status = %s, want queued (corrupt agent.exit %q must be Missing -> reset, not Exited/done)", got.Status, tc.exitContent)
+				}
+				reports := recNotifier.Reports()
+				if len(reports) != 1 || reports[0].Kind != "stale_claimed_reset" {
+					t.Fatalf("reports = %+v, want 1 stale_claimed_reset report", reports)
+				}
+			})
+		}
+	})
+
 	t.Run("unreadable agent.exit and agent.pid are treated as Missing and reset stale claimed to queued", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root bypasses 000 file read permissions")

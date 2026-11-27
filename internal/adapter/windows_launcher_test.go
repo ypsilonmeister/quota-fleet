@@ -658,13 +658,21 @@ func TestWindowsAdapterStatusThreeStates(t *testing.T) {
 	})
 
 	t.Run("corrupt agent.exit classified as missing", func(t *testing.T) {
-		fake := NewFakeTransport()
-		fake.SetDefault(CommandResult{Stdout: "EXITED:corrupt\r\n"}, nil)
-		a := NewSSHAdapter(cfg, SSHAdapterOptions{Transport: fake})
+		for _, raw := range []string{
+			"EXITED:corrupt\r\n",
+			"EXITED:0\x00\r\n",
+			"EXITED:0\x0b\r\n",
+			"EXITED:EXIT:\n0\r\n",
+			"EXITED:\r\n",
+		} {
+			fake := NewFakeTransport()
+			fake.SetDefault(CommandResult{Stdout: raw}, nil)
+			a := NewSSHAdapter(cfg, SSHAdapterOptions{Transport: fake})
 
-		st, err := a.Status(ctx, job)
-		if err != nil || st.State != StateMissing || !strings.Contains(st.Detail, "invalid_exit_file") {
-			t.Fatalf("Status corrupt exit = (%+v, %v), want StateMissing", st, err)
+			st, err := a.Status(ctx, job)
+			if err != nil || st.State != StateMissing || !strings.Contains(st.Detail, "invalid_exit_file") {
+				t.Fatalf("Status corrupt exit %q = (%+v, %v), want StateMissing(invalid_exit_file)", raw, st, err)
+			}
 		}
 	})
 

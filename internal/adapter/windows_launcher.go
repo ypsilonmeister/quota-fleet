@@ -297,13 +297,15 @@ func (w *windowsLauncher) Status(ctx context.Context, host config.HostConfig, jo
 
 	probePS := fmt.Sprintf(
 		"$exitFile = %s; $pidFile = %s; $logFile = %s; $errFile = %s; "+
-			"if (Test-Path -LiteralPath $exitFile) { "+
-			"$raw = ([System.IO.File]::ReadAllText($exitFile, [System.Text.Encoding]::UTF8)).Trim(); "+
-			"Write-Output ('EXITED:' + $raw); exit 0 }; "+
-			"if (Test-Path -LiteralPath $pidFile) { "+
-			"$rawPid = ([System.IO.File]::ReadAllText($pidFile, [System.Text.Encoding]::UTF8)).Trim(); "+
+			"if (Test-Path -LiteralPath $exitFile -PathType Leaf) { "+
+			"try { $raw = [System.IO.File]::ReadAllText($exitFile, [System.Text.Encoding]::UTF8); Write-Output ('EXITED:' + $raw) } "+
+			"catch { Write-Output 'MISSING:unreadable_exit_file' }; exit 0 }; "+
+			"if (Test-Path -LiteralPath $pidFile -PathType Leaf) { "+
+			"try { $rawPid = [System.IO.File]::ReadAllText($pidFile, [System.Text.Encoding]::UTF8) } "+
+			"catch { Write-Output 'MISSING:unreadable_pid_file'; exit 0 }; "+
+			"$pidTrim = $rawPid.Trim([char[]]@(32,9,13,10)); "+
 			"$pidNum = 0; "+
-			"if ([int]::TryParse($rawPid, [ref]$pidNum) -and $pidNum -gt 0) { "+
+			"if ($pidTrim -match '^[1-9][0-9]*$' -and [int]::TryParse($pidTrim, [ref]$pidNum) -and $pidNum -gt 0) { "+
 			"$proc = Get-Process -Id $pidNum -ErrorAction SilentlyContinue; "+
 			"if ($null -ne $proc) { Write-Output ('RUNNING:' + $pidNum); exit 0 }; "+
 			"$hasLog = ((Test-Path -LiteralPath $logFile) -and ((Get-Item -LiteralPath $logFile).Length -gt 0)) -or "+
@@ -312,7 +314,7 @@ func (w *windowsLauncher) Status(ctx context.Context, host config.HostConfig, jo
 			"if (Test-Path -LiteralPath $logFile) { "+
 			"$tail = @(Get-Content -LiteralPath $logFile -Tail 5 -ErrorAction SilentlyContinue); "+
 			"for ($i = $tail.Count - 1; $i -ge 0; $i--) { "+
-			"if ($tail[$i] -match '^EXIT:(-?\\d+)\\s*$') { Write-Output ('EXITED:' + $Matches[1]); exit 0 } } }; "+
+			"if ($tail[$i] -match '^EXIT:(-?[0-9]+)[ \\t\\r\\n]*$') { Write-Output ('EXITED:' + $Matches[1]); exit 0 } } }; "+
 			"Write-Output ('EXITED_UNKNOWN:pid_exited_no_exit_file:' + $pidNum); exit 0 }; "+
 			"Write-Output ('MISSING:pid_dead_no_logs:' + $pidNum); exit 0 }; "+
 			"Write-Output ('MISSING:invalid_pid:' + $rawPid); exit 0 }; "+
@@ -331,10 +333,10 @@ func (w *windowsLauncher) Status(ctx context.Context, host config.HostConfig, jo
 		return RunState{}, fmt.Errorf("windows status probe failed (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
-	line := strings.TrimSpace(res.Stdout)
+	stdout := res.Stdout
 	switch {
-	case strings.HasPrefix(line, "EXITED:"):
-		rawCode := strings.TrimPrefix(line, "EXITED:")
+	case strings.HasPrefix(stdout, "EXITED:"):
+		rawCode := strings.TrimPrefix(stdout, "EXITED:")
 		code, err := parseExitCode(rawCode)
 		if err != nil {
 			return RunState{
@@ -348,28 +350,28 @@ func (w *windowsLauncher) Status(ctx context.Context, host config.HostConfig, jo
 			ExitCodeUnknown: false,
 			Detail:          fmt.Sprintf("agent.exit=%d", code),
 		}, nil
-	case strings.HasPrefix(line, "EXITED_UNKNOWN:"):
-		detail := strings.TrimPrefix(line, "EXITED_UNKNOWN:")
+	case strings.HasPrefix(stdout, "EXITED_UNKNOWN:"):
+		detail := strings.TrimSpace(strings.TrimPrefix(stdout, "EXITED_UNKNOWN:"))
 		return RunState{
 			State:           StateExited,
 			ExitCode:        0,
 			ExitCodeUnknown: true,
 			Detail:          detail,
 		}, nil
-	case strings.HasPrefix(line, "RUNNING:"):
-		pid := strings.TrimPrefix(line, "RUNNING:")
+	case strings.HasPrefix(stdout, "RUNNING:"):
+		pid := strings.TrimSpace(strings.TrimPrefix(stdout, "RUNNING:"))
 		return RunState{
 			State:  StateRunning,
 			Detail: "pid=" + pid,
 		}, nil
-	case strings.HasPrefix(line, "MISSING:"):
-		detail := strings.TrimPrefix(line, "MISSING:")
+	case strings.HasPrefix(stdout, "MISSING:"):
+		detail := strings.TrimSpace(strings.TrimPrefix(stdout, "MISSING:"))
 		return RunState{
 			State:  StateMissing,
 			Detail: detail,
 		}, nil
 	default:
-		return RunState{}, fmt.Errorf("unexpected windows status probe output: %q", line)
+		return RunState{}, fmt.Errorf("unexpected windows status probe output: %q", strings.TrimSpace(stdout))
 	}
 }
 
@@ -497,20 +499,24 @@ func (w *windowsLauncher) CollectEvidence(ctx context.Context, host config.HostC
 	exitPath := joinWindowsPath(winRunDir, exitFileName)
 	exitPS := fmt.Sprintf(
 		"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "+
-			"if (Test-Path -LiteralPath %s) { ([System.IO.File]::ReadAllText(%s, [System.Text.Encoding]::UTF8)).Trim() }",
+			"if (Test-Path -LiteralPath %s -PathType Leaf) { try { [System.IO.File]::ReadAllText(%s, [System.Text.Encoding]::UTF8) } catch { exit 2 } }",
 		psExpr(exitPath), psExpr(exitPath),
 	)
 	exitRes, err := w.transport.Run(ctx, host, wrapPowerShellCommand(exitPS))
 	if err != nil {
 		return Evidence{}, fmt.Errorf("collect windows agent.exit: %w", err)
 	}
-	if raw := strings.TrimSpace(exitRes.Stdout); raw != "" {
-		if code, perr := parseExitCode(raw); perr == nil {
+	if exitRes.ExitCode != 0 {
+		ev.ExitCode = 0
+		ev.ExitCodeUnknown = true
+		ev.Notes = append(ev.Notes, "exit code unknown: unreadable agent.exit")
+	} else if exitRes.Stdout != "" && strings.Trim(exitRes.Stdout, " \t\r\n") != "" {
+		if code, perr := parseExitCode(exitRes.Stdout); perr == nil {
 			ev.ExitCode = code
 			ev.ExitCodeUnknown = false
 		} else {
 			ev.ExitCodeUnknown = true
-			ev.Notes = append(ev.Notes, fmt.Sprintf("exit code unknown: unparseable agent.exit (%q)", raw))
+			ev.Notes = append(ev.Notes, fmt.Sprintf("exit code unknown: unparseable agent.exit (%q)", exitRes.Stdout))
 		}
 	} else if code, ok := extractTrailingExitLine(logReport); ok {
 		ev.ExitCode = code

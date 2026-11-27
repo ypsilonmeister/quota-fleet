@@ -360,6 +360,18 @@ func TestLinuxExitAndPIDFileWhitespaceValidation(t *testing.T) {
 		{name: "EXIT prefix followed by second line", jobID: 515, content: "EXIT:0\n0\n"},
 		{name: "whitespace only", jobID: 516, content: " \t\n"},
 		{name: "empty file", jobID: 517, content: ""},
+		{name: "NUL after zero", jobID: 518, content: "0\x00\n"},
+		{name: "NUL before zero", jobID: 519, content: "\x000\n"},
+		{name: "NUL without trailing newline", jobID: 521, content: "0\x00"},
+		{name: "NUL splitting digits", jobID: 522, content: "1\x002\n"},
+		{name: "NUL only", jobID: 523, content: "\x00\n"},
+		{name: "NUL after EXIT prefix", jobID: 524, content: "EXIT:0\x00\n"},
+		{name: "EXIT prefix with newline before code", jobID: 525, content: "EXIT:\n0\n"},
+		{name: "EXIT prefix with space before code", jobID: 526, content: "EXIT: 0\n"},
+		{name: "vertical tab trailing zero", jobID: 527, content: "0\x0b\n"},
+		{name: "form feed leading zero", jobID: 528, content: "\x0c0\n"},
+		{name: "unicode NBSP leading zero", jobID: 529, content: "\u00a00\n"},
+		{name: "UTF-8 BOM leading zero", jobID: 530, content: "\xef\xbb\xbf0\n"},
 	}
 	for _, tc := range invalidExitCases {
 		t.Run("invalid_exit/"+tc.name, func(t *testing.T) {
@@ -382,30 +394,84 @@ func TestLinuxExitAndPIDFileWhitespaceValidation(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CollectEvidence: %v", err)
 			}
-			if strings.TrimSpace(tc.content) != "" && !ev.ExitCodeUnknown {
+			if !ev.ExitCodeUnknown {
 				t.Fatalf("CollectEvidence(%q) ExitCodeUnknown = false (ExitCode=%d), want true", tc.content, ev.ExitCode)
 			}
 		})
 	}
 
-	// Multiline / space-separated agent.pid must not concatenate digits into a different PID.
-	myPID := fmt.Sprintf("%d", os.Getpid())
-	if len(myPID) >= 2 {
-		splitPID := myPID[:1] + "\n" + myPID[1:] + "\n"
-		runDir := filepath.Join(workdir, ".fleet", "runs", "520")
+	// Verify bash shell also preserves NUL bytes without collapsing "0\x00\n" to 0.
+	t.Run("invalid_exit/bash_preserves_nul", func(t *testing.T) {
+		bashAdapter := NewSSHAdapter(cfg, SSHAdapterOptions{
+			Transport: NewLocalTransport(LocalTransportOptions{Shell: "bash"}),
+		})
+		runDir := filepath.Join(workdir, ".fleet", "runs", "540")
 		if err := os.MkdirAll(runDir, 0o700); err != nil {
 			t.Fatalf("mkdir %q: %v", runDir, err)
 		}
-		if err := os.WriteFile(filepath.Join(runDir, pidFileName), []byte(splitPID), 0o600); err != nil {
-			t.Fatalf("write split agent.pid: %v", err)
+		if err := os.WriteFile(filepath.Join(runDir, exitFileName), []byte("0\x00\n"), 0o600); err != nil {
+			t.Fatalf("write agent.exit: %v", err)
 		}
-		st, err := a.Status(ctx, &store.Job{ID: 520, Host: "local-linux", Workdir: workdir})
+		job := &store.Job{ID: 540, Host: "local-linux", Workdir: workdir}
+		st, err := bashAdapter.Status(ctx, job)
 		if err != nil {
-			t.Fatalf("Status split pid: %v", err)
+			t.Fatalf("bash Status: %v", err)
 		}
-		if st.State != StateMissing || !strings.Contains(st.Detail, "invalid_pid") {
-			t.Fatalf("Status split pid %q = %+v, want StateMissing(invalid_pid)", splitPID, st)
+		if st.State != StateMissing || !strings.Contains(st.Detail, "invalid_exit_file") {
+			t.Fatalf("bash Status(0\\x00\\n) = %+v, want StateMissing(invalid_exit_file)", st)
 		}
+		ev, err := bashAdapter.CollectEvidence(ctx, job)
+		if err != nil {
+			t.Fatalf("bash CollectEvidence: %v", err)
+		}
+		if !ev.ExitCodeUnknown {
+			t.Fatalf("bash CollectEvidence(0\\x00\\n) ExitCodeUnknown = false (ExitCode=%d), want true", ev.ExitCode)
+		}
+	})
+
+	// Multiline, NUL-corrupted, control-char, leading-zero, or overflow agent.pid must return Missing.
+	myPID := fmt.Sprintf("%d", os.Getpid())
+	invalidPIDCases := []struct {
+		name    string
+		jobID   int64
+		content string
+	}{
+		{name: "NUL after live pid", jobID: 541, content: myPID + "\x00\n"},
+		{name: "vertical tab after live pid", jobID: 542, content: myPID + "\x0b\n"},
+		{name: "leading zero on live pid", jobID: 543, content: "0" + myPID + "\n"},
+		{name: "overflow pid", jobID: 544, content: "99999999999999999999999999999\n"},
+	}
+	if len(myPID) >= 2 {
+		invalidPIDCases = append(invalidPIDCases,
+			struct {
+				name    string
+				jobID   int64
+				content string
+			}{name: "multiline split live pid", jobID: 520, content: myPID[:1] + "\n" + myPID[1:] + "\n"},
+			struct {
+				name    string
+				jobID   int64
+				content string
+			}{name: "NUL split live pid", jobID: 545, content: myPID[:1] + "\x00" + myPID[1:] + "\n"},
+		)
+	}
+	for _, tc := range invalidPIDCases {
+		t.Run("invalid_pid/"+tc.name, func(t *testing.T) {
+			runDir := filepath.Join(workdir, ".fleet", "runs", fmt.Sprintf("%d", tc.jobID))
+			if err := os.MkdirAll(runDir, 0o700); err != nil {
+				t.Fatalf("mkdir %q: %v", runDir, err)
+			}
+			if err := os.WriteFile(filepath.Join(runDir, pidFileName), []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write invalid agent.pid: %v", err)
+			}
+			st, err := a.Status(ctx, &store.Job{ID: tc.jobID, Host: "local-linux", Workdir: workdir})
+			if err != nil {
+				t.Fatalf("Status invalid pid (%s): %v", tc.name, err)
+			}
+			if st.State != StateMissing || !strings.Contains(st.Detail, "invalid_pid") {
+				t.Fatalf("Status invalid pid %q = %+v, want StateMissing(invalid_pid)", tc.content, st)
+			}
+		})
 	}
 }
 
@@ -448,12 +514,20 @@ func TestLinuxUnreadableExitAndPIDFilesReturnMissing(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(exitPath, 0o600) })
 
-		st, err := a.Status(ctx, &store.Job{ID: 531, Host: "local-linux", Workdir: workdir})
+		job := &store.Job{ID: 531, Host: "local-linux", Workdir: workdir}
+		st, err := a.Status(ctx, job)
 		if err != nil {
 			t.Fatalf("Status unreadable agent.exit returned error: %v", err)
 		}
 		if st.State != StateMissing || !strings.Contains(st.Detail, "unreadable_exit_file") {
 			t.Fatalf("Status unreadable agent.exit = %+v, want StateMissing(unreadable_exit_file)", st)
+		}
+		ev, err := a.CollectEvidence(ctx, job)
+		if err != nil {
+			t.Fatalf("CollectEvidence unreadable agent.exit returned error: %v", err)
+		}
+		if !ev.ExitCodeUnknown {
+			t.Fatalf("CollectEvidence unreadable agent.exit ExitCodeUnknown = false (ExitCode=%d), want true", ev.ExitCode)
 		}
 	})
 

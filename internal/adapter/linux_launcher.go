@@ -279,13 +279,13 @@ func (l *linuxLauncher) Status(ctx context.Context, host config.HostConfig, job 
 
 	cmd := fmt.Sprintf(
 		"if [ -f %s ]; then "+
-			"if raw=\"$(cat %s 2>/dev/null)\"; then printf 'EXITED:%%s\\n' \"$raw\"; "+
+			"if { printf 'EXITED:'; cat; } 2>/dev/null < %s; then :; "+
 			"else printf 'MISSING:unreadable_exit_file\\n'; fi; "+
 			"elif [ -f %s ]; then "+
-			"if raw=\"$(cat %s 2>/dev/null)\"; then "+
+			"if raw=\"$(LC_ALL=C tr '\\000' '?' 2>/dev/null < %s)\"; then "+
 			"set -f; IFS=$(printf ' \\t\\r\\nx'); IFS=${IFS%%x}; set -- $raw; "+
 			"if [ \"$#\" -ne 1 ]; then printf 'MISSING:invalid_pid:%%s\\n' \"$*\"; "+
-			"else pid=\"$1\"; case \"$pid\" in ''|*[!0-9]*) printf 'MISSING:invalid_pid:%%s\\n' \"$pid\" ;; "+
+			"else pid=\"$1\"; case \"$pid\" in ''|0*|*[!0123456789]*|??????????*) printf 'MISSING:invalid_pid:%%s\\n' \"$pid\" ;; "+
 			"*) if [ \"$pid\" -gt 0 ] && kill -0 \"$pid\" 2>/dev/null; then printf 'RUNNING:%%s\\n' \"$pid\"; "+
 			"else printf 'MISSING:pid_dead:%%s\\n' \"$pid\"; fi ;; esac; fi; "+
 			"else printf 'MISSING:unreadable_pid_file\\n'; fi; "+
@@ -302,10 +302,10 @@ func (l *linuxLauncher) Status(ctx context.Context, host config.HostConfig, job 
 		return RunState{}, fmt.Errorf("status probe failed (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 
-	line := strings.TrimSpace(res.Stdout)
+	stdout := res.Stdout
 	switch {
-	case strings.HasPrefix(line, "EXITED:"):
-		rawCode := strings.TrimPrefix(line, "EXITED:")
+	case strings.HasPrefix(stdout, "EXITED:"):
+		rawCode := strings.TrimPrefix(stdout, "EXITED:")
 		code, err := parseExitCode(rawCode)
 		if err != nil {
 			return RunState{
@@ -318,20 +318,20 @@ func (l *linuxLauncher) Status(ctx context.Context, host config.HostConfig, job 
 			ExitCode: code,
 			Detail:   fmt.Sprintf("agent.exit=%d", code),
 		}, nil
-	case strings.HasPrefix(line, "RUNNING:"):
-		pid := strings.TrimPrefix(line, "RUNNING:")
+	case strings.HasPrefix(stdout, "RUNNING:"):
+		pid := strings.TrimSpace(strings.TrimPrefix(stdout, "RUNNING:"))
 		return RunState{
 			State:  StateRunning,
 			Detail: "pid=" + pid,
 		}, nil
-	case strings.HasPrefix(line, "MISSING:"):
-		detail := strings.TrimPrefix(line, "MISSING:")
+	case strings.HasPrefix(stdout, "MISSING:"):
+		detail := strings.TrimSpace(strings.TrimPrefix(stdout, "MISSING:"))
 		return RunState{
 			State:  StateMissing,
 			Detail: detail,
 		}, nil
 	default:
-		return RunState{}, fmt.Errorf("unexpected status probe output: %q", line)
+		return RunState{}, fmt.Errorf("unexpected status probe output: %q", strings.TrimSpace(stdout))
 	}
 }
 
@@ -401,19 +401,26 @@ func (l *linuxLauncher) CollectEvidence(ctx context.Context, host config.HostCon
 	}
 	ev.FinalReport = report
 
-	// 4. Read per-job agent.exit if present.
+	// 4. Read per-job agent.exit if present (preserving raw bytes so NUL/control chars cannot collapse).
 	exitPath := joinRemotePath(runDir, exitFileName)
-	exitCmd := fmt.Sprintf("if [ -f %s ]; then cat %s; fi", shellPath(exitPath), shellPath(exitPath))
+	exitCmd := fmt.Sprintf("if [ -f %s ]; then cat 2>/dev/null < %s; else exit 42; fi", shellPath(exitPath), shellPath(exitPath))
 	exitRes, err := l.transport.Run(ctx, host, exitCmd)
 	if err != nil {
 		return Evidence{}, fmt.Errorf("collect agent.exit: %w", err)
 	}
-	if raw := strings.TrimSpace(exitRes.Stdout); raw != "" {
-		if code, perr := parseExitCode(raw); perr == nil {
+	switch {
+	case exitRes.ExitCode == 42:
+		ev.ExitCodeUnknown = true
+		ev.Notes = append(ev.Notes, "exit code unknown: agent.exit not found")
+	case exitRes.ExitCode != 0:
+		ev.ExitCodeUnknown = true
+		ev.Notes = append(ev.Notes, "exit code unknown: unreadable agent.exit")
+	default:
+		if code, perr := parseExitCode(exitRes.Stdout); perr == nil {
 			ev.ExitCode = code
 		} else {
 			ev.ExitCodeUnknown = true
-			ev.Notes = append(ev.Notes, fmt.Sprintf("exit code unknown: unparseable agent.exit (%q)", raw))
+			ev.Notes = append(ev.Notes, fmt.Sprintf("exit code unknown: unparseable agent.exit (%q)", exitRes.Stdout))
 		}
 	}
 
