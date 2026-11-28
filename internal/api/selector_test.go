@@ -255,23 +255,33 @@ func TestSelectorPaceShadow(t *testing.T) {
 
 func TestGateAdmissionPaceShadow(t *testing.T) {
 	now := time.Now()
-	snap := healthySnap(now)
-	for pool, hours := range map[string]int{quota.PoolCodex: 20, quota.PoolAgyGemini: 60} {
-		ps := snap.Pools[pool]
-		reset := now.Add(time.Duration(hours) * time.Hour)
-		ps.WeeklyResetAt = &reset
-		if pool == quota.PoolCodex {
-			short := 3
-			ps.ShortRemainingPercent = &short
-		}
-		snap.Pools[pool] = ps
-	}
-	for _, tc := range []struct{ gate, pace string }{
-		{config.GateModeEnforce, "shadow"},
-		{config.GateModeDryRun, "shadow"},
-		{config.GateModeEnforce, "off"},
+	for _, tc := range []struct {
+		gate, pace string
+		equal      bool
+	}{
+		{config.GateModeEnforce, "shadow", false},
+		{config.GateModeDryRun, "shadow", false},
+		{config.GateModeDryRun, "shadow", true},
+		{config.GateModeEnforce, "off", false},
 	} {
-		t.Run(tc.gate+"/"+tc.pace, func(t *testing.T) {
+		name := tc.gate + "/" + tc.pace
+		if tc.equal {
+			name += "/equal"
+		}
+		t.Run(name, func(t *testing.T) {
+			snap := healthySnap(now)
+			if !tc.equal {
+				for pool, hours := range map[string]int{quota.PoolCodex: 20, quota.PoolAgyGemini: 60} {
+					ps := snap.Pools[pool]
+					reset := now.Add(time.Duration(hours) * time.Hour)
+					ps.WeeklyResetAt = &reset
+					if pool == quota.PoolCodex {
+						short := 3
+						ps.ShortRemainingPercent = &short
+					}
+					snap.Pools[pool] = ps
+				}
+			}
 			var logs bytes.Buffer
 			_, st, ts := newTestServer(t, Options{
 				InstanceID: "pace-gate", Logger: log.New(&logs, "", 0),
@@ -295,8 +305,14 @@ func TestGateAdmissionPaceShadow(t *testing.T) {
 			}
 			reason := decisions[0].Reason
 			diff := "pace_diff current=codex shadow=agy-gemini"
-			if tc.pace == "shadow" {
-				for _, want := range []string{diff, "floored=true weekly_floored=false short_floored=true"} {
+			if tc.equal {
+				if !strings.Contains(reason, "pace_shadow current=codex shadow=codex mode=equal") ||
+					strings.Count(reason, "in_band=true load=0)") != 2 ||
+					strings.Contains(reason, "pace_diff") || strings.Contains(logs.String(), "pace_diff") {
+					t.Errorf("expected equal-mode comparison with two idle candidates and no diff: reason=%q, logs=%s", reason, logs.String())
+				}
+			} else if tc.pace == "shadow" {
+				for _, want := range []string{diff, "floored=true weekly_floored=false short_floored=true in_band=false load=0)"} {
 					if !strings.Contains(reason, want) {
 						t.Errorf("Gate reason %q missing %q", reason, want)
 					}

@@ -719,6 +719,7 @@ func (s *Server) writeCreateJobError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) recordDryRunGateDecision(ctx context.Context, job *store.Job, params store.CreateJobParams, altPools []string, usage *admission.Usage) {
+	usage.ExcludeJobFromGatePaceLoad(job.ID)
 	dec := s.adm.Gate(params, altPools, usage)
 	if dec.Gate == nil {
 		return

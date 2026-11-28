@@ -108,15 +108,21 @@ type Request struct {
 // Usage loads the usage snapshot at most once per request so the Selector and the Gate
 // judge the same data.
 type Usage struct {
-	ctx  context.Context
-	load func() (*quota.Snapshot, error)
-	done bool
-	snap *quota.Snapshot
-	err  error
+	paceExcludedJobID int64
+	ctx               context.Context
+	load              func() (*quota.Snapshot, error)
+	done              bool
+	snap              *quota.Snapshot
+	err               error
 }
 
 // NewUsage returns a lazily loaded snapshot holder for one request.
 func (a *Admission) NewUsage() *Usage { return &Usage{load: a.LoadSnapshot, ctx: context.Background()} }
+
+// ExcludeJobFromGatePaceLoad omits a job already inserted before its dry-run Gate evaluation.
+func (u *Usage) ExcludeJobFromGatePaceLoad(jobID int64) {
+	u.paceExcludedJobID = jobID
+}
 
 // Get returns the snapshot, loading it on the first call.
 func (u *Usage) Get() (*quota.Snapshot, error) {
@@ -405,7 +411,7 @@ func (a *Admission) EvaluateGate(primaryPool string, altPools []string, usage *U
 		}
 	}
 	if eval.Decision == quota.DecisionWouldPass && !eval.Bypassed && a.pace.ShadowEnabled() && snap != nil && a.store != nil {
-		load, err := a.store.ActivePoolLoads(usage.ctx)
+		load, err := a.store.ActivePoolLoadsExcluding(usage.ctx, usage.paceExcludedJobID)
 		if err != nil {
 			if a.logger != nil {
 				a.logger.Printf("gate admission pace shadow load: %v", err)
