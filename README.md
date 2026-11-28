@@ -1,8 +1,97 @@
 # quota-fleet
 
-A design, specification and Go implementation for running a **fleet of coding
-agents on flat-rate subscription quotas**, with a verification pipeline that
-makes their output trustworthy enough to merge.
+quota-fleet is a Go program that queues jobs for **coding-agent CLIs** (such as
+Claude Code and Codex) on machines you own, launches them, checks finished jobs
+against their acceptance criteria, and can hold new jobs while a **flat-rate
+subscription quota** pool is measured as exhausted.
+
+This repository holds the implementation and its design documents, including the
+operating rules for an implement → review → fix pipeline.
+
+![quota-fleet web UI dashboard: job counts by status, quota per pool with one pool exhausted, running jobs, held jobs and recent deliveries](docs/images/ui-dashboard.png)
+
+<sub>The real web UI of a local `quota-fleet serve`, filled with sample data:
+`runtime.adapter: mock` (no agent is launched), made-up jobs and hosts, and a
+synthetic usage snapshot.</sub>
+
+<details>
+<summary>Jobs page, chain view (same sample data)</summary>
+
+![quota-fleet web UI jobs page in chain view, showing parent and child jobs with their status, agent and host](docs/images/ui-jobs.png)
+
+</details>
+
+## How it fits together
+
+```mermaid
+flowchart TD
+    COORD["Coordinator<br/>registers work, prepares merge decisions"]
+    COLL["Quota collector<br/>measures each pool"]
+    GATE["Quota Gate<br/>in front of job creation"]
+    STORE[("Job store<br/>single source of truth")]
+    SIG["Signal file<br/>append-only hints"]
+    DISP["Dispatcher"]
+    LAUNCH["Worker (launcher)<br/>claims queued jobs"]
+    subgraph HOSTS["Worker hosts"]
+        AGENT["Agent CLI"]
+    end
+    SHEP["Shepherd<br/>evaluates and delivers"]
+    NEXT["Pull request,<br/>follow-up job"]
+    REC["Reconciler<br/>recovers or reports stuck work"]
+
+    COORD -->|create| GATE
+    COLL -.->|usage snapshot| GATE
+    GATE -->|queue, or hold until quota recovers| STORE
+    STORE -.->|job entered queued| SIG
+    SIG -.-> DISP
+    DISP -->|wake| LAUNCH
+    LAUNCH -->|claim by compare-and-swap| STORE
+    LAUNCH -->|launch| AGENT
+    AGENT -.->|result| STORE
+    SHEP -->|evaluate finished jobs| STORE
+    SHEP -.-> NEXT
+    REC -->|patrol| STORE
+```
+
+The diagram follows the design in [docs/01](docs/01-architecture.md). **Dashed
+arrows** mark the steps that the `quota-fleet` binary does not do as drawn:
+
+- **Quota collector → Quota Gate:** no collector is included. You supply the
+  snapshot file.
+- **Job store → Signal file → Dispatcher:** the Dispatcher reads pending signals
+  from a table in the SQLite store, appends them to the signal file, and wakes
+  the launcher inside the same process.
+- **Agent CLI → Job store:** the Shepherd collects each finished run's result
+  from the worker host, evaluates it, and records `done` or `failed` in the
+  store.
+- **Shepherd → Pull request, follow-up job:** the Shepherd does neither. A pull
+  request comes from a chain's publish step (an agent job) or the Coordinator,
+  and a follow-up job from the [Chain Driver](docs/22-chain-runs.md) or the
+  Coordinator ([docs/06](docs/06-implementation-design.md) §7-4).
+
+One solid path is conditional: **Coordinator → Quota Gate → Job store**. The
+gate is off by default and holds jobs only with `gate_mode: enforce`, and
+`quota-fleet job create` does not go through it.
+
+## Case study
+
+The design was extracted from a private deployment that develops
+[clipboard-translator](https://github.com/ypsilonmeister/clipboard-translator)
+and shipped its v0.11.0 release. These facts describe that deployment, which
+preceded the Go implementation here ([full case study](docs/05-case-study.md)):
+
+- Between 17 and 19 November 2026, the pipeline processed more than 60 pull
+  requests for that repository. Each was implemented by one agent family,
+  reviewed by another, and merged, or not, by the maintainer.
+- In one night, two chains lost their gate jobs when a provider's short quota
+  window emptied. The coordinator moved the remaining links to a different agent
+  family instead of restarting the tickets. This incident is why the Quota Gate
+  holds jobs instead of letting them fail.
+- The maintainer's hands-on work in that release cycle was choosing an icon, one
+  manual verification on a real device, confirming two semantic decisions on pull
+  requests, merging, and giving the release go.
+
+## Status
 
 > Status: **active implementation**.
 >
