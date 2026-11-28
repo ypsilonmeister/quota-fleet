@@ -22,7 +22,10 @@ The gate has three jobs:
   Schema v1 JSON contract, strict validation (`quota-fleet usage validate`),
   `quota.usage_format: legacy | v1`, and atomic deployment recipe.
 - A pool is **healthy** when both windows have remaining quota above zero.
-  Which window blocked a pool is recorded (`weekly` / `short`).
+  Which window blocked a pool is recorded (`weekly` / `short`). A window
+  whose reset time has already passed does not block a pool, whatever
+  remainder it still reports
+  ([docs/23](23-usage-snapshot.md#expired-windows-reset_at-in-the-past)).
 - If the snapshot is older than the staleness bound (45 minutes in the
   reference deployment), the gate trusts nothing and releases nothing that
   round.

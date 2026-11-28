@@ -328,7 +328,7 @@ func validateV1Snapshot(
 					addDiag(SeverityError, ReasonShortWindowMismatch, name,
 						fmt.Sprintf("pools.%s has short.applicable=false but fleet.yaml requires short_window=true", name))
 				} else if ps.ShortRemainingPercent == nil && ps.EffectiveStatus() == PoolEntryStatusOK && !ps.WeeklyAbsent {
-					if ps.WeeklyRemainingPercent == 0 {
+					if ps.WeeklyRemainingPercent == 0 && !windowExpired(ps.WeeklyResetAt, now) {
 						addDiag(SeverityInfo, "short_window_missing_while_weekly_exhausted", name,
 							fmt.Sprintf("pools.%s has missing short window while weekly=0%% (definitively exhausted)", name))
 					} else {
@@ -349,7 +349,7 @@ func validateV1Snapshot(
 				addDiag(SeverityInfo, "short_applicable_unverified", name,
 					fmt.Sprintf("pools.%s has short.applicable=false (unverified without --config)", name))
 			} else if ps.ShortRemainingPercent == nil && ps.EffectiveStatus() == PoolEntryStatusOK && !ps.WeeklyAbsent {
-				if ps.WeeklyRemainingPercent == 0 {
+				if ps.WeeklyRemainingPercent == 0 && !windowExpired(ps.WeeklyResetAt, now) {
 					addDiag(SeverityInfo, "short_window_missing_while_weekly_exhausted", name,
 						fmt.Sprintf("pools.%s has missing short window while weekly=0%% (definitively exhausted)", name))
 				} else {
@@ -456,7 +456,7 @@ func validateLegacySnapshot(
 			addDiag(SeverityDegraded, "pool_stale", name, fmt.Sprintf("legacy pool %q is marked stale=true", name))
 		}
 		if ps.ShortRemainingPercent == nil {
-			if ps.WeeklyRemainingPercent == 0 {
+			if ps.WeeklyRemainingPercent == 0 && !windowExpired(ps.WeeklyResetAt, now) {
 				addDiag(SeverityInfo, "short_window_missing_while_weekly_exhausted", name,
 					fmt.Sprintf("pool %q has missing short window while weekly=0%%", name))
 			} else {

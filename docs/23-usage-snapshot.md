@@ -129,11 +129,26 @@ This document defines the normalized JSON contract (**Schema v1**, `schema_versi
 | `fleet.yaml` `short_window` | Normalized `short` | Result |
 |---|---|---|
 | `true` (default) | `remaining_percent` in `1..100` | Short window OK |
-| `true` (default) | `remaining_percent == 0` | Exhausted (`blocked_by: 5h` or `short.window`) |
+| `true` (default) | `remaining_percent == 0` | Exhausted (`blocked_by: 5h` or `short.window`), unless the window has [expired](#expired-windows-reset_at-in-the-past) |
 | `true` (default) | Missing (`null` / omitted / `{}` / `remaining_percent: null`) | If `weekly == 0`: **`exhausted` (`weekly`)** (CLI info only, `exit 0`). If `weekly > 0`: **`unknown` (`short_window_missing`)** (`v1 enforce` holds; `usage validate` normal `exit 2`). |
 | `true` (default) | `{"applicable": false}` | Config mismatch: **`unknown` (`short_window_mismatch`)** (`v1 enforce` holds; `usage validate --config` `exit 1`). |
 | `false` | `{"applicable": false}` or missing | Short check exempted (judged by `weekly` only). |
 | `false` | `remaining_percent` in `0..100` | Short check exempted (`usage validate --config` emits advisory warning, `exit 0`). |
+
+In this table `weekly == 0` means a weekly `0%` whose window has not expired. An expired weekly `0%` is treated like `weekly > 0`.
+
+### Expired windows (`reset_at` in the past)
+
+A quota window may not roll over until it is next used (for example, Claude's 5-hour window). Until then the usage source keeps returning the old window: `0%` remaining with a `reset_at` that has already passed. The quota has in fact recovered, and holding on that value would also hold the very job that would start the new window.
+
+**The remaining percentage of a window whose reset time has passed is not used to judge exhaustion.**
+
+- A window is expired when its `reset_at` is **earlier than the evaluation time** (`reset_at < now`). The comparison uses the evaluator's clock (`--now` for `gate check` and `usage validate`), not `measured_at`. A `reset_at` equal to `now` is not expired.
+- It applies to the weekly and the short window **independently**: a pool with an expired weekly `0%` and a running short `0%` is still `exhausted` by the short window.
+- It applies to both `usage_format: legacy` and `v1`, and identically to registration, held-job release, the Selector, `GET /meta` `pool_summaries`, and the health shown by `usage validate` and `gate check`.
+- `reset_at_approx` does not change the rule.
+- Values are not rewritten: `/meta`, summaries, and CLI output still report the measured `remaining_percent` and `reset_at`, so a pool can show `0%` and `healthy` together.
+- It does **not** relax fail-closed handling. A missing (`null` / omitted; in Legacy also empty) or zero-time `reset_at` leaves a `0%` window exhausted; an unparseable `reset_at` is still a parse error (`snapshot_error`); a missing remaining value stays missing; and stale, collector-error, and timestamp checks are unchanged.
 
 ## 4. Timestamps, tolerances, and priority
 
@@ -156,9 +171,9 @@ This document defines the normalized JSON contract (**Schema v1**, `schema_versi
 5. **Rank 5 — Per-pool probe error (`status == "error"`)**: `unknown` / `collector_error`
 6. **Rank 6 — Per-pool stale (`now - measured_at > stale_after`)**: `unknown` / `stale` (`pool_stale`)
 7. **Rank 7 — Short-window config mismatch**: `unknown` / `short_window_mismatch`
-8. **Rank 8 — Weekly exhausted (`weekly.remaining_percent == 0`)**: `exhausted` (`weekly` or `weekly,<short.window>`)
-9. **Rank 9 — Short window missing (`weekly > 0` and `short_window: true`)**: `unknown` / `short_window_missing`
-10. **Rank 10 — Short window exhausted**: `exhausted` (`<short.window>`)
+8. **Rank 8 — Weekly exhausted (`weekly.remaining_percent == 0`, window not expired)**: `exhausted` (`weekly`, or `weekly,<short.window>` when the short window is also exhausted and not expired)
+9. **Rank 9 — Short window missing (weekly not exhausted and `short_window: true`)**: `unknown` / `short_window_missing`
+10. **Rank 10 — Short window exhausted (`short.remaining_percent == 0`, window not expired)**: `exhausted` (`<short.window>`)
 11. **Rank 11 — Healthy**: `healthy`
 
 > **Gate primary reason vs CLI full scan**: Gate evaluation uses ranks 1–11 (with 4a > 4b) for each pool's primary reason and picks the lowest-ranked unknown across candidates (ties broken by candidate declaration order). `quota-fleet usage validate` always performs a **full scan** across file-level and all per-pool checks (never short-circuiting after `snapshot_stale`) and aggregates the exit code by severity (`exit 1` > `exit 2` > `exit 0`).
@@ -205,9 +220,9 @@ quota-fleet usage validate \
 ```
 
 - **Normal diagnostic mode**:
-  - `exit 0`: No hard errors and no operational degradations (weekly `0%` with missing short is informational only).
+  - `exit 0`: No hard errors and no operational degradations (an unexpired weekly `0%` with missing short is informational only).
   - `exit 1`: Hard error (read error, invalid JSON, duplicate key, `format_mismatch`, schema violation, `generated_at > now + 5m`, any pool `measured_at > now + 5m` or `> generated_at + 60s`, `--config` missing measured pool or `short_window_mismatch`, `--reject-older-than` `older_generation` or `generation_conflict`). Always takes precedence over `exit 2`.
-  - `exit 2`: Schema-valid operational degradation (`snapshot_stale`, `pool_stale`, `collector_error`, `short_window_missing` when `weekly > 0`). `--ignore-stale` excludes only `snapshot_stale` and `pool_stale` from triggering `exit 2`.
+  - `exit 2`: Schema-valid operational degradation (`snapshot_stale`, `pool_stale`, `collector_error`, `short_window_missing` when `weekly > 0` or the weekly `0%` has expired). `--ignore-stale` excludes only `snapshot_stale` and `pool_stale` from triggering `exit 2`.
 - **Deployment gate mode (`--check-deploy`)**:
   - `exit 0`: Deployable (zero hard errors). Schema-valid partial failures (`status: "error"`, missing short, stale) are allowed through with warnings (`degraded: true`) so healthy sibling pool updates are not blocked.
   - `exit 1`: Deployment rejected (any hard error, including `--reject-older-than` violations).

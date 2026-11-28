@@ -123,7 +123,7 @@ func evaluatePoolLegacy(pool string, snap *Snapshot, opts EvalOptions) PoolEvalu
 		return eval
 	}
 
-	weeklyExhausted := ps.WeeklyRemainingPercent <= 0
+	weeklyExhausted := ps.weeklyExhaustedAt(now)
 
 	if ps.ShortRemainingPercent == nil {
 		if weeklyExhausted {
@@ -136,7 +136,7 @@ func evaluatePoolLegacy(pool string, snap *Snapshot, opts EvalOptions) PoolEvalu
 		return eval
 	}
 
-	shortExhausted := *ps.ShortRemainingPercent <= 0
+	shortExhausted := ps.shortExhaustedAt(now)
 	switch {
 	case weeklyExhausted && shortExhausted:
 		eval.Status = PoolExhausted
@@ -296,10 +296,10 @@ func evaluatePoolV1(pool string, snap *Snapshot, opts EvalOptions) PoolEvaluatio
 	}
 
 	// Rank 8: weekly exhausted (even when short window is missing).
-	weeklyExhausted := !ps.WeeklyAbsent && ps.WeeklyRemainingPercent <= 0
+	weeklyExhausted := !ps.WeeklyAbsent && ps.weeklyExhaustedAt(now)
 	if weeklyExhausted {
 		eval.Status = PoolExhausted
-		if shortWindowEnabled && !shortNotApplicable && ps.ShortRemainingPercent != nil && *ps.ShortRemainingPercent <= 0 {
+		if shortWindowEnabled && !shortNotApplicable && ps.shortExhaustedAt(now) {
 			eval.BlockedBy = "weekly," + ps.EffectiveShortWindow()
 		} else {
 			eval.BlockedBy = BlockedByWeekly
@@ -315,7 +315,7 @@ func evaluatePoolV1(pool string, snap *Snapshot, opts EvalOptions) PoolEvaluatio
 	}
 
 	// Rank 10: short window exhausted.
-	if shortWindowEnabled && ps.ShortRemainingPercent != nil && *ps.ShortRemainingPercent <= 0 {
+	if shortWindowEnabled && ps.shortExhaustedAt(now) {
 		eval.Status = PoolExhausted
 		eval.BlockedBy = ps.EffectiveShortWindow()
 		return eval

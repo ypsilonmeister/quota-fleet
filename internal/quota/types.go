@@ -119,6 +119,26 @@ func (p PoolSnapshot) EffectiveShortWindow() string {
 	return p.ShortWindow
 }
 
+// windowExpired reports whether a window's reset time has already passed at now. The
+// remaining percentage of such a window is a lapsed value: sources may keep returning it
+// until the window is next used, so it is not a reason to treat the pool as exhausted
+// (docs/23 §3). An unknown (nil or zero) reset time never expires a window.
+func windowExpired(resetAt *time.Time, now time.Time) bool {
+	return resetAt != nil && !resetAt.IsZero() && resetAt.Before(now)
+}
+
+// weeklyExhaustedAt reports whether the weekly window exhausts the pool at now.
+// Callers handle WeeklyAbsent.
+func (p PoolSnapshot) weeklyExhaustedAt(now time.Time) bool {
+	return p.WeeklyRemainingPercent <= 0 && !windowExpired(p.WeeklyResetAt, now)
+}
+
+// shortExhaustedAt reports whether the short window exhausts the pool at now.
+// A missing short value is not "exhausted"; callers handle it separately.
+func (p PoolSnapshot) shortExhaustedAt(now time.Time) bool {
+	return p.ShortRemainingPercent != nil && *p.ShortRemainingPercent <= 0 && !windowExpired(p.ShortResetAt, now)
+}
+
 // Snapshot is a normalized collection of pool measurements taken at MeasuredAt.
 type Snapshot struct {
 	Format        string                  `json:"format,omitempty"`
