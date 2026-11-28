@@ -49,6 +49,19 @@ BEGIN
     SELECT RAISE(ABORT, 'job title is immutable');
 END;
 
+CREATE TABLE IF NOT EXISTS pool_cooldowns (
+    pool TEXT PRIMARY KEY,
+    active_until TEXT NOT NULL,
+    triggered_at TEXT NOT NULL,
+    consecutive_hits INTEGER NOT NULL DEFAULT 1,
+    last_job_id INTEGER NULL REFERENCES jobs(id) ON DELETE SET NULL,
+    last_agent TEXT NOT NULL DEFAULT '',
+    last_pattern TEXT NOT NULL DEFAULT '',
+    cleared_at TEXT NULL,
+    cleared_reason TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,

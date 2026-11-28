@@ -6,6 +6,7 @@ package selector
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 )
@@ -199,6 +200,7 @@ func Select(in Input) Result {
 		anyUnmeas bool
 
 		exhaustedIdx = -1
+		coolingCount int
 	)
 	for i := range cands {
 		c := cands[i]
@@ -215,6 +217,11 @@ func Select(in Input) Result {
 			if firstLive == nil {
 				firstLive = &cands[i]
 			}
+		case quota.PoolCooldown:
+			coolingCount++
+			noteOf[i] = len(notes)
+			excluded[len(notes)] = fmt.Sprintf("%s: cooldown(until=%s)", c.Pool, ev.Cooldown.ActiveUntil.Format(time.RFC3339Nano))
+			notes = append(notes, excluded[len(notes)]+", excluded")
 		case quota.PoolExhausted:
 			noteOf[i] = len(notes)
 			excluded[len(notes)] = fmt.Sprintf("%s: exhausted(%s)", c.Pool, ev.BlockedBy)
@@ -261,7 +268,10 @@ func Select(in Input) Result {
 			Reason:    fmt.Sprintf("%s; FALLBACK to deterministic default order (%s): chose %s/%s on pool %s; %s", head, kind, firstLive.Agent, firstLive.Model, firstLive.Pool, strings.Join(notes, ", ")),
 		}
 	}
-	if allUnmeas {
+	if allUnmeas || coolingCount > 0 && exhaustedIdx < 0 {
+		if coolingCount > 0 {
+			return Result{Abstain: true, Reason: fmt.Sprintf("%s; no selectable pool; %s", head, strings.Join(notes, ", "))}
+		}
 		// docs/10 §1: unmeasured pools are never candidates. Abstain instead of adopting one.
 		// An explicit or default pool may still be executed, so don't call any of them "excluded".
 		for i := range cands {

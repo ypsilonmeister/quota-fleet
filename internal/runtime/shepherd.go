@@ -20,6 +20,7 @@ const maxLastErrorLogBytes = 512
 
 // ShepherdOptions configures a Shepherd.
 type ShepherdOptions struct {
+	Config         *config.Config
 	Store          *store.Store
 	Adapter        adapter.Adapter
 	Evaluator      evaluator.Evaluator
@@ -38,6 +39,7 @@ type evalFailureState struct {
 // Shepherd periodically inspects claimed jobs, evaluates exited runs, transitions them
 // to done or failed, delivers results via Notifier, and signals Launcher when slots open.
 type Shepherd struct {
+	config         *config.Config
 	store          *store.Store
 	adapter        adapter.Adapter
 	evaluator      evaluator.Evaluator
@@ -70,6 +72,7 @@ func NewShepherd(opts ShepherdOptions) *Shepherd {
 		logger = log.Default()
 	}
 	return &Shepherd{
+		config:         opts.Config,
 		store:          opts.Store,
 		adapter:        opts.Adapter,
 		evaluator:      opts.Evaluator,
@@ -225,7 +228,7 @@ func (s *Shepherd) finishExitedJobFrom(ctx context.Context, job *store.Job, stat
 		s.clearEvalFailure(job.ID)
 		reason, resultText := formatNonZeroExitFailure(state.ExitCode, ev.FinalReport)
 		resultText = appendRecoveryNote(resultText, source)
-		res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
+		res, err := s.failExited(ctx, job, state, ev, false, reason, resultText)
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
 				// Lost ownership; stop before delivery per docs/02-job-model.md.
@@ -296,7 +299,7 @@ func (s *Shepherd) finishExitedJobFrom(ctx context.Context, job *store.Job, stat
 				s.logger.Printf("%s completed job #%d (promoted=%v)", source, job.ID, res.PromotedChildIDs)
 			} else {
 				reason := evalRes.FailSummary()
-				res, err := s.store.FailWithResult(ctx, job.ID, job.ClaimedBy, reason, resultText)
+				res, err := s.failExited(ctx, job, state, ev, true, reason, resultText)
 				if err != nil {
 					if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrTokenMismatch) {
 						return nil

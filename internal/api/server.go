@@ -298,6 +298,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 		chains:           opts.Chains,
 	}
 	s.adm = admission.New(admission.Options{
+		Store:        s.store,
 		GateMode:     gateMode,
 		SelectorMode: selectorMode,
 		Pools:        opts.Pools,
@@ -335,6 +336,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 	mux.HandleFunc("GET /status", s.requireScope(config.ScopeRead, s.handleStatus))
 	mux.HandleFunc("GET /meta", s.requireScope(config.ScopeRead, s.handleMeta))
 	mux.HandleFunc("GET /deliveries", s.requireScope(config.ScopeRead, s.handleDeliveries))
+	mux.HandleFunc("DELETE /gate/cooldowns/{pool}", s.requireScope(config.ScopeOperate, s.handleClearCooldown))
 	mux.HandleFunc("GET /gate/held", s.requireScope(config.ScopeRead, s.handleListHeldJobs))
 	mux.HandleFunc("POST /gate/held/{id}/release", s.requireScope(config.ScopeOperate, s.handleReleaseHeldJob))
 	mux.HandleFunc("DELETE /gate/held/{id}", s.requireScope(config.ScopeOperate, s.handleCancelHeldJob))
@@ -1240,7 +1242,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var cooldowns []CooldownSummaryDTO
+	if s.store.CooldownsEnabled() {
+		opts, err := s.cooldownEvaluation(r.Context(), s.loadSnapshotForMeta())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, c := range opts.Cooldowns {
+			if c.Active(opts.Now) {
+				item := cooldownSummary(c, opts.Now)
+				item.Pool = c.Pool
+				cooldowns = append(cooldowns, item)
+			}
+		}
+		sort.Slice(cooldowns, func(i, j int) bool { return cooldowns[i].Pool < cooldowns[j].Pool })
+	}
 	writeJSON(w, http.StatusOK, StatusResponse{
+		Cooldowns:  cooldowns,
 		InstanceID: instanceID,
 		Counts:     out,
 		Total:      total,
@@ -1262,11 +1281,10 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		snap = s.loadSnapshotForMeta()
 	}
 
-	evalOpts := quota.EvalOptions{
-		Now:        s.nowFn(),
-		StaleAfter: s.quotaStaleAfter,
-		Pools:      s.pools,
-		Format:     s.quotaUsageFormat,
+	evalOpts, err := s.cooldownEvaluation(r.Context(), snap)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	summaries := make([]PoolSummaryDTO, 0, len(poolNames))
 	for _, name := range poolNames {
@@ -1278,6 +1296,11 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			BlockedBy:  ev.BlockedBy,
 			Reason:     ev.Reason,
 		}
+		if c := ev.Cooldown; c != nil {
+			summary.Cooldown = &CooldownDTO{CooldownSummaryDTO: cooldownSummary(*c, evalOpts.Now),
+				Active: true, TriggeredAt: c.TriggeredAt, LastAgent: c.LastAgent, LastPattern: c.LastPattern}
+		}
+
 		if ev.Snapshot != nil {
 			if !ev.Snapshot.WeeklyAbsent {
 				w := ev.Snapshot.WeeklyRemainingPercent
@@ -1343,18 +1366,19 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, MetaResponse{
-		Hosts:         hosts,
-		Agents:        agents,
-		HostAgents:    hostAgents,
-		Models:        models,
-		Pools:         poolNames,
-		PoolRules:     poolRules,
-		GateMode:      s.gateMode,
-		SelectorMode:  s.selectorMode,
-		EvaluatorMode: s.evaluatorMode,
-		ReviewGate:    s.reviewGateMeta(),
-		PoolSummaries: summaries,
-		Scopes:        scopes,
+		CooldownEnabled: s.cfg != nil && s.cfg.HasCooldown(),
+		Hosts:           hosts,
+		Agents:          agents,
+		HostAgents:      hostAgents,
+		Models:          models,
+		Pools:           poolNames,
+		PoolRules:       poolRules,
+		GateMode:        s.gateMode,
+		SelectorMode:    s.selectorMode,
+		EvaluatorMode:   s.evaluatorMode,
+		ReviewGate:      s.reviewGateMeta(),
+		PoolSummaries:   summaries,
+		Scopes:          scopes,
 	})
 }
 
@@ -1665,4 +1689,32 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, ErrorResponse{Error: message})
+}
+
+func cooldownSummary(c quota.CooldownState, now time.Time) CooldownSummaryDTO {
+	return CooldownSummaryDTO{Until: c.ActiveUntil, RemainingSeconds: int64(c.ActiveUntil.Sub(now).Seconds()),
+		ConsecutiveHits: c.ConsecutiveHits, LastJobID: c.LastJobID}
+}
+
+func (s *Server) cooldownEvaluation(ctx context.Context, snap *quota.Snapshot) (quota.EvalOptions, error) {
+	opts := quota.EvalOptions{Now: s.nowFn(), StaleAfter: s.quotaStaleAfter, Pools: s.pools, Format: s.quotaUsageFormat}
+	err := s.store.LoadCooldowns(ctx, snap, &opts)
+	return opts, err
+}
+
+func (s *Server) handleClearCooldown(w http.ResponseWriter, r *http.Request) {
+	pool := r.PathValue("pool")
+	if _, ok := s.pools[pool]; !ok {
+		writeError(w, http.StatusNotFound, "pool is not configured")
+		return
+	}
+	cleared, err := s.store.ClearCooldown(r.Context(), pool)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if notifier, ok := s.gateReleaser.(interface{ NotifyLauncher() }); cleared && ok {
+		notifier.NotifyLauncher()
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

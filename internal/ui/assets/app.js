@@ -1059,11 +1059,25 @@
     const label = value || "-";
     return el("span", {
       className: "badge badge-" + String(label).replace(/[^a-zA-Z0-9_-]/g, ""),
-      text: label
+      text: label === "cooldown" ? L("cooldown.badge") : label
     });
   }
 
-  function formatTime(iso) {
+
+  function jobStatusNodes(job) {
+    const nodes = [statusBadge(job.status)];
+    if (job.status !== "queued" || !state.meta || state.meta.gate_mode !== "enforce") return nodes;
+    const pool = job.pool || derivePoolForSelection(state.meta, job.agent, job.model);
+    const summary = (state.meta.pool_summaries || []).find(function (ps) {
+      return ps.pool === pool && ps.cooldown && ps.cooldown.active;
+    });
+    if (summary && Date.parse(summary.cooldown.until) > Date.now()) {
+      nodes.push(el("div", { className: "small muted", text: L("cooldown.queued", { until: formatTime(summary.cooldown.until) }) }));
+    }
+    return nodes;
+  }
+
+function formatTime(iso) {
     if (!iso) {
       return "-";
     }
@@ -1467,11 +1481,13 @@
       const poolCards = state.meta.pool_summaries.map(function (ps) {
         const lines = [];
         if (ps.unmeasured) {
-          lines.push(el("div", { className: "small muted", text: L("dashboard.unmeasured") }));
-          lines.push(el("div", { className: "pool-resets small" }, [
-            el("span", { className: "pool-reset-label", text: L("dashboard.resetLabel") }),
-            el("span", { className: "pool-reset-item is-missing", text: L("dashboard.resetNone") })
-          ]));
+          if (ps.status !== "cooldown") {
+            lines.push(el("div", { className: "small muted", text: L("dashboard.unmeasured") }));
+            lines.push(el("div", { className: "pool-resets small" }, [
+              el("span", { className: "pool-reset-label", text: L("dashboard.resetLabel") }),
+              el("span", { className: "pool-reset-item is-missing", text: L("dashboard.resetNone") })
+            ]));
+          }
         } else {
           if (ps.weekly_remaining_percent !== undefined && ps.weekly_remaining_percent !== null) {
             lines.push(el("div", { className: "small", text: L("dashboard.weeklyRemaining", { percent: ps.weekly_remaining_percent }) }));
@@ -1503,7 +1519,48 @@
             ]));
           }
         }
-        if (ps.reason) {
+        if (ps.cooldown && ps.cooldown.active) {
+          const cd = ps.cooldown;
+          lines.push(el("div", { className: "small", text: function () {
+            return L("cooldown.until", {
+              until: formatTime(cd.until),
+              minutes: Math.max(0, Math.ceil((Date.parse(cd.until) - Date.now()) / 60000))
+            });
+          } }));
+          const details = [L("cooldown.hits", { hits: cd.consecutive_hits })];
+          if (cd.last_job_id) {
+            details.push(" · ", navLink("/ui/jobs/" + cd.last_job_id, "#" + cd.last_job_id, "mono"));
+          }
+          lines.push(el("div", { className: "small" }, details));
+          if ((state.meta.scopes || []).includes("operate")) {
+            let clearing = false;
+            const button = el("button", {
+              type: "button",
+              className: "btn btn-sm",
+              text: L("cooldown.clear"),
+              onClick: async function () {
+                if (clearing || !window.confirm(t("cooldown.confirm", { pool: ps.pool }))) return;
+                clearing = true;
+                button.setAttribute("aria-disabled", "true");
+                try {
+                  const response = await apiFetch("/gate/cooldowns/" + encodeURIComponent(ps.pool), { method: "DELETE" });
+                  if (!response.ok) {
+                    showBanner("error", errorMessageFromResp(response, "cooldown.clearFailed"));
+                    return;
+                  }
+                  if (location.pathname === "/ui" || location.pathname === "/ui/") await renderDashboard();
+                } catch (_) {
+                  showBanner("error", L("cooldown.clearFailed"));
+                } finally {
+                  clearing = false;
+                  button.removeAttribute("aria-disabled");
+                }
+              }
+            });
+            lines.push(button);
+          }
+        }
+        if (ps.reason && ps.status !== "cooldown") {
           lines.push(el("div", { className: "small muted", text: ps.reason }));
         }
         return el("div", { className: "pool-card" }, [
@@ -1594,7 +1651,7 @@
       return el("tr", null, [
         el("td", { className: "mono" }, [navLink("/ui/jobs/" + j.id, "#" + j.id)]),
         el("td", null, [navLink("/ui/jobs/" + j.id, j.title || L("common.untitled"))]),
-        el("td", null, [statusBadge(j.status)]),
+        el("td", null, jobStatusNodes(j)),
         el("td", { className: "mono", text: agentHost }),
         el("td", { className: "mono small muted", text: formatTime(j.created_at) }),
         el("td", null, [parentCell])
@@ -1674,7 +1731,7 @@
 
         rows.push(el("tr", { className: item.isRoot ? "chain-root-row" : "chain-child-row" }, [
           el("td", null, [el("div", { className: "chain-node-cell" }, cellChildren)]),
-          el("td", null, [statusBadge(j.status)]),
+          el("td", null, jobStatusNodes(j)),
           el("td", { className: "mono", text: agentHost }),
           el("td", { className: "mono small muted", text: formatTime(j.created_at) })
         ]));
@@ -1755,7 +1812,7 @@
 
       const results = await Promise.all([
         apiFetch("/status"),
-        state.meta ? Promise.resolve({ ok: true, data: state.meta }) : apiFetch("/meta"),
+        apiFetch("/meta"),
         ...statusFetches
       ]);
       statusRes = results[0];
@@ -1786,7 +1843,7 @@
 
       const results = await Promise.all([
         apiFetch("/status"),
-        state.meta ? Promise.resolve({ ok: true, data: state.meta }) : apiFetch("/meta"),
+        apiFetch("/meta"),
         apiFetch("/jobs?" + flatParams.toString())
       ]);
       statusRes = results[0];
@@ -2155,7 +2212,8 @@
 
     setLoading(L("common.jobLabel", { id: jobID }));
 
-    const jobRes = await apiFetch("/jobs/" + jobID);
+    const [jobRes, metaRes] = await Promise.all([apiFetch("/jobs/" + jobID), apiFetch("/meta")]);
+    if (metaRes.ok) state.meta = metaRes.data;
     if (!jobRes.ok) {
       throw i18nError(errorMessageFromResp(jobRes, "detail.fetchFailed", { id: jobID }));
     }
@@ -2196,7 +2254,7 @@
       : "-";
 
     const metaGrid = el("div", { className: "kv-grid" }, [
-      kv(L("column.status"), statusBadge(job.status)),
+      kv(L("column.status"), el("div", null, jobStatusNodes(job))),
       kv(L("field.requestID"), el("span", { className: "mono", text: job.request_id || "-" })),
       kv(L("field.agent"), job.agent),
       kv(L("field.host"), job.host),

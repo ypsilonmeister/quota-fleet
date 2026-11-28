@@ -25,6 +25,7 @@ func newTestServer(t *testing.T, opts Options) (*Server, *store.Store, *httptest
 	dbPath := filepath.Join(t.TempDir(), "fleet.db")
 	st, err := store.Open(context.Background(), dbPath, store.Options{
 		InstanceID: opts.InstanceID,
+		Config:     opts.Config,
 	})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)

@@ -16,15 +16,16 @@ import (
 
 // GateCheckerOptions configures the resident Quota Gate release loop and manual release helper.
 type GateCheckerOptions struct {
-	Store       *store.Store
-	GateMode    string
-	UsageFile   string
-	UsageFormat string
-	StaleAfter  time.Duration
-	Pools       map[string]config.PoolConfig
-	Interval    time.Duration
-	Now         func() time.Time
-	Logger      *log.Logger
+	LauncherNotify chan<- struct{}
+	Store          *store.Store
+	GateMode       string
+	UsageFile      string
+	UsageFormat    string
+	StaleAfter     time.Duration
+	Pools          map[string]config.PoolConfig
+	Interval       time.Duration
+	Now            func() time.Time
+	Logger         *log.Logger
 
 	// SnapshotLoader optionally overrides loading usage snapshots from UsageFile (useful in tests).
 	SnapshotLoader func() (*quota.Snapshot, error)
@@ -45,6 +46,7 @@ type ReleaseResult struct {
 // held job whose candidate pools (pool + alt_pools) have a healthy pool, selecting the one
 // with the soonest weekly reset.
 type GateChecker struct {
+	launcherNotify chan<- struct{}
 	store          *store.Store
 	gateMode       string
 	usageFile      string
@@ -87,6 +89,7 @@ func NewGateChecker(opts GateCheckerOptions) *GateChecker {
 		logger = log.Default()
 	}
 	return &GateChecker{
+		launcherNotify: opts.LauncherNotify,
 		store:          opts.Store,
 		gateMode:       mode,
 		usageFile:      strings.TrimSpace(opts.UsageFile),
@@ -127,7 +130,7 @@ func (g *GateChecker) Run(ctx context.Context) error {
 }
 
 // CheckOnce scans active held_jobs and releases any whose candidate pools are now healthy.
-// When no held jobs exist, it returns immediately without reading the usage snapshot file.
+// With cooldown enabled it also checks for snapshot recovery and wakes the launcher.
 func (g *GateChecker) CheckOnce(ctx context.Context) error {
 	if !g.Enabled() {
 		return nil
@@ -139,6 +142,21 @@ func (g *GateChecker) CheckOnce(ctx context.Context) error {
 		cursor   string
 		seenIDs  = make(map[string]struct{})
 	)
+	if g.store.CooldownsEnabled() {
+		if g.usageFile != "" || g.snapshotLoader != nil {
+			snap, snapErr = g.loadSnapshot()
+			snapRead = true
+		}
+		opts := quota.EvalOptions{Now: g.now(), Pools: g.pools, StaleAfter: g.staleAfter, Format: g.usageFormat}
+		if snapErr != nil {
+			snap = nil
+		}
+		if err := g.store.LoadCooldowns(ctx, snap, &opts); err != nil {
+			return err
+		}
+		defer g.NotifyLauncher()
+	}
+
 	for {
 		page, err := g.store.ListHeldJobsPage(ctx, store.ListHeldJobsFilter{
 			Status: store.HeldStatusHeld,
@@ -215,6 +233,15 @@ func (g *GateChecker) shouldSkipSnapshotForHeld(held *store.HeldJob) bool {
 		return true
 	}
 	primary := strings.TrimSpace(held.Pool)
+	if g.store.CooldownsEnabled() && g.isUnmeasured(primary) {
+		if _, enabled := g.store.CooldownPolicy(primary); enabled {
+			for _, alt := range held.AltPools {
+				if p, ok := g.pools[strings.TrimSpace(alt)]; ok && !p.Unmeasured {
+					return false
+				}
+			}
+		}
+	}
 	if g.usageFormat != config.UsageFormatV1 {
 		return g.isUnmeasured(primary)
 	}
@@ -279,8 +306,15 @@ func (g *GateChecker) tryReleaseHeld(
 		CheckPoolConfig: g.usageFormat == config.UsageFormatV1,
 		HeldRelease:     g.usageFormat == config.UsageFormatV1,
 	}
-	eval := quota.EvaluateGate(held.Pool, held.AltPools, snap, opts)
 	if snapErr != nil {
+		snap = nil
+	}
+	if err := g.store.LoadCooldowns(ctx, snap, &opts); err != nil {
+		return nil, err
+	}
+
+	eval := quota.EvaluateGate(held.Pool, held.AltPools, snap, opts)
+	if snapErr != nil && eval.BlockedBy != "cooldown" {
 		if !eval.Bypassed {
 			if g.usageFormat == config.UsageFormatV1 {
 				if eval.Reason != quota.ReasonPoolNotConfigured && eval.Reason != quota.ReasonNoCandidatePools {
@@ -345,6 +379,9 @@ func (g *GateChecker) tryReleaseHeld(
 		}
 		if out != nil && out.Held != nil {
 			res.Held = out.Held
+		}
+		if errors.Is(err, store.ErrCooldownBlocked) {
+			return res, nil
 		}
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
 			return res, err
@@ -446,6 +483,13 @@ func (g *GateChecker) isUnmeasured(pool string) bool {
 func formatNotReleasableReason(eval quota.GateEvaluation, staleAfter time.Duration) string {
 	switch eval.Decision {
 	case quota.DecisionWouldHold:
+		if eval.BlockedBy == "cooldown" {
+			for _, p := range eval.Pools {
+				if p.Status == quota.PoolCooldown {
+					return fmt.Sprintf("pool %s is in cooldown until %s (remaining %s); clear cooldown to force release", p.Pool, p.Cooldown.ActiveUntil.Format(time.RFC3339Nano), p.Cooldown.ActiveUntil.Sub(eval.DecidedAt).Round(time.Second))
+				}
+			}
+		}
 		if eval.BlockedBy != "" {
 			return fmt.Sprintf("all candidate pools exhausted (blocked_by=%s)", eval.BlockedBy)
 		}
@@ -461,5 +505,12 @@ func formatNotReleasableReason(eval quota.GateEvaluation, staleAfter time.Durati
 		return "pool status unknown"
 	default:
 		return fmt.Sprintf("not releasable (decision=%s)", eval.Decision)
+	}
+}
+
+func (g *GateChecker) NotifyLauncher() {
+	select {
+	case g.launcherNotify <- struct{}{}:
+	default:
 	}
 }

@@ -87,7 +87,11 @@ func runServeContext(ctx context.Context, args []string, stdout, stderr io.Write
 		return 1
 	}
 
-	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: cfg.InstanceID})
+	if cfg.HasCooldown() && cfg.Quota.EffectiveGateMode() == config.GateModeOff {
+		fmt.Fprintln(stderr, "WARNING: quota cooldown only logs detections while gate_mode is off")
+	}
+
+	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: cfg.InstanceID, Config: cfg})
 	if err != nil {
 		fmt.Fprintf(stderr, "open store %q: %v\n", dbPath, err)
 		return 1
@@ -459,3 +463,5 @@ func sortedMapKeys[V any](m map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+func (a gateReleaserAdapter) NotifyLauncher() { a.checker.NotifyLauncher() }

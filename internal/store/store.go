@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/config"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -26,6 +28,7 @@ const (
 
 // Options configures Store behavior on Open.
 type Options struct {
+	Config *config.Config
 	// BusyTimeoutMS sets PRAGMA busy_timeout in milliseconds. Defaults to 5000.
 	BusyTimeoutMS int
 	// InstanceID is recorded into signal_outbox.env when emitting signals.
@@ -36,6 +39,7 @@ type Options struct {
 
 // Store provides transactional, CAS-based persistence for quota-fleet over SQLite.
 type Store struct {
+	config     *config.Config
 	writeDB    *sql.DB
 	readDB     *sql.DB
 	sharedDB   bool
@@ -159,6 +163,7 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 	}
 
 	return &Store{
+		config:     opts.Config,
 		writeDB:    writeDB,
 		readDB:     readDB,
 		sharedDB:   shared,
@@ -483,13 +488,8 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 			return nil
 		}
 
-		var candidateID int64
-		err := conn.QueryRowContext(ctx, `
-			SELECT id FROM jobs
-			WHERE status = 'queued'
-			ORDER BY created_at ASC, id ASC
-			LIMIT 1
-		`).Scan(&candidateID)
+		now := time.Now().UTC()
+		candidateID, err := s.claimCandidate(ctx, conn, now, 0)
 		if errors.Is(err, sql.ErrNoRows) {
 			claimed = nil
 			return nil
@@ -502,7 +502,7 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 		if err != nil {
 			return fmt.Errorf("generate claim token: %w", err)
 		}
-		nowStr := formatTime(time.Now().UTC())
+		nowStr := formatTime(now)
 
 		res, err := conn.ExecContext(ctx, `
 			UPDATE jobs
@@ -576,11 +576,19 @@ func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Jo
 			return nil
 		}
 
+		now := time.Now().UTC()
+		if _, err := s.claimCandidate(ctx, conn, now, jobID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+
 		token, err := randomHex(16)
 		if err != nil {
 			return fmt.Errorf("generate claim token: %w", err)
 		}
-		nowStr := formatTime(time.Now().UTC())
+		nowStr := formatTime(now)
 
 		res, err := conn.ExecContext(ctx, `
 			UPDATE jobs
@@ -697,6 +705,20 @@ func (s *Store) complete(ctx context.Context, jobID int64, claimToken, resultTex
 		if err != nil {
 			return err
 		}
+		if s.CooldownsEnabled() && job.ClaimedAt != nil {
+			pool := s.cooldownPool(job.Pool, job.Agent, job.Model)
+			if _, enabled := s.CooldownPolicy(pool); enabled {
+				c, err := scanCooldown(conn.QueryRowContext(ctx, "SELECT "+cooldownColumns+" FROM pool_cooldowns WHERE pool=? AND cleared_at IS NULL", pool))
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				if err == nil && job.ClaimedAt.After(c.TriggeredAt) {
+					if _, err := clearCooldown(ctx, conn, pool, "success", time.Now(), ""); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		out.Job = job
 		return nil
 	})
@@ -716,10 +738,16 @@ func (s *Store) Fail(ctx context.Context, jobID int64, claimToken, reason string
 // last_error and result_text (for example, per-criterion evaluation details), and
 // recursively cancels all waiting descendants.
 func (s *Store) FailWithResult(ctx context.Context, jobID int64, claimToken, reason, resultText string) (*FailResult, error) {
+	return s.FailWithCooldown(ctx, jobID, claimToken, reason, resultText, "")
+}
+
+func (s *Store) FailWithCooldown(ctx context.Context, jobID int64, claimToken, reason, resultText, pattern string) (*FailResult, error) {
 	var out FailResult
 
 	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
-		nowStr := formatTime(time.Now().UTC())
+		out = FailResult{}
+		now := time.Now().UTC()
+		nowStr := formatTime(now)
 
 		res, err := conn.ExecContext(ctx, `
 			UPDATE jobs
@@ -757,6 +785,24 @@ func (s *Store) FailWithResult(ctx context.Context, jobID int64, claimToken, rea
 		if err != nil {
 			return err
 		}
+		if pattern != "" && s.CooldownsEnabled() {
+			c, started, err := s.recordCooldown(ctx, conn, job, pattern, now)
+			if err != nil {
+				return err
+			}
+			if c != nil {
+				note := " [" + c.Reason() + "]"
+				job.LastError += note
+				job.ResultText += note
+				if _, err := conn.ExecContext(ctx, `UPDATE jobs SET last_error=?, result_text=? WHERE id=?`, job.LastError, job.ResultText, jobID); err != nil {
+					return err
+				}
+			}
+			if started {
+				out.Cooldown = c
+			}
+		}
+
 		out.Job = job
 		return nil
 	})

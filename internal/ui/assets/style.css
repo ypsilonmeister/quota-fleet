@@ -1093,6 +1093,7 @@ html[data-direction="ledger"] .badge-draft::before {
   border-color: var(--danger-border);
 }
 
+.badge-cooldown,
 .badge-cancelled,
 .badge-unknown,
 .badge-stale,

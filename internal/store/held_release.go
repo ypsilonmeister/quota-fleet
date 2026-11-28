@@ -108,6 +108,13 @@ func (s *Store) ReleaseHeld(ctx context.Context, p ReleaseHeldParams) (*ReleaseH
 		if held.Status != HeldStatusHeld {
 			return fmt.Errorf("%w: held job %s is %s (expected held)", ErrConflict, held.ID, held.Status)
 		}
+		blocked, err := s.blockedCooldownPools(ctx, conn, time.Now().UTC(), true)
+		if err != nil {
+			return err
+		}
+		if reason := blocked[strings.TrimSpace(p.SelectedPool)]; reason != "" {
+			return fmt.Errorf("%w: %s", ErrCooldownBlocked, reason)
+		}
 		nowStr := formatTime(time.Now().UTC())
 
 		var snap *ChainSnapshot
