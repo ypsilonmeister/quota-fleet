@@ -185,12 +185,12 @@ func New(opts Options) (*Runtime, error) {
 		GetJob:       opts.Store.GetJob,
 		Logger:       logger,
 	})
-	// Issue #56: requeued jobs pass the Gate again before they are claimed.
-	if opts.Config.HasRequeue() {
-		opts.Store.SetRequeueGate(NewRequeueGate(adm, logger))
-		for _, w := range opts.Config.RequeueWarnings() {
-			logger.Printf("WARNING: %s", w)
-		}
+	// Issue #56: requeued jobs pass the Gate again before they are claimed. The Gate is
+	// installed unconditionally: jobs requeued earlier stay in the queue even after requeue
+	// is switched off, and they must not bypass the snapshot check (fail-closed in enforce).
+	opts.Store.SetRequeueGate(NewRequeueGate(adm, logger))
+	for _, w := range opts.Config.RequeueWarnings() {
+		logger.Printf("WARNING: %s", w)
 	}
 	chainDriver := NewChainDriver(ChainDriverOptions{
 		Store:          opts.Store,

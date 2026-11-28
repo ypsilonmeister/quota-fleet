@@ -333,3 +333,38 @@ func TestDecideRepairTable(t *testing.T) {
 		t.Fatal("not stalled after stall_after")
 	}
 }
+
+// Issue #56: on_rate_limit is a per-step template field passed to the step's job; the
+// publish step keeps "" (not requeued unless it asks) when the template is silent.
+func TestStepOnRateLimit(t *testing.T) {
+	d, err := parse(t, func(m map[string]any) {
+		steps := m["steps"].(map[string]any)
+		steps["implement"].(map[string]any)["on_rate_limit"] = " fail "
+		steps["fix"].(map[string]any)["on_rate_limit"] = "requeue"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := &store.ChainRun{ID: tRun, Owner: "tok"}
+	want := map[string]string{
+		store.ChainStepImplement: store.OnRateLimitFail,
+		store.ChainStepReview:    "",
+		store.ChainStepFix:       store.OnRateLimitRequeue,
+		store.ChainStepPublish:   "",
+	}
+	for i, step := range []string{store.ChainStepImplement, store.ChainStepReview, store.ChainStepFix, store.ChainStepPublish} {
+		p, err := BuildStepParams(d, StepInput{Run: run, Step: step, Seq: i + 1, Round: 1, VerdictNonce: tNonce, ReviewedCommit: tSHA})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.OnRateLimit != want[step] {
+			t.Errorf("%s: on_rate_limit = %q, want %q", step, p.OnRateLimit, want[step])
+		}
+	}
+
+	if _, err := parse(t, func(m map[string]any) {
+		m["steps"].(map[string]any)["publish"].(map[string]any)["on_rate_limit"] = "sometimes"
+	}); !errors.Is(err, ErrInvalidDefinition) || !strings.Contains(err.Error(), "steps.publish.on_rate_limit") {
+		t.Fatalf("invalid on_rate_limit: %v", err)
+	}
+}

@@ -37,7 +37,14 @@ func newRequeueEnv(t *testing.T, requeue bool, maxRetries int) *requeueEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	// runtime.New always installs the Gate; these tests exercise the store mechanics
+	// behind a Gate that lets every requeued job through.
+	st.SetRequeueGate(allowAllGate)
 	return &requeueEnv{t: t, ctx: context.Background(), st: st, cfg: cfg}
+}
+
+func allowAllGate(context.Context, *Job, string, bool) RequeueGateVerdict {
+	return RequeueGateVerdict{Allow: true}
 }
 
 func (e *requeueEnv) add(p CreateJobParams) *Job {
@@ -177,11 +184,21 @@ func TestRequeueOnRateLimitPolicyFallsBackToFail(t *testing.T) {
 			t.Fatalf("on_rate_limit=fail must fail: %+v", out)
 		}
 	})
-	t.Run("job opts in", func(t *testing.T) {
+	t.Run("job requeue alone does not opt in", func(t *testing.T) {
+		// The opt-in is the configuration; a job cannot enable requeue on its own.
 		e := newRequeueEnv(t, false, 3)
 		e.add(CreateJobParams{RequestID: "a", Pool: "p", OnRateLimit: OnRateLimitRequeue})
-		if out := e.hit(e.claim()); !out.Requeued {
-			t.Fatalf("on_rate_limit=requeue must requeue: %+v", out)
+		if out := e.hit(e.claim()); out.Requeued || out.Job.Status != StatusFailed {
+			t.Fatalf("on_rate_limit=requeue without quota.requeue.enabled must fail: %+v", out)
+		}
+	})
+	t.Run("job requeue without cooldown", func(t *testing.T) {
+		e := newRequeueEnv(t, true, 3)
+		no := false
+		e.cfg.Quota.Cooldown.Enabled = &no
+		e.add(CreateJobParams{RequestID: "a", Pool: "p", OnRateLimit: OnRateLimitRequeue})
+		if out := e.hit(e.claim()); out.Requeued {
+			t.Fatalf("requeue without cooldown: %+v", out)
 		}
 	})
 	t.Run("max retries zero", func(t *testing.T) {
@@ -453,6 +470,60 @@ func TestRequeueGateVerdicts(t *testing.T) {
 			t.Fatalf("claim = %+v", got)
 		}
 	})
+}
+
+func TestRequeuedJobWithoutGateFailsClosedInEnforce(t *testing.T) {
+	e := newRequeueEnv(t, true, 3)
+	j := e.add(CreateJobParams{RequestID: "a", Pool: "p"})
+	e.hit(e.claim())
+	e.expire()
+	e.st.SetRequeueGate(nil)
+	other := e.add(CreateJobParams{RequestID: "other", Pool: "q", Agent: "claude"})
+	if got := e.claim(); got == nil || got.ID != other.ID {
+		t.Fatalf("claim = %+v, want the fresh job %d (requeued job %d must be skipped, not block)", got, other.ID, j.ID)
+	}
+	if got, ok, err := e.st.ClaimByID(e.ctx, j.ID, 8); ok || err != nil {
+		t.Fatalf("ClaimByID without gate: job=%+v ok=%v err=%v", got, ok, err)
+	}
+	if got := e.claim(); got != nil {
+		t.Fatalf("claimed %d without a gate in enforce", got.ID)
+	}
+
+	// Outside enforce there is no Gate to wait for: retry_after and the cooldown decide.
+	e.cfg.Quota.GateMode = config.GateModeDryRun
+	if got := e.claim(); got == nil || got.ID != j.ID {
+		t.Fatalf("dry-run claim = %+v", got)
+	}
+}
+
+func TestFailoverClearsRetryAfterOfOldPool(t *testing.T) {
+	e := newRequeueEnv(t, true, 3)
+	j := e.add(CreateJobParams{RequestID: "a", Pool: "p", AltPools: []string{"q"}})
+	e.hit(e.claim())
+	if e.job(j.ID).RetryAfter == nil {
+		t.Fatal("retry_after not set")
+	}
+	e.st.SetRequeueGate(func(ctx context.Context, job *Job, pool string, failover bool) RequeueGateVerdict {
+		if pool == "q" {
+			return RequeueGateVerdict{Allow: true}
+		}
+		return RequeueGateVerdict{Allow: true, SelectedPool: "q"}
+	})
+	got := e.claim()
+	if got == nil || got.ID != j.ID || got.Pool != "q" {
+		t.Fatalf("failover claim = %+v", got)
+	}
+	if got.RetryAfter != nil {
+		t.Fatalf("retry_after of the old pool kept after failover: %v", got.RetryAfter)
+	}
+	// The run on q dies (e.g. worker lost) and is reset: q is healthy, so the job must be
+	// claimable again at once instead of waiting for p's cooldown deadline.
+	if _, err := e.st.Reset(e.ctx, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if again := e.claim(); again == nil || again.ID != j.ID || again.Pool != "q" {
+		t.Fatalf("re-claim on q after reset = %+v", again)
+	}
 }
 
 func TestStalledRateLimitRequeued(t *testing.T) {

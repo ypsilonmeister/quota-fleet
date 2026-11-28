@@ -296,3 +296,67 @@ func TestReconcilerReportsRequeueAndStall(t *testing.T) {
 		t.Fatalf("stall reports = %v", kinds)
 	}
 }
+
+// newRuntimeForRequeue builds the Runtime the way the daemon does, so the Claim-time Gate
+// comes from runtime.New and not from the test helper.
+func (e *requeueRuntimeEnv) newRuntime() {
+	e.t.Helper()
+	e.st.SetRequeueGate(nil)
+	if _, err := New(Options{
+		Store: e.st, Adapter: e.mock, Evaluator: evaluator.NewAlwaysPass(), Config: e.cfg,
+		StateDir: e.t.TempDir(), GateMode: config.GateModeEnforce, QuotaUsageFormat: e.cfg.Quota.UsageFormat,
+		QuotaStaleAfter: 45 * time.Minute, Pools: e.cfg.Pools, SnapshotLoader: e.loadSnapshot,
+		Logger: discardLogger(),
+	}); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// Review P1: a job's own on_rate_limit=requeue must not enable requeue when the operator
+// did not opt in, because that path would run outside the configured requeue guard rails.
+func TestOnRateLimitRequeueNeedsConfigOptIn(t *testing.T) {
+	e := newRequeueRuntimeEnv(t, config.UsageFormatV1)
+	no := false
+	e.cfg.Quota.Requeue.Enabled = &no
+	e.newRuntime()
+	job, _, err := e.st.CreateJob(e.ctx, store.CreateJobParams{RequestID: "a", Title: "a", Agent: "codex", Pool: "codex", OnRateLimit: store.OnRateLimitRequeue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.runRateLimited(e.claim()); got.Status != store.StatusFailed || got.RateLimitRetries != 0 {
+		t.Fatalf("job %d: status=%s retries=%d, want failed without requeue", job.ID, got.Status, got.RateLimitRetries)
+	}
+}
+
+// Review P1: a job requeued while requeue was enabled stays gated after a restart with
+// requeue switched off; runtime.New must install the Gate regardless of the requeue config.
+func TestRuntimeNewGatesRequeuedJobsAfterRequeueDisabled(t *testing.T) {
+	e := newRequeueRuntimeEnv(t, config.UsageFormatV1)
+	job, _, err := e.st.CreateJob(e.ctx, store.CreateJobParams{RequestID: "a", Title: "a", Agent: "codex", Pool: "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := e.runRateLimited(e.claim()); got.Status != store.StatusQueued {
+		t.Fatalf("not requeued: %+v", got)
+	}
+
+	no := false
+	e.cfg.Quota.Requeue.Enabled = &no // restart with requeue disabled
+	e.newRuntime()
+	if _, err := e.st.ClearCooldown(e.ctx, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	e.setSnapshot(false, errors.New("usage file unreadable"))
+	if got := e.claim(); got != nil {
+		t.Fatalf("Claim took %d despite a v1 snapshot error", got.ID)
+	}
+	if got, ok, err := e.st.ClaimByID(e.ctx, job.ID, 4); ok || err != nil {
+		t.Fatalf("ClaimByID despite a v1 snapshot error: job=%+v ok=%v err=%v", got, ok, err)
+	}
+
+	// The Gate installed by runtime.New lets it through once the snapshot is healthy.
+	e.setSnapshot(false, nil)
+	if got, ok, err := e.st.ClaimByID(e.ctx, job.ID, 4); !ok || err != nil || got.ID != job.ID {
+		t.Fatalf("ClaimByID after recovery: job=%+v ok=%v err=%v", got, ok, err)
+	}
+}

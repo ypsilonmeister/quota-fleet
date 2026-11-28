@@ -296,6 +296,9 @@ func (s *Store) claimCandidate(ctx context.Context, conn *sql.Conn, now time.Tim
 		return 0, nil, err
 	}
 	gated := s.requeueGate.Load() != nil
+	// Under enforce a requeued job must pass the Gate (snapshot + cooldowns) before it is
+	// claimed again; without an installed Gate it stays queued (fail-closed, Issue #56 §3.2).
+	ungatedEnforce := !gated && s.config != nil && s.config.Quota.EffectiveGateMode() == config.GateModeEnforce
 	// retry_after is compared in Go (RFC3339Nano text does not sort reliably), so LIMIT 1
 	// is only safe when no queued job carries one; otherwise a waiting job at the head
 	// would shadow a claimable one.
@@ -304,7 +307,7 @@ func (s *Store) claimCandidate(ctx context.Context, conn *sql.Conn, now time.Tim
 		return 0, nil, err
 	}
 	q := `SELECT id, pool, agent, model, rate_limit_retries, retry_after FROM jobs WHERE status='queued' AND (?=0 OR id=?) ORDER BY created_at,id`
-	if len(blocked) == 0 && !gated && waiting == 0 {
+	if len(blocked) == 0 && !gated && !ungatedEnforce && waiting == 0 {
 		q += " LIMIT 1"
 	}
 	rows, err := conn.QueryContext(ctx, q, id, id)
@@ -327,6 +330,9 @@ func (s *Store) claimCandidate(ctx context.Context, conn *sql.Conn, now time.Tim
 				return 0, nil, fmt.Errorf("parse retry_after: %w", err)
 			}
 			waitingRetry = t.After(now)
+		}
+		if ungatedEnforce && retries > 0 {
+			continue
 		}
 		if gated && retries > 0 {
 			v, ok := verdicts[id]

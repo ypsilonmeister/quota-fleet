@@ -49,6 +49,9 @@ type StepTemplate struct {
 	Instructions       string   `json:"instructions"`
 	AcceptanceCriteria string   `json:"acceptance_criteria,omitempty"`
 	TargetRef          string   `json:"target_ref,omitempty"`
+	// OnRateLimit is the step's rate-limit policy (Issue #56): "" (config default; the
+	// publish step is then not requeued), "requeue" or "fail".
+	OnRateLimit string `json:"on_rate_limit,omitempty"`
 }
 
 // Steps is the fixed set of C1 step templates.
@@ -173,6 +176,10 @@ func (d *Definition) normalize(maxRoundsCap int) error {
 		t.Model = strings.TrimSpace(t.Model)
 		t.Pool = strings.TrimSpace(t.Pool)
 		t.TargetRef = strings.TrimSpace(t.TargetRef)
+		t.OnRateLimit = strings.TrimSpace(t.OnRateLimit)
+		if err := store.ValidateOnRateLimit(t.OnRateLimit); err != nil {
+			return fmt.Errorf("%w: steps.%s.on_rate_limit: %v", ErrInvalidDefinition, name, err)
+		}
 		if t.Title == "" {
 			return fmt.Errorf("%w: steps.%s.title must not be empty", ErrInvalidDefinition, name)
 		}
@@ -333,6 +340,7 @@ func BuildStepParams(d *Definition, in StepInput) (store.CreateJobParams, error)
 		Instructions:       instr,
 		AcceptanceCriteria: acc,
 		CreatedBy:          in.Run.Owner,
+		OnRateLimit:        t.OnRateLimit,
 	}, nil
 }
 

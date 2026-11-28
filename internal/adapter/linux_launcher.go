@@ -227,6 +227,14 @@ func (l *linuxLauncher) Launch(ctx context.Context, host config.HostConfig, job 
 		shellPath(runShPath),
 		shellPath(runShPath),
 	)
+	// A rate-limit re-run keeps the previous log and drops this step's stale verdict first.
+	prep, err := linuxRetryPrepCommand(workdir, runDir, job)
+	if err != nil {
+		return LaunchInfo{}, err
+	}
+	if prep != "" {
+		stageCmd = prep + " && " + stageCmd
+	}
 	stageRes, err := l.transport.Run(ctx, host, stageCmd)
 	if err != nil {
 		return LaunchInfo{}, fmt.Errorf("stage prompt.txt and run.sh: %w", err)

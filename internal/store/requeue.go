@@ -30,10 +30,12 @@ func (s *Store) requeueDecision(job *Job, pool, chainStep string) RequeueDecisio
 	if _, ok := s.config.Pools[pool]; !ok {
 		return RequeueDecision{Why: fmt.Sprintf("pool %q is not configured", pool)}
 	}
+	// The opt-in is the configuration (quota.requeue / pools.<name>.requeue), never the job
+	// alone: on_rate_limit=requeue only lifts the publish-step default below. A job cannot
+	// turn requeue on for a pool the operator did not enable (Issue #56 decision 1).
 	p := s.config.RequeueFor(pool)
-	enabled := p.Enabled || job.OnRateLimit == OnRateLimitRequeue
 	switch {
-	case !enabled:
+	case !p.Enabled:
 		return RequeueDecision{Why: "requeue disabled"}
 	case p.MaxRetries <= 0:
 		return RequeueDecision{Why: "requeue max_retries is 0"}
@@ -254,7 +256,8 @@ type RequeueGateVerdict struct {
 type RequeueGateFunc func(ctx context.Context, job *Job, pool string, failover bool) RequeueGateVerdict
 
 // SetRequeueGate installs the Claim-time Gate for rate-limit requeued jobs. Without one,
-// requeued jobs are claimable once retry_after passes and their pool cooldown allows it.
+// requeued jobs are never claimed under gate_mode enforce (fail-closed); in other modes
+// they are claimable once retry_after passes and their pool cooldown allows it.
 func (s *Store) SetRequeueGate(fn RequeueGateFunc) {
 	if fn == nil {
 		s.requeueGate.Store(nil)
@@ -328,7 +331,10 @@ func (s *Store) applyRequeueFailover(ctx context.Context, conn *sql.Conn, jobID 
 	if err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, `UPDATE jobs SET pool = ?, alt_pools = ? WHERE id = ?`, v.SelectedPool, altJSON, jobID); err != nil {
+	// retry_after mirrored the cooldown of the pool being left; it is spent once the job
+	// moves, and keeping it would hold a later re-claim on the new pool (e.g. after Reset)
+	// until the old pool's deadline.
+	if _, err := conn.ExecContext(ctx, `UPDATE jobs SET pool = ?, alt_pools = ?, retry_after = NULL WHERE id = ?`, v.SelectedPool, altJSON, jobID); err != nil {
 		return err
 	}
 	if v.Gate != nil {

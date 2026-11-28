@@ -150,21 +150,32 @@ All keys can be overridden under `pools.<pool>.requeue`. A pool that sets
 - Before a requeued job is claimed again, the Gate is evaluated on the current
   usage snapshot and cooldowns, exactly as at admission. Exhausted, cooling,
   stale or unreadable (v1) pools keep it queued without spending a retry.
-  When a declared `alt_pools` entry is healthy, the job moves to it (same agent
-  and model; the previous pool becomes an alternative) and the decision is
-  recorded in `gate_decisions`. The agent is never switched.
+  The daemon always installs this check, so jobs requeued before requeue was
+  switched off are still gated; in `enforce` a requeued job is never claimed
+  without it. When a declared `alt_pools` entry is healthy, the job moves to it
+  (same agent and model; the previous pool becomes an alternative, and the
+  `retry_after` of the pool it left is cleared) and the decision is recorded in
+  `gate_decisions`. The agent is never switched.
 - After `max_retries` requeues the next rate limit fails the job with
   `rate limit retries exhausted (N/N)` and cancels its waiting descendants.
   A step of a chain run that is no longer running is cancelled instead.
 - The workdir is kept. The prompt of a re-run starts with a short note that
   the previous run stopped on a rate limit and partial work may be present.
+  Before a re-run, the previous `agent.log` (and `agent.err.log` on Windows) in
+  `.fleet/runs/<job_id>/` is renamed to `agent.retry-<n>.log`
+  (`agent.err.retry-<n>.log`), and for a chain step the verdict file of that
+  step (`.qf-chain/<run_id>/<seq>/verdict.json`) is removed, because the step
+  keeps its verdict nonce and a verdict left by the interrupted run would
+  otherwise be accepted.
 - A requeue is not terminal: no delivery and no failure push. It sends the
   `pool_cooldown` report and a `job_rate_limit_requeued` report. The
   Reconciler reports `stale_claimed_requeued` and, after `stall_after`,
   `job_rate_limit_requeue_stalled` (report only).
-- Per job, `on_rate_limit: fail` opts out and `on_rate_limit: requeue` opts
-  in. The chain `publish` step is not requeued unless its job says `requeue`,
-  because a re-run could repeat pushes or PR creation.
+- Per job (`POST /jobs`) or per chain step (`steps.<step>.on_rate_limit` in
+  `POST /chains`), `on_rate_limit: fail` opts out. `on_rate_limit: requeue`
+  does not enable requeue by itself — the configuration above is the only
+  opt-in — but it lets the chain `publish` step be requeued, which by default
+  is not, because a re-run could repeat pushes or PR creation.
 - `GET /jobs` returns `rate_limit_retries`, `retry_after` and
   `on_rate_limit` when set; `GET /status` returns `rate_limit_requeued_count`.
   `POST /jobs/{id}/requeue` resets `rate_limit_retries`.

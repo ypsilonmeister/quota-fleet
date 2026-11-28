@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/chain"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
@@ -180,3 +181,48 @@ func TestPostJobsRejectsChainPrefixAndRequeueOfChainJobs(t *testing.T) {
 }
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+// Issue #56: POST /chains accepts on_rate_limit per step; the first step's job carries it
+// and the stored definition hands it to later steps (publish stays "" by default).
+func TestChainsAPIStepOnRateLimit(t *testing.T) {
+	st, base := newChainAPI(t)
+	ctx := context.Background()
+
+	b := chainBody("orl", nil)
+	steps := b["steps"].(map[string]any)
+	steps["implement"].(map[string]any)["on_rate_limit"] = "fail"
+	steps["fix"].(map[string]any)["on_rate_limit"] = "fail"
+	resp := doJSON(t, http.MethodPost, base+"/chains", "tok-alice", b)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status %d", resp.StatusCode)
+	}
+	created := decodeResp[ChainDetailResponse](t, resp)
+	jdto := decodeResp[JobDTO](t, doJSON(t, http.MethodGet, base+"/jobs/"+itoa(*created.Steps[0].JobID), "tok-alice", nil))
+	if jdto.OnRateLimit != store.OnRateLimitFail {
+		t.Fatalf("implement job on_rate_limit = %q", jdto.OnRateLimit)
+	}
+
+	run, err := st.GetChainRun(ctx, created.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, err := chain.DecodeStored(run.DefinitionJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for step, want := range map[string]string{store.ChainStepFix: store.OnRateLimitFail, store.ChainStepPublish: "", store.ChainStepReview: ""} {
+		p, err := chain.BuildStepParams(def, chain.StepInput{Run: run, Step: step, Seq: 2, Round: 1, VerdictNonce: "n", ReviewedCommit: "c"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.OnRateLimit != want {
+			t.Errorf("%s: on_rate_limit = %q, want %q", step, p.OnRateLimit, want)
+		}
+	}
+
+	bad := chainBody("orl-bad", nil)
+	bad["steps"].(map[string]any)["publish"].(map[string]any)["on_rate_limit"] = "sometimes"
+	if resp := doJSON(t, http.MethodPost, base+"/chains", "tok-alice", bad); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid on_rate_limit status %d", resp.StatusCode)
+	}
+}
