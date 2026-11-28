@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -43,8 +45,33 @@ func TestCLIInitCreatesMinimalSecureConfigAndGuardsOverwrite(t *testing.T) {
 	if !strings.HasPrefix(cfg.InstanceID, "fleet-") || len(cfg.InstanceID) < len("fleet-")+16 {
 		t.Errorf("unexpected instance_id = %q", cfg.InstanceID)
 	}
-	if len(cfg.API.Token) < 64 {
-		t.Errorf("expected strong random api.token (len >= 64), got len=%d", len(cfg.API.Token))
+	if cfg.API.Token != "" {
+		t.Error("init generated a legacy api.token")
+	}
+	wantScopes := map[string][]string{
+		"coordinator": config.AllAPIScopes,
+		"watch":       {config.ScopeRead},
+	}
+	if len(cfg.API.Tokens) != len(wantScopes) {
+		t.Fatalf("generated %d named tokens, want %d", len(cfg.API.Tokens), len(wantScopes))
+	}
+	seenTokens := make(map[string]bool)
+	for _, token := range cfg.API.Tokens {
+		scopes, ok := wantScopes[token.Name]
+		if !ok || !slices.Equal(token.Scopes, scopes) {
+			t.Errorf("unexpected scopes for %q: %v", token.Name, token.Scopes)
+		}
+		decoded, err := hex.DecodeString(token.Token)
+		if err != nil || len(decoded) < 32 {
+			t.Errorf("%q token must encode at least 32 bytes as hex", token.Name)
+		}
+		if seenTokens[token.Token] {
+			t.Error("generated tokens share a value")
+		}
+		seenTokens[token.Token] = true
+		if strings.Contains(out.String(), token.Token) || strings.Contains(errBuf.String(), token.Token) {
+			t.Errorf("init output leaked the %q token", token.Name)
+		}
 	}
 	if !cfg.API.RequireAuth {
 		t.Errorf("api.require_auth = false, want true")
@@ -73,15 +100,8 @@ func TestCLIInitCreatesMinimalSecureConfigAndGuardsOverwrite(t *testing.T) {
 		}
 	}
 
-	// Token must never be printed in plaintext to stdout or stderr.
-	if strings.Contains(out.String(), cfg.API.Token) {
-		t.Errorf("stdout leaked plaintext api.token")
-	}
-	if strings.Contains(errBuf.String(), cfg.API.Token) {
-		t.Errorf("stderr leaked plaintext api.token")
-	}
 	if !strings.Contains(out.String(), "not printed") {
-		t.Errorf("expected stdout to note token was written to file and not printed, got %q", out.String())
+		t.Error("expected stdout to note tokens were written to file")
 	}
 
 	// Overwrite guard: running init again on the same path must fail and preserve original content.
@@ -120,8 +140,13 @@ func TestCLIInitCreatesMinimalSecureConfigAndGuardsOverwrite(t *testing.T) {
 	if cfg2.InstanceID == cfg.InstanceID {
 		t.Errorf("expected distinct random instance_id across init calls")
 	}
-	if cfg2.API.Token == cfg.API.Token {
-		t.Errorf("expected distinct random api.token across init calls")
+	for _, token := range cfg2.API.Tokens {
+		if seenTokens[token.Token] {
+			t.Errorf("second init reused a token value for %q", token.Name)
+		}
+		if strings.Contains(out.String(), token.Token) || strings.Contains(errBuf.String(), token.Token) {
+			t.Errorf("second init output leaked the %q token", token.Name)
+		}
 	}
 }
 
