@@ -241,17 +241,22 @@ func (s *Store) blockedCooldownPools(ctx context.Context, conn *sql.Conn, now ti
 	if err != nil || len(probes) == 0 {
 		return blocked, err
 	}
-	rows, err = conn.QueryContext(ctx, `SELECT pool, agent, model, status, claimed_at FROM jobs WHERE status='claimed' OR (? AND (status='queued' OR (status='waiting' AND EXISTS (
-		SELECT 1 FROM held_jobs WHERE released_job_id=jobs.id AND status='released'
-	))))`, release)
+	rows, err = conn.QueryContext(ctx, `
+		SELECT jobs.pool, jobs.agent, jobs.model, jobs.status,
+			CASE WHEN jobs.status='waiting' THEN held_jobs.released_at ELSE jobs.claimed_at END
+		FROM jobs
+		LEFT JOIN held_jobs ON ? AND jobs.status='waiting'
+			AND held_jobs.released_job_id=jobs.id AND held_jobs.status='released'
+		WHERE jobs.status='claimed' OR (? AND jobs.status='queued') OR held_jobs.released_at IS NOT NULL
+	`, release, release)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var pool, agent, model, status string
-		var claimed *string
-		if err := rows.Scan(&pool, &agent, &model, &status, &claimed); err != nil {
+		var probeAt *string
+		if err := rows.Scan(&pool, &agent, &model, &status, &probeAt); err != nil {
 			return nil, err
 		}
 		pool = s.cooldownPool(pool, agent, model)
@@ -259,11 +264,11 @@ func (s *Store) blockedCooldownPools(ctx context.Context, conn *sql.Conn, now ti
 		if !ok {
 			continue
 		}
-		if status == "claimed" {
-			if claimed == nil {
+		if status != "queued" {
+			if probeAt == nil {
 				continue
 			}
-			at, err := parseTime(*claimed)
+			at, err := parseTime(*probeAt)
 			if err != nil {
 				return nil, err
 			}

@@ -21,7 +21,10 @@ var rateLimitPatterns = map[string]*regexp.Regexp{
 	"":       regexp.MustCompile(`(?i)(429 too many requests|rate_limit_exceeded|rate_limit_error|usage_limit_reached|RESOURCE_EXHAUSTED)`),
 }
 
-var nonProviderOutput = regexp.MustCompile(`(?i)^\s*(--- FAIL:|FAIL\b|[+-]{1,3}\s|npm\b|gh:|(?:curl|wget|fetch|tool output)\b|\x60|["'])|\b(?:api\.github\.com|registry\.npmjs\.org|npm ERR!)\b`)
+var nonProviderOutput = regexp.MustCompile(`(?i)^\s*(--- FAIL:|FAIL\b|[+-]{1,3}\s|npm\b|gh:|(?:curl|wget|fetch|tool output)\b|\x60)|\b(?:api\.github\.com|registry\.npmjs\.org|npm ERR!)\b`)
+
+var quotedOutput = regexp.MustCompile(`^\s*["']`)
+var jsonField = regexp.MustCompile(`^\s*"[^"]+"\s*:`)
 
 // Detect only in the final CLI output. Custom patterns replace the built-in set.
 func detectRateLimit(agent string, cfg config.AgentConfig, state adapter.RunState, ev adapter.Evidence, evaluatorFailed bool) string {
@@ -47,21 +50,36 @@ func detectRateLimit(agent string, cfg config.AgentConfig, state adapter.RunStat
 	}
 
 	for _, tail := range []string{ev.ErrLogTail, ev.FinalReport} {
+		tail = strings.TrimRight(tail, "\r\n")
+		var longFinalLine string
 		if len(tail) > 4096 {
-			tail = tail[len(tail)-4096:]
-			// Discard the partial line so truncation cannot hide its prefix.
-			_, tail, _ = strings.Cut(tail, "\n")
+			start := len(tail) - 4096
+			clipped := tail[start:]
+			// Prefer complete lines, but keep the suffix of a long final line.
+			if tail[start-1] != '\n' {
+				if _, rest, ok := strings.Cut(clipped, "\n"); ok {
+					clipped = rest
+				} else {
+					longFinalLine = tail[strings.LastIndexByte(tail[:start], '\n')+1:]
+				}
+			}
+			tail = clipped
 		}
-		lines := strings.Split(strings.TrimRight(tail, "\r\n"), "\n")
+		lines := strings.Split(tail, "\n")
 		if len(lines) > 30 {
 			lines = lines[len(lines)-30:]
 		}
 		for i := len(lines) - 1; i >= 0; i-- {
 			line := lines[i]
-			if nonProviderOutput.MatchString(line) {
-				continue
-			}
 			if cfg.RateLimitPatterns == nil {
+				// Check the original prefix when the final line was clipped.
+				guardLine := line
+				if longFinalLine != "" {
+					guardLine = longFinalLine
+				}
+				if nonProviderOutput.MatchString(guardLine) || (quotedOutput.MatchString(guardLine) && !jsonField.MatchString(guardLine)) {
+					continue
+				}
 				// Codex command output can contain arbitrary HTTP headers.
 				// Require an error envelope for generic HTTP status signatures.
 				match := pattern.FindString(line)

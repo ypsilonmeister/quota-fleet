@@ -141,6 +141,19 @@ func TestCooldownHalfOpenHeldRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	parent, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "parent", Title: "parent", Pool: "other", Draft: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := st.HoldJob(ctx, HoldJobParams{RequestID: "child", Pool: "p",
+		Payload: CreateJobParams{RequestID: "child", Title: "child", Pool: "p", ParentID: &parent.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := st.ReleaseHeld(ctx, ReleaseHeldParams{HeldID: child.ID, SelectedPool: "p"})
+	if err != nil || waiting.Job == nil || waiting.Job.Status != StatusWaiting {
+		t.Fatalf("release before cooldown=%+v error=%v", waiting, err)
+	}
 	if _, _, err := st.CreateJob(ctx, CreateJobParams{RequestID: "trigger", Title: "trigger", Pool: "p"}); err != nil {
 		t.Fatal(err)
 	}

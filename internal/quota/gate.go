@@ -636,15 +636,9 @@ func evaluateGateV1(primaryPool string, altPools []string, snap *Snapshot, opts 
 		return res
 	}
 
-	// Step 5 (Decision 6): detour to unmeasured alt ONLY when there is >= 1 measured candidate
-	// and EVERY measured candidate is exhausted or cooling (zero unknowns).
-	measuredCount := 0
-	for _, ev := range evals {
-		if !ev.Unmeasured {
-			measuredCount++
-		}
-	}
-	if measuredCount > 0 && len(unknowns) == 0 && len(unmeasured) > 0 {
+	// Step 5: detour to an available unmeasured pool once all other candidates
+	// are definitively exhausted or cooling. Unknown measured pools fail closed.
+	if len(unknowns) == 0 && len(unmeasured) > 0 {
 		res.Decision = DecisionWouldPass
 		res.SelectedPool = unmeasured[0].Pool
 		res.Bypassed = true
@@ -715,6 +709,18 @@ func pickPrimaryUnknown(unknowns []PoolEvaluation) PoolEvaluation {
 	return best
 }
 
+// AllCandidatesUnmeasured reports whether every candidate is configured and unmeasured.
+func AllCandidatesUnmeasured(primaryPool string, altPools []string, pools map[string]config.PoolConfig) bool {
+	primaryPool = strings.TrimSpace(primaryPool)
+	candidates := buildCandidates(primaryPool, cleanPools(altPools, primaryPool))
+	for _, name := range candidates {
+		if !pools[name].Unmeasured {
+			return false
+		}
+	}
+	return len(candidates) > 0
+}
+
 // EvaluateFromFile loads usageFile and evaluates the gate for primaryPool and altPools
 // according to opts.Format (defaulting to "legacy").
 func EvaluateFromFile(usageFile, primaryPool string, altPools []string, opts EvalOptions) (GateEvaluation, error) {
@@ -736,24 +742,6 @@ func EvaluateFromFile(usageFile, primaryPool string, altPools []string, opts Eva
 				}
 			}
 		}
-		// Step 2: bypass if primary is unmeasured OR (primary empty and all candidates defined & unmeasured).
-		if primaryPool != "" {
-			if cfg, ok := opts.Pools[primaryPool]; ok && cfg.Unmeasured && (EvaluatePool(primaryPool, nil, opts).Status == PoolUnmeasured || len(cleanedAlts) == 0) {
-				return EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		} else {
-			allUnmeasured := true
-			for _, c := range candidates {
-				cfg, ok := opts.Pools[c]
-				if !ok || !cfg.Unmeasured {
-					allUnmeasured = false
-					break
-				}
-			}
-			if allUnmeasured {
-				return EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		}
 		// In HeldRelease mode, if all candidates were deleted, no need to read file.
 		if opts.CheckPoolConfig && opts.HeldRelease {
 			anyDefined := false
@@ -767,13 +755,13 @@ func EvaluateFromFile(usageFile, primaryPool string, altPools []string, opts Eva
 				return EvaluateGate(primaryPool, altPools, nil, opts), nil
 			}
 		}
-	} else {
-		// Legacy bypass check.
-		if primaryPool != "" {
-			if cfg, ok := opts.Pools[primaryPool]; ok && cfg.Unmeasured && (EvaluatePool(primaryPool, nil, opts).Status == PoolUnmeasured || len(cleanedAlts) == 0) {
-				return EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		}
+	}
+
+	if cfg := opts.Pools[primaryPool]; primaryPool != "" && cfg.Unmeasured && EvaluatePool(primaryPool, nil, opts).Status == PoolUnmeasured {
+		return EvaluateGate(primaryPool, altPools, nil, opts), nil
+	}
+	if AllCandidatesUnmeasured(primaryPool, altPools, opts.Pools) {
+		return EvaluateGate(primaryPool, altPools, nil, opts), nil
 	}
 
 	snap, err := LoadUsageFileWithFormat(usageFile, format)

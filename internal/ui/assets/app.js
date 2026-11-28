@@ -1522,7 +1522,7 @@ function formatTime(iso) {
         if (ps.cooldown && ps.cooldown.active) {
           const cd = ps.cooldown;
           lines.push(el("div", { className: "small", text: function () {
-            return L("cooldown.until", {
+            return t("cooldown.until", {
               until: formatTime(cd.until),
               minutes: Math.max(0, Math.ceil((Date.parse(cd.until) - Date.now()) / 60000))
             });

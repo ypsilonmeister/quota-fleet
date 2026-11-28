@@ -67,3 +67,22 @@ func TestCooldownDecisionMatrix(t *testing.T) {
 		t.Fatalf("legacy missing snapshot with cooldown: %+v", gate)
 	}
 }
+
+func TestCooldownUnmeasuredDetourFromFile(t *testing.T) {
+	now := time.Now()
+	opts := EvalOptions{Now: now, CheckPoolConfig: true,
+		Pools:     map[string]config.PoolConfig{"p": {Unmeasured: true}, "alt": {Unmeasured: true}},
+		Cooldowns: map[string]CooldownState{"p": {Pool: "p", ActiveUntil: now.Add(time.Minute)}},
+	}
+	for _, format := range []string{FormatV1, FormatLegacy} {
+		t.Run(format, func(t *testing.T) {
+			opts.Format = format
+			for _, primary := range []string{"p", ""} {
+				got, err := EvaluateFromFile("", primary, []string{"p", "alt"}, opts)
+				if err != nil || got.Decision != DecisionWouldPass || got.SelectedPool != "alt" {
+					t.Errorf("primary=%q: gate=%+v error=%v", primary, got, err)
+				}
+			}
+		})
+	}
+}

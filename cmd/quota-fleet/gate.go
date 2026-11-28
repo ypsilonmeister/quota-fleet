@@ -46,9 +46,9 @@ func runGate(args []string, stdout, stderr io.Writer) int {
 }
 
 func printGateUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  quota-fleet gate cooldowns [--json] [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate cooldown clear <pool> [--db path] [--config fleet.yaml]")
-	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  quota-fleet gate check [--pool <name>] [--alt-pools a,b] [--usage-file path] [--format legacy|v1] [--stale-after 45m] [--now RFC3339] [--ignore-cooldown] [--json] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate decisions [--limit N] [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate held [--status held|released|cancelled|all] [--limit N] [--json] [--db path] [--config fleet.yaml]")

@@ -349,36 +349,17 @@ func (a *Admission) EvaluateGate(primaryPool string, altPools []string, usage *U
 		return a.store.RecoverCooldowns(usage.ctx, snap, &opts)
 	}
 
-	if a.usageFormat == config.UsageFormatV1 {
-		// Step 1: check ALL candidates exist in fleet.yaml BEFORE bypass or snapshot load (Item B).
-		if missing := a.findUndefinedPools(primaryPool, altPools); len(missing) > 0 {
-			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-		}
-		// Step 2: bypass if primary is unmeasured OR (primary empty and all alts are defined & unmeasured).
-		if primaryPool != "" {
-			if cfg, ok := a.pools[primaryPool]; ok && cfg.Unmeasured && (quota.EvaluatePool(primaryPool, nil, opts).Status == quota.PoolUnmeasured || len(altPools) == 0) {
-				return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		} else if len(altPools) > 0 {
-			allUnmeasured := true
-			anyCand := false
-			for _, alt := range altPools {
-				p := strings.TrimSpace(alt)
-				if p == "" {
-					continue
-				}
-				anyCand = true
-				cfg, ok := a.pools[p]
-				if !ok || !cfg.Unmeasured {
-					allUnmeasured = false
-					break
-				}
-			}
-			if anyCand && allUnmeasured {
-				return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		}
+	if a.usageFormat == config.UsageFormatV1 && len(a.findUndefinedPools(primaryPool, altPools)) > 0 {
+		return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+	}
+	if cfg := a.pools[primaryPool]; primaryPool != "" && cfg.Unmeasured && quota.EvaluatePool(primaryPool, nil, opts).Status == quota.PoolUnmeasured {
+		return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+	}
+	if quota.AllCandidatesUnmeasured(primaryPool, altPools, a.pools) {
+		return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+	}
 
+	if a.usageFormat == config.UsageFormatV1 {
 		snap, err := usage.Get()
 		if err != nil {
 			eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
@@ -396,11 +377,6 @@ func (a *Admission) EvaluateGate(primaryPool string, altPools []string, usage *U
 	}
 
 	// Legacy mode (Decision 2 & Item A): preserve exact existing behavior.
-	if primaryPool != "" {
-		if cfg, ok := a.pools[primaryPool]; ok && cfg.Unmeasured && (quota.EvaluatePool(primaryPool, nil, opts).Status == quota.PoolUnmeasured || len(altPools) == 0) {
-			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-		}
-	}
 	snap, err := usage.Get()
 	if err != nil {
 		eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
