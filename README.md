@@ -42,32 +42,36 @@ flowchart TD
     COORD -->|create| GATE
     COLL -.->|usage snapshot| GATE
     GATE -->|queue, or hold until quota recovers| STORE
-    STORE -->|job entered queued| SIG
-    SIG --> DISP
+    STORE -.->|job entered queued| SIG
+    SIG -.-> DISP
     DISP -->|wake| LAUNCH
     LAUNCH -->|claim by compare-and-swap| STORE
     LAUNCH -->|launch| AGENT
-    AGENT -->|result| STORE
+    AGENT -.->|result| STORE
     SHEP -->|evaluate finished jobs| STORE
     SHEP -.-> NEXT
     REC -->|patrol| STORE
 ```
 
-The diagram follows the design in [docs/01](docs/01-architecture.md). The
-`quota-fleet` binary differs from it in these ways:
+The diagram follows the design in [docs/01](docs/01-architecture.md). **Dashed
+arrows** mark the steps that the `quota-fleet` binary does not do as drawn:
 
-- **Dashed arrows** are not done by the binary as drawn. No quota collector is
-  included: you supply the snapshot file. The Shepherd does not open pull
-  requests or register follow-up jobs: a pull request comes from a chain's
-  publish step (an agent job) or the Coordinator, and a follow-up job from the
-  [Chain Driver](docs/22-chain-runs.md) or the Coordinator
-  ([docs/06](docs/06-implementation-design.md) §7-4).
-- The Dispatcher reads pending signals from a table in the SQLite store, appends
-  them to the signal file, and wakes the launcher inside the same process.
-- The Shepherd collects each finished run's result from the worker host,
-  evaluates it, and records `done` or `failed` in the store.
-- The Quota Gate is off by default, and `quota-fleet job create` does not go
-  through it.
+- **Quota collector → Quota Gate:** no collector is included. You supply the
+  snapshot file.
+- **Job store → Signal file → Dispatcher:** the Dispatcher reads pending signals
+  from a table in the SQLite store, appends them to the signal file, and wakes
+  the launcher inside the same process.
+- **Agent CLI → Job store:** the Shepherd collects each finished run's result
+  from the worker host, evaluates it, and records `done` or `failed` in the
+  store.
+- **Shepherd → Pull request, follow-up job:** the Shepherd does neither. A pull
+  request comes from a chain's publish step (an agent job) or the Coordinator,
+  and a follow-up job from the [Chain Driver](docs/22-chain-runs.md) or the
+  Coordinator ([docs/06](docs/06-implementation-design.md) §7-4).
+
+One solid path is conditional: **Coordinator → Quota Gate → Job store**. The
+gate is off by default and holds jobs only with `gate_mode: enforce`, and
+`quota-fleet job create` does not go through it.
 
 ## Case study
 
