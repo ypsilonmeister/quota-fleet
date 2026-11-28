@@ -27,17 +27,22 @@ makes their output trustworthy enough to merge.
 >   ([docs/19](docs/19-selector.md); `selector.mode: off | record | apply`,
 >   default `off`). For jobs registered through `POST /jobs` or as chain steps,
 >   it picks values for fields left empty, using the role / weight and the usage
->   snapshot. `record` stores the pick but fills those fields with fixed
->   defaults; `apply` fills them with the pick. Explicit values are never
->   overridden.
+>   snapshot; a chain step must name its `agent`, so only its `model` and `pool`
+>   can be filled. `record` stores the pick but fills the empty fields from fixed
+>   defaults (`codex` / `gpt-6.2-sol`; the model default is for `codex` only);
+>   `apply` fills them from the pick, and falls back to the defaults when every
+>   candidate pool is unmeasured. Explicit values are never overridden, and an
+>   empty field is not always filled, for example when no candidate is
+>   compatible with those values.
 > - **Self-driving chain runs** (Chain Driver, [docs/22](docs/22-chain-runs.md)):
 >   register a chain once (`POST /chains` or `quota-fleet chain create`) and
->   `serve` advances it through implement, review, fix rounds and publish.
+>   `serve` advances it through implement, review and any fix rounds, up to a
+>   round limit. It publishes only on a valid `ok_to_merge` verdict.
 > - **Review gate** ([docs/18](docs/18-review-gate.md); off by default, enable
->   with `review_gate.enabled: true`, needs a Decision API key and an API
->   token): `POST /decision/review-verdict` has Decision 1 judge a review report
->   as `ok_to_merge` or `changes_needed`. The report text is sent to Google's
->   API.
+>   with `review_gate.enabled: true`, needs a Decision API key and an API token
+>   with the `operate` scope): `POST /decision/review-verdict` has Decision 1
+>   judge a review report as `ok_to_merge` or `changes_needed`. The report text
+>   is sent to Google's API.
 > - **Per-job reasoning effort** ([docs/21](docs/21-job-effort.md)): optional
 >   `effort` (`low`, `medium`, `high`, `xhigh`) on `POST /jobs` and the MCP
 >   `create_job` tool, for `codex` and `claude` jobs only.
@@ -207,18 +212,24 @@ the missing control plane around them.
    implemented).
 
 3. **A verification pipeline** ([conventions](docs/04-pipeline-conventions.md))
-   Every ticket runs implementation → independent review by a *different
-   model family* → fixes by the *original implementer, resuming its
-   session* → merge-ready, without returning to the human in between.
-   Review findings must be reproduced before they are fixed. Judgment calls
-   are parked on the pull request for merge time, not used as stop points.
-   The human keeps exactly one job: the merge decision.
+   These are the pipeline's operating rules. Every ticket is meant to run
+   implementation → independent review by a *different model family* → fixes
+   by the *original implementer, resuming its session* → merge-ready, without
+   returning to the human in between. Review findings must be reproduced
+   before they are fixed. Judgment calls are parked on the pull request for
+   merge time, not used as stop points. The human keeps exactly one job: the
+   merge decision.
    The [Chain Driver](docs/22-chain-runs.md) automates the hand-offs: `serve`
-   runs implement → review → (fix → re-review) → publish up to a round limit,
-   branching on a verdict file written by the reviewer, and stops and reports
-   when a step fails or the verdict is unusable. It does not yet resume the
-   implementer's session, and it does not check that the reviewer is from a
-   different model family; choose each step's agent accordingly.
+   runs implement → review, branching on a verdict file written by the
+   reviewer. A valid `ok_to_merge` leads to publish; `changes_needed` leads to
+   fix → re-review. `max_rounds` caps the number of reviews (default 3), so
+   there are at most `max_rounds - 1` fixes; if the last review still says
+   `changes_needed`, the run stops with `max_rounds_exceeded` without
+   publishing. A separate step budget, `max_steps = 2 × max_rounds + 1`, bounds
+   the whole run. The driver also stops and reports when a step fails or the
+   verdict is unusable. It does not yet resume the implementer's session, and
+   it does not check that the reviewer is from a different model family; choose
+   each step's agent accordingly.
 
 ## What this is not
 
