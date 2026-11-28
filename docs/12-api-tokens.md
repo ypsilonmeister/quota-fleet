@@ -35,7 +35,7 @@ api:
 |---|---|
 | read | すべての GET（/jobs、/jobs/{id}、/status、/meta、/deliveries、/gate/held、/gate/decisions、/agents、/agents/events） |
 | register | POST /jobs |
-| operate | POST /jobs/{id}/cancel、/requeue、/reset、/deliver、POST /gate/held/{id}/release、DELETE /gate/held/{id}、POST /agents/check、POST /decision/review-verdict（[docs/18](18-review-gate.md)） |
+| operate | POST /jobs/{id}/cancel、/requeue、/reset、/deliver、POST /gate/held/{id}/release、DELETE /gate/held/{id}、DELETE /gate/cooldowns/{pool}、POST /agents/check、POST /decision/review-verdict（[docs/18](18-review-gate.md)） |
 | worker | POST /jobs/{id}/claim、/complete、/fail、/cancel-claimed、/reject-invalid（実行系の内部用。MCP には公開しない） |
 | agents | 将来のエージェント管理用に予約（当面は operate に含まれる /agents/check のみ） |
 

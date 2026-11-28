@@ -34,6 +34,8 @@ const (
 // PoolHealthStatus classifies a single pool's health from a snapshot.
 type PoolHealthStatus string
 
+const PoolCooldown PoolHealthStatus = "cooldown"
+
 const (
 	PoolHealthy    PoolHealthStatus = "healthy"
 	PoolExhausted  PoolHealthStatus = "exhausted"
@@ -161,6 +163,7 @@ type Snapshot struct {
 
 // PoolEvaluation is the health verdict for a single candidate pool.
 type PoolEvaluation struct {
+	Cooldown   *CooldownState   `json:"cooldown,omitempty"`
 	Pool       string           `json:"pool"`
 	Status     PoolHealthStatus `json:"status"`
 	BlockedBy  string           `json:"blocked_by,omitempty"`

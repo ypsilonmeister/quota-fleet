@@ -23,11 +23,11 @@ const (
 	// DefaultRuntimeAdapter is the default adapter ("mock").
 	DefaultRuntimeAdapter = "mock"
 	// RuntimeAdapterSSH selects the real SSH/local host adapter.
-	RuntimeAdapterSSH        = "ssh"
-	DefaultDispatchInterval  = 1 * time.Second
-	DefaultShepherdInterval  = 5 * time.Second
-	DefaultReconcileInterval = 30 * time.Second
-	DefaultStaleClaimedAfter = 15 * time.Minute
+	RuntimeAdapterSSH             = "ssh"
+	DefaultDispatchInterval       = 1 * time.Second
+	DefaultShepherdInterval       = 5 * time.Second
+	DefaultReconcileInterval      = 30 * time.Second
+	DefaultStaleClaimedAfter      = 15 * time.Minute
 	DefaultSignalMaxBytes         = int64(1 << 20) // 1 MiB
 	DefaultQuotaStaleAfter        = 45 * time.Minute
 	DefaultQuotaGateCheckInterval = 1 * time.Minute
@@ -369,11 +369,12 @@ func (s SelectorConfig) EffectiveMode() string {
 
 // QuotaConfig holds Quota Gate and usage snapshot settings.
 type QuotaConfig struct {
-	UsageFile         string `yaml:"usage_file"`
-	UsageFormat       string `yaml:"usage_format"`
-	StaleAfter        string `yaml:"stale_after"`
-	GateMode          string `yaml:"gate_mode"`
-	GateCheckInterval string `yaml:"gate_check_interval"`
+	Cooldown          CooldownConfig `yaml:"cooldown"`
+	UsageFile         string         `yaml:"usage_file"`
+	UsageFormat       string         `yaml:"usage_format"`
+	StaleAfter        string         `yaml:"stale_after"`
+	GateMode          string         `yaml:"gate_mode"`
+	GateCheckInterval string         `yaml:"gate_check_interval"`
 }
 
 // EffectiveUsageFormat returns the configured usage snapshot format, defaulting to "legacy".
@@ -696,23 +697,26 @@ func (m *ModelConfig) UnmarshalYAML(value *yaml.Node) error {
 
 // AgentConfig defines an agent driver configuration.
 type AgentConfig struct {
-	Preflight      string        `yaml:"preflight"`
-	Launch         string        `yaml:"launch"`
-	Resume         string        `yaml:"resume"`
-	SessionLogGlob string        `yaml:"session_log_glob"`
-	SandboxFlag    string        `yaml:"sandbox_flag"`
-	PromptStyle    string        `yaml:"prompt_style"`
-	VersionArgs    StringList    `yaml:"version_args"`
-	ManualUpdate   bool          `yaml:"manual_update"`
-	Models         []ModelConfig `yaml:"models"`
+	RateLimitPatterns  []string      `yaml:"rate_limit_patterns"`
+	RateLimitExitCodes []int         `yaml:"rate_limit_exit_codes"`
+	Preflight          string        `yaml:"preflight"`
+	Launch             string        `yaml:"launch"`
+	Resume             string        `yaml:"resume"`
+	SessionLogGlob     string        `yaml:"session_log_glob"`
+	SandboxFlag        string        `yaml:"sandbox_flag"`
+	PromptStyle        string        `yaml:"prompt_style"`
+	VersionArgs        StringList    `yaml:"version_args"`
+	ManualUpdate       bool          `yaml:"manual_update"`
+	Models             []ModelConfig `yaml:"models"`
 }
 
 // PoolConfig defines a quota pool.
 type PoolConfig struct {
-	Provider    string       `yaml:"provider"`
-	Unmeasured  bool         `yaml:"unmeasured"`
-	ShortWindow *bool        `yaml:"short_window"`
-	AppliesTo   []PoolTarget `yaml:"applies_to"`
+	Cooldown    CooldownConfig `yaml:"cooldown"`
+	Provider    string         `yaml:"provider"`
+	Unmeasured  bool           `yaml:"unmeasured"`
+	ShortWindow *bool          `yaml:"short_window"`
+	AppliesTo   []PoolTarget   `yaml:"applies_to"`
 }
 
 // EffectiveShortWindow reports whether this pool enforces a short rolling window check (defaults to true).
@@ -807,6 +811,9 @@ func (c *Config) Validate() error {
 	}
 
 	var errs []error
+	if err := c.validateCooldown(); err != nil {
+		errs = append(errs, err)
+	}
 
 	if strings.TrimSpace(c.InstanceID) == "" {
 		errs = append(errs, errors.New("instance_id must not be empty"))

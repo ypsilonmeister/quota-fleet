@@ -3,6 +3,8 @@ package store
 import (
 	"errors"
 	"time"
+
+	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 )
 
 // Status represents one of the 7 job lifecycle states.
@@ -144,6 +146,7 @@ type CompleteResult struct {
 
 // FailResult holds the outcome of Fail or RejectInvalid.
 type FailResult struct {
+	Cooldown          *quota.CooldownState
 	Job               *Job
 	CancelledChildIDs []int64
 }

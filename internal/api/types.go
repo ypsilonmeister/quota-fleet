@@ -9,31 +9,31 @@ import (
 
 // JobDTO is the JSON representation of a job returned by the HTTP API.
 type JobDTO struct {
-	ID                 int64      `json:"id"`
-	RequestID          string     `json:"request_id"`
-	Title              string     `json:"title"`
-	Status             string     `json:"status"`
-	Agent              string     `json:"agent"`
-	Host               string     `json:"host"`
+	ID                 int64               `json:"id"`
+	RequestID          string              `json:"request_id"`
+	Title              string              `json:"title"`
+	Status             string              `json:"status"`
+	Agent              string              `json:"agent"`
+	Host               string              `json:"host"`
 	Workdir            string              `json:"workdir"`
 	WorktreeSpec       *store.WorktreeSpec `json:"worktree_spec,omitempty"`
 	TargetRef          string              `json:"target_ref"`
-	Instructions       string     `json:"instructions"`
-	AcceptanceCriteria string     `json:"acceptance_criteria"`
-	ParentID           *int64     `json:"parent_id,omitempty"`
-	ClaimedBy          string     `json:"claimed_by,omitempty"`
-	ClaimedAt          *time.Time `json:"claimed_at,omitempty"`
-	Attempts           int        `json:"attempts"`
-	ResultText         string     `json:"result_text,omitempty"`
-	LastError          string     `json:"last_error,omitempty"`
-	DeliveredAt        *time.Time `json:"delivered_at,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-	Model              string     `json:"model,omitempty"`
-	Pool               string     `json:"pool,omitempty"`
-	AltPools           []string   `json:"alt_pools,omitempty"`
-	SessionID          string     `json:"session_id,omitempty"`
-	CreatedBy          string     `json:"created_by,omitempty"`
+	Instructions       string              `json:"instructions"`
+	AcceptanceCriteria string              `json:"acceptance_criteria"`
+	ParentID           *int64              `json:"parent_id,omitempty"`
+	ClaimedBy          string              `json:"claimed_by,omitempty"`
+	ClaimedAt          *time.Time          `json:"claimed_at,omitempty"`
+	Attempts           int                 `json:"attempts"`
+	ResultText         string              `json:"result_text,omitempty"`
+	LastError          string              `json:"last_error,omitempty"`
+	DeliveredAt        *time.Time          `json:"delivered_at,omitempty"`
+	CreatedAt          time.Time           `json:"created_at"`
+	UpdatedAt          time.Time           `json:"updated_at"`
+	Model              string              `json:"model,omitempty"`
+	Pool               string              `json:"pool,omitempty"`
+	AltPools           []string            `json:"alt_pools,omitempty"`
+	SessionID          string              `json:"session_id,omitempty"`
+	CreatedBy          string              `json:"created_by,omitempty"`
 
 	SelectedAgent   string `json:"selected_agent,omitempty"`
 	SelectedModel   string `json:"selected_model,omitempty"`
@@ -111,21 +111,21 @@ func cloneWorktreeSpec(spec *store.WorktreeSpec) *store.WorktreeSpec {
 
 // CreateJobRequest is the JSON request body for POST /jobs.
 type CreateJobRequest struct {
-	RequestID          string   `json:"request_id"`
-	Title              string   `json:"title"`
-	Draft              bool     `json:"draft"`
-	Agent              string   `json:"agent"`
-	Host               string   `json:"host"`
+	RequestID          string              `json:"request_id"`
+	Title              string              `json:"title"`
+	Draft              bool                `json:"draft"`
+	Agent              string              `json:"agent"`
+	Host               string              `json:"host"`
 	Workdir            string              `json:"workdir"`
 	WorktreeSpec       *store.WorktreeSpec `json:"worktree_spec,omitempty"`
 	TargetRef          string              `json:"target_ref"`
-	Instructions       string   `json:"instructions"`
-	AcceptanceCriteria string   `json:"acceptance_criteria"`
-	ParentID           *int64   `json:"parent_id"`
-	Model              string   `json:"model"`
-	Pool               string   `json:"pool"`
-	AltPools           []string `json:"alt_pools"`
-	SessionID          string   `json:"session_id"`
+	Instructions       string              `json:"instructions"`
+	AcceptanceCriteria string              `json:"acceptance_criteria"`
+	ParentID           *int64              `json:"parent_id"`
+	Model              string              `json:"model"`
+	Pool               string              `json:"pool"`
+	AltPools           []string            `json:"alt_pools"`
+	SessionID          string              `json:"session_id"`
 	// Selector hints (docs/19). Optional.
 	Role   string `json:"role"`
 	Weight string `json:"weight"`
@@ -220,11 +220,29 @@ type JobActionResponse struct {
 	Job *JobDTO `json:"job"`
 }
 
+// CooldownSummaryDTO describes an active cooldown.
+type CooldownSummaryDTO struct {
+	Pool             string    `json:"pool,omitempty"`
+	Until            time.Time `json:"until"`
+	RemainingSeconds int64     `json:"remaining_seconds"`
+	ConsecutiveHits  int       `json:"consecutive_hits"`
+	LastJobID        *int64    `json:"last_job_id,omitempty"`
+}
+
+type CooldownDTO struct {
+	CooldownSummaryDTO
+	Active      bool      `json:"active"`
+	TriggeredAt time.Time `json:"triggered_at"`
+	LastAgent   string    `json:"last_agent"`
+	LastPattern string    `json:"last_pattern"`
+}
+
 // StatusResponse is returned by GET /status.
 type StatusResponse struct {
-	InstanceID string           `json:"instance_id"`
-	Counts     map[string]int64 `json:"counts"`
-	Total      int64            `json:"total"`
+	Cooldowns  []CooldownSummaryDTO `json:"cooldowns,omitempty"`
+	InstanceID string               `json:"instance_id"`
+	Counts     map[string]int64     `json:"counts"`
+	Total      int64                `json:"total"`
 	// Chains summarizes chain runs and the Chain Driver (docs/22 §6, §8).
 	Chains *ChainStatusDTO `json:"chains,omitempty"`
 }
@@ -438,21 +456,22 @@ type ListGateDecisionsResponse struct {
 
 // PoolSummaryDTO describes the current quota summary for a configured pool.
 type PoolSummaryDTO struct {
-	Pool                   string     `json:"pool"`
-	Status                 string     `json:"status"`
-	Unmeasured             bool       `json:"unmeasured,omitempty"`
-	BlockedBy              string     `json:"blocked_by,omitempty"`
-	Reason                 string     `json:"reason,omitempty"`
-	WeeklyRemainingPercent *int       `json:"weekly_remaining_percent,omitempty"`
-	WeeklyResetAt          *time.Time `json:"weekly_reset_at,omitempty"`
-	WeeklyResetAtApprox    bool       `json:"weekly_reset_at_approx,omitempty"`
-	ShortApplicable        *bool      `json:"short_applicable,omitempty"`
-	ShortRemainingPercent  *int       `json:"short_remaining_percent,omitempty"`
-	ShortResetAt           *time.Time `json:"short_reset_at,omitempty"`
-	ShortResetAtApprox     bool       `json:"short_reset_at_approx,omitempty"`
-	ShortWindow            string     `json:"short_window,omitempty"`
-	MeasuredAt             *time.Time `json:"measured_at,omitempty"`
-	ServiceStale           bool       `json:"service_stale,omitempty"`
+	Cooldown               *CooldownDTO `json:"cooldown,omitempty"`
+	Pool                   string       `json:"pool"`
+	Status                 string       `json:"status"`
+	Unmeasured             bool         `json:"unmeasured,omitempty"`
+	BlockedBy              string       `json:"blocked_by,omitempty"`
+	Reason                 string       `json:"reason,omitempty"`
+	WeeklyRemainingPercent *int         `json:"weekly_remaining_percent,omitempty"`
+	WeeklyResetAt          *time.Time   `json:"weekly_reset_at,omitempty"`
+	WeeklyResetAtApprox    bool         `json:"weekly_reset_at_approx,omitempty"`
+	ShortApplicable        *bool        `json:"short_applicable,omitempty"`
+	ShortRemainingPercent  *int         `json:"short_remaining_percent,omitempty"`
+	ShortResetAt           *time.Time   `json:"short_reset_at,omitempty"`
+	ShortResetAtApprox     bool         `json:"short_reset_at_approx,omitempty"`
+	ShortWindow            string       `json:"short_window,omitempty"`
+	MeasuredAt             *time.Time   `json:"measured_at,omitempty"`
+	ServiceStale           bool         `json:"service_stale,omitempty"`
 }
 
 // ModelDTO describes a selectable model exposed by GET /meta.
@@ -470,18 +489,19 @@ type PoolAppliesToDTO struct {
 
 // MetaResponse is returned by GET /meta with non-sensitive form candidates and runtime modes.
 type MetaResponse struct {
-	Hosts         []string                         `json:"hosts"`
-	Agents        []string                         `json:"agents"`
-	HostAgents    map[string][]string              `json:"host_agents,omitempty"`
-	Models        map[string]map[string][]ModelDTO `json:"models"`
-	Pools         []string                         `json:"pools"`
-	PoolRules     map[string][]PoolAppliesToDTO    `json:"pool_rules,omitempty"`
-	GateMode      string                           `json:"gate_mode"`
-	SelectorMode  string                           `json:"selector_mode"`
-	EvaluatorMode string                           `json:"evaluator_mode"`
-	ReviewGate    ReviewGateDTO                    `json:"review_gate"`
-	PoolSummaries []PoolSummaryDTO                 `json:"pool_summaries"`
-	Scopes        []string                         `json:"scopes"`
+	CooldownEnabled bool                             `json:"cooldown_enabled"`
+	Hosts           []string                         `json:"hosts"`
+	Agents          []string                         `json:"agents"`
+	HostAgents      map[string][]string              `json:"host_agents,omitempty"`
+	Models          map[string]map[string][]ModelDTO `json:"models"`
+	Pools           []string                         `json:"pools"`
+	PoolRules       map[string][]PoolAppliesToDTO    `json:"pool_rules,omitempty"`
+	GateMode        string                           `json:"gate_mode"`
+	SelectorMode    string                           `json:"selector_mode"`
+	EvaluatorMode   string                           `json:"evaluator_mode"`
+	ReviewGate      ReviewGateDTO                    `json:"review_gate"`
+	PoolSummaries   []PoolSummaryDTO                 `json:"pool_summaries"`
+	Scopes          []string                         `json:"scopes"`
 }
 
 // ReviewGateDTO is the review verdict gate state exposed by GET /meta (docs/18). It says

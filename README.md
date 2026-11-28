@@ -216,6 +216,8 @@ preceded the Go implementation here ([full case study](docs/05-case-study.md)):
    `quota-fleet` itself only reads and validates this file contract — it never
    stores or handles subscription credentials.
 
+   Opt in to [reactive pool cooldown](docs/03-quota-gate.md#reactive-pool-cooldown) to pause a pool after detected agent quota errors.
+
    Minimal Schema v1 snapshot example:
    ```json
    {

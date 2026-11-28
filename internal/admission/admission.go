@@ -20,6 +20,7 @@ import (
 
 // Options configures an Admission.
 type Options struct {
+	Store        *store.Store
 	GateMode     string
 	SelectorMode string
 	Pools        map[string]config.PoolConfig
@@ -37,6 +38,7 @@ type Options struct {
 
 // Admission evaluates job requests against the Selector and the Gate.
 type Admission struct {
+	store        *store.Store
 	gateMode     string
 	selectorMode string
 	pools        map[string]config.PoolConfig
@@ -52,6 +54,7 @@ type Admission struct {
 // New constructs an Admission with the same defaults as the API server.
 func New(opts Options) *Admission {
 	a := &Admission{
+		store:        opts.Store,
 		gateMode:     strings.TrimSpace(opts.GateMode),
 		selectorMode: strings.TrimSpace(opts.SelectorMode),
 		pools:        opts.Pools,
@@ -101,6 +104,7 @@ type Request struct {
 // Usage loads the usage snapshot at most once per request so the Selector and the Gate
 // judge the same data.
 type Usage struct {
+	ctx  context.Context
 	load func() (*quota.Snapshot, error)
 	done bool
 	snap *quota.Snapshot
@@ -108,7 +112,7 @@ type Usage struct {
 }
 
 // NewUsage returns a lazily loaded snapshot holder for one request.
-func (a *Admission) NewUsage() *Usage { return &Usage{load: a.LoadSnapshot} }
+func (a *Admission) NewUsage() *Usage { return &Usage{load: a.LoadSnapshot, ctx: context.Background()} }
 
 // Get returns the snapshot, loading it on the first call.
 func (u *Usage) Get() (*quota.Snapshot, error) {
@@ -240,6 +244,16 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 		Pools:      a.pools,
 		Format:     a.usageFormat,
 	}
+	if a.store != nil && a.gateMode == config.GateModeEnforce {
+		cooldownSnapshot := snap
+		if snapErr != nil {
+			cooldownSnapshot = nil
+		}
+		if err := a.store.LoadCooldowns(ctx, cooldownSnapshot, &evalOpts); err != nil && a.logger != nil {
+			a.logger.Printf("selector cooldown state: %v", err)
+		}
+	}
+
 	res := selector.Select(selector.Input{
 		Role:        strings.TrimSpace(req.Role),
 		Weight:      strings.TrimSpace(req.Weight),
@@ -321,62 +335,59 @@ func (a *Admission) EvaluateGate(primaryPool string, altPools []string, usage *U
 		CheckPoolConfig: a.usageFormat == config.UsageFormatV1,
 	}
 	primaryPool = strings.TrimSpace(primaryPool)
+	stateUnavailable := quota.GateEvaluation{Format: a.usageFormat, RequestedPool: primaryPool, AltPools: altPools,
+		Decision: quota.DecisionWouldHold, Reason: "cooldown_state_unavailable", DecidedAt: opts.Now}
+	if a.store != nil {
+		if err := a.store.ReadCooldowns(usage.ctx, &opts); err != nil {
+			return stateUnavailable, err
+		}
+	}
+	recoverCooldowns := func(snap *quota.Snapshot) error {
+		if a.store == nil {
+			return nil
+		}
+		return a.store.RecoverCooldowns(usage.ctx, snap, &opts)
+	}
+
+	if a.usageFormat == config.UsageFormatV1 && len(a.findUndefinedPools(primaryPool, altPools)) > 0 {
+		return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+	}
+	if cfg := a.pools[primaryPool]; primaryPool != "" && cfg.Unmeasured && quota.EvaluatePool(primaryPool, nil, opts).Status == quota.PoolUnmeasured {
+		return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+	}
+	if quota.AllCandidatesUnmeasured(primaryPool, altPools, a.pools) {
+		return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
+	}
 
 	if a.usageFormat == config.UsageFormatV1 {
-		// Step 1: check ALL candidates exist in fleet.yaml BEFORE bypass or snapshot load (Item B).
-		if missing := a.findUndefinedPools(primaryPool, altPools); len(missing) > 0 {
-			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-		}
-		// Step 2: bypass if primary is unmeasured OR (primary empty and all alts are defined & unmeasured).
-		if primaryPool != "" {
-			if cfg, ok := a.pools[primaryPool]; ok && cfg.Unmeasured {
-				return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		} else if len(altPools) > 0 {
-			allUnmeasured := true
-			anyCand := false
-			for _, alt := range altPools {
-				p := strings.TrimSpace(alt)
-				if p == "" {
-					continue
-				}
-				anyCand = true
-				cfg, ok := a.pools[p]
-				if !ok || !cfg.Unmeasured {
-					allUnmeasured = false
-					break
-				}
-			}
-			if anyCand && allUnmeasured {
-				return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		}
-
 		snap, err := usage.Get()
 		if err != nil {
 			eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
-			eval.Decision = quota.DecisionUnknown
+			if eval.Decision != quota.DecisionUnknown {
+				return eval, err
+			}
 			eval.Reason = quota.ReasonSnapshotError
 			eval.Detail = err.Error()
 			return eval, err
+		}
+		if err := recoverCooldowns(snap); err != nil {
+			return stateUnavailable, err
 		}
 		return quota.EvaluateGate(primaryPool, altPools, snap, opts), nil
 	}
 
 	// Legacy mode (Decision 2 & Item A): preserve exact existing behavior.
-	if primaryPool != "" {
-		if cfg, ok := a.pools[primaryPool]; ok && cfg.Unmeasured {
-			return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
-		}
-	}
 	snap, err := usage.Get()
 	if err != nil {
 		eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
-		if !eval.Bypassed {
+		if !eval.Bypassed && eval.BlockedBy != "cooldown" {
 			eval.Decision = quota.DecisionUnknown
 			eval.Reason = fmt.Sprintf("%s: %v", quota.ReasonSnapshotError, err)
 		}
 		return eval, err
+	}
+	if err := recoverCooldowns(snap); err != nil {
+		return stateUnavailable, err
 	}
 	eval := quota.EvaluateGate(primaryPool, altPools, snap, opts)
 	if a.logger != nil {
@@ -434,6 +445,7 @@ func gateRecord(mode string, eval quota.GateEvaluation) *store.GateDecision {
 // Prepare validates the request, checks explicit pools in v1 enforce, resolves the pool,
 // runs the Selector, and checks the effort against the agent the job will run on.
 func (a *Admission) Prepare(ctx context.Context, req Request, usage *Usage) (store.CreateJobParams, error) {
+	usage.ctx = ctx
 	if err := a.ValidateRequest(req); err != nil {
 		return store.CreateJobParams{}, err
 	}

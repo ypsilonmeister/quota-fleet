@@ -158,6 +158,7 @@ func New(opts Options) (*Runtime, error) {
 		Logger:     logger,
 	})
 	shepherd := NewShepherd(ShepherdOptions{
+		Config:         opts.Config,
 		Store:          opts.Store,
 		Adapter:        opts.Adapter,
 		Evaluator:      eval,
@@ -174,6 +175,7 @@ func New(opts Options) (*Runtime, error) {
 	chainDriver := NewChainDriver(ChainDriverOptions{
 		Store: opts.Store,
 		Admission: admission.New(admission.Options{
+			Store:        opts.Store,
 			GateMode:     opts.GateMode,
 			SelectorMode: opts.SelectorMode,
 			Pools:        opts.Pools,
@@ -208,6 +210,7 @@ func New(opts Options) (*Runtime, error) {
 		ChainDriverStaleAfter: 3 * chainInterval,
 	})
 	gateChecker := NewGateChecker(GateCheckerOptions{
+		LauncherNotify: notifyCh,
 		Store:          opts.Store,
 		GateMode:       opts.GateMode,
 		UsageFile:      opts.QuotaUsageFile,

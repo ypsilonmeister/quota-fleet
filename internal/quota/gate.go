@@ -12,6 +12,7 @@ import (
 
 // EvalOptions controls gate evaluation timing, staleness threshold, format, and pool metadata.
 type EvalOptions struct {
+	Cooldowns map[string]CooldownState
 	// Now is the evaluation timestamp. Defaults to time.Now().UTC() when zero.
 	Now time.Time
 	// StaleAfter is the maximum allowed snapshot age. Defaults to DefaultStaleAfter (45m).
@@ -62,10 +63,24 @@ func IsStale(measuredAt, now time.Time, staleAfter time.Duration) bool {
 // When opts.Format is "v1", it applies the strict Schema v1 priority rules (§3.4 ranks 1..11).
 // Otherwise it preserves the exact legacy behavior (§3.6).
 func EvaluatePool(pool string, snap *Snapshot, opts EvalOptions) PoolEvaluation {
+	var ev PoolEvaluation
 	if opts.effectiveFormat() == FormatV1 {
-		return evaluatePoolV1(pool, snap, opts)
+		ev = evaluatePoolV1(pool, snap, opts)
+	} else {
+		ev = evaluatePoolLegacy(pool, snap, opts)
 	}
-	return evaluatePoolLegacy(pool, snap, opts)
+	c, ok := opts.Cooldowns[ev.Pool]
+	if !ok || !c.Active(opts.effectiveNow()) || SnapshotRecovered(ev, snap, c) {
+		return ev
+	}
+	ev.Cooldown = &c
+	if ev.Status == PoolHealthy || ev.Status == PoolUnmeasured ||
+		(opts.effectiveFormat() == FormatLegacy && (ev.Reason == ReasonSnapshotError || ev.Reason == ReasonPoolNotFound)) {
+		ev.Status = PoolCooldown
+		ev.BlockedBy = "cooldown"
+		ev.Reason = c.Reason()
+	}
+	return ev
 }
 
 func evaluatePoolLegacy(pool string, snap *Snapshot, opts EvalOptions) PoolEvaluation {
@@ -365,7 +380,7 @@ func evaluateGateLegacy(primaryPool string, altPools []string, snap *Snapshot, o
 
 	// Primary unmeasured pool bypasses gate measurement immediately.
 	if primaryPool != "" {
-		if cfg, ok := opts.Pools[primaryPool]; ok && cfg.Unmeasured {
+		if cfg, ok := opts.Pools[primaryPool]; ok && cfg.Unmeasured && EvaluatePool(primaryPool, snap, opts).Status == PoolUnmeasured {
 			res.Decision = DecisionWouldPass
 			res.SelectedPool = primaryPool
 			res.Bypassed = true
@@ -389,14 +404,14 @@ func evaluateGateLegacy(primaryPool string, altPools []string, snap *Snapshot, o
 	)
 
 	for _, name := range candidates {
-		ev := evaluatePoolLegacy(name, snap, opts)
+		ev := EvaluatePool(name, snap, opts)
 		evals = append(evals, ev)
 		switch ev.Status {
 		case PoolHealthy:
 			healthy = append(healthy, ev)
 		case PoolUnmeasured:
 			unmeasured = append(unmeasured, ev)
-		case PoolExhausted:
+		case PoolExhausted, PoolCooldown:
 			exhausted = append(exhausted, ev)
 		default:
 			unknowns = append(unknowns, ev)
@@ -421,6 +436,20 @@ func evaluateGateLegacy(primaryPool string, altPools []string, snap *Snapshot, o
 		return res
 	}
 
+	// Legacy may allow several unknown snapshot reasons. Preserve an observed cooldown
+	// when there is no usable alternative, including when usage_file is absent.
+	for _, ev := range exhausted {
+		if len(unknowns) == 0 {
+			break
+		}
+		if ev.Status == PoolCooldown {
+			res.Decision = DecisionWouldHold
+			res.BlockedBy = ev.BlockedBy
+			res.Reason = ev.Reason
+			return res
+		}
+	}
+
 	if len(unknowns) > 0 {
 		res.Decision = DecisionUnknown
 		res.Reason = unknowns[0].Reason
@@ -433,6 +462,9 @@ func evaluateGateLegacy(primaryPool string, altPools []string, snap *Snapshot, o
 	res.Decision = DecisionWouldHold
 	if len(exhausted) > 0 {
 		res.BlockedBy = exhausted[0].BlockedBy
+		if exhausted[0].Status == PoolCooldown {
+			res.Reason = exhausted[0].Reason
+		}
 	}
 	return res
 }
@@ -515,7 +547,7 @@ func evaluateGateV1(primaryPool string, altPools []string, snap *Snapshot, opts 
 	// In HeldRelease mode (§4.2.C + Item B), if primaryPool is defined & unmeasured, allow bypass
 	// even when some alt_pools were removed from fleet.yaml (recording UndefinedPools for WARNING).
 	if primaryPool != "" {
-		if cfg, ok := opts.Pools[primaryPool]; ok && cfg.Unmeasured {
+		if cfg, ok := opts.Pools[primaryPool]; ok && cfg.Unmeasured && EvaluatePool(primaryPool, snap, opts).Status == PoolUnmeasured {
 			res.Decision = DecisionWouldPass
 			res.SelectedPool = primaryPool
 			res.Bypassed = true
@@ -540,7 +572,7 @@ func evaluateGateV1(primaryPool string, altPools []string, snap *Snapshot, opts 
 		allUnmeasured := true
 		for _, c := range candidates {
 			cfg, ok := opts.Pools[c]
-			if !ok || !cfg.Unmeasured {
+			if !ok || !cfg.Unmeasured || EvaluatePool(c, snap, opts).Status != PoolUnmeasured {
 				allUnmeasured = false
 				break
 			}
@@ -575,7 +607,7 @@ func evaluateGateV1(primaryPool string, altPools []string, snap *Snapshot, opts 
 	)
 
 	for _, name := range candidates {
-		ev := evaluatePoolV1(name, snap, opts)
+		ev := EvaluatePool(name, snap, opts)
 		evals = append(evals, ev)
 		if ev.Reason == ReasonPoolNotConfigured {
 			undefined = append(undefined, name)
@@ -585,7 +617,7 @@ func evaluateGateV1(primaryPool string, altPools []string, snap *Snapshot, opts 
 			healthy = append(healthy, ev)
 		case PoolUnmeasured:
 			unmeasured = append(unmeasured, ev)
-		case PoolExhausted:
+		case PoolExhausted, PoolCooldown:
 			exhausted = append(exhausted, ev)
 		default:
 			unknowns = append(unknowns, ev)
@@ -604,10 +636,9 @@ func evaluateGateV1(primaryPool string, altPools []string, snap *Snapshot, opts 
 		return res
 	}
 
-	// Step 5 (Decision 6): detour to unmeasured alt ONLY when there is >= 1 measured candidate
-	// and EVERY measured candidate is definitively exhausted (zero unknowns).
-	measuredCount := len(healthy) + len(exhausted) + len(unknowns)
-	if measuredCount > 0 && len(unknowns) == 0 && len(exhausted) == measuredCount && len(unmeasured) > 0 {
+	// Step 5: detour to an available unmeasured pool once all other candidates
+	// are definitively exhausted or cooling. Unknown measured pools fail closed.
+	if len(unknowns) == 0 && len(unmeasured) > 0 {
 		res.Decision = DecisionWouldPass
 		res.SelectedPool = unmeasured[0].Pool
 		res.Bypassed = true
@@ -632,6 +663,9 @@ func evaluateGateV1(primaryPool string, altPools []string, snap *Snapshot, opts 
 	res.Decision = DecisionWouldHold
 	if len(exhausted) > 0 {
 		res.BlockedBy = exhausted[0].BlockedBy
+		if exhausted[0].Status == PoolCooldown {
+			res.Reason = exhausted[0].Reason
+		}
 	}
 	return res
 }
@@ -675,6 +709,18 @@ func pickPrimaryUnknown(unknowns []PoolEvaluation) PoolEvaluation {
 	return best
 }
 
+// AllCandidatesUnmeasured reports whether every candidate is configured and unmeasured.
+func AllCandidatesUnmeasured(primaryPool string, altPools []string, pools map[string]config.PoolConfig) bool {
+	primaryPool = strings.TrimSpace(primaryPool)
+	candidates := buildCandidates(primaryPool, cleanPools(altPools, primaryPool))
+	for _, name := range candidates {
+		if !pools[name].Unmeasured {
+			return false
+		}
+	}
+	return len(candidates) > 0
+}
+
 // EvaluateFromFile loads usageFile and evaluates the gate for primaryPool and altPools
 // according to opts.Format (defaulting to "legacy").
 func EvaluateFromFile(usageFile, primaryPool string, altPools []string, opts EvalOptions) (GateEvaluation, error) {
@@ -696,24 +742,6 @@ func EvaluateFromFile(usageFile, primaryPool string, altPools []string, opts Eva
 				}
 			}
 		}
-		// Step 2: bypass if primary is unmeasured OR (primary empty and all candidates defined & unmeasured).
-		if primaryPool != "" {
-			if cfg, ok := opts.Pools[primaryPool]; ok && cfg.Unmeasured {
-				return EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		} else {
-			allUnmeasured := true
-			for _, c := range candidates {
-				cfg, ok := opts.Pools[c]
-				if !ok || !cfg.Unmeasured {
-					allUnmeasured = false
-					break
-				}
-			}
-			if allUnmeasured {
-				return EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		}
 		// In HeldRelease mode, if all candidates were deleted, no need to read file.
 		if opts.CheckPoolConfig && opts.HeldRelease {
 			anyDefined := false
@@ -727,19 +755,19 @@ func EvaluateFromFile(usageFile, primaryPool string, altPools []string, opts Eva
 				return EvaluateGate(primaryPool, altPools, nil, opts), nil
 			}
 		}
-	} else {
-		// Legacy bypass check.
-		if primaryPool != "" {
-			if cfg, ok := opts.Pools[primaryPool]; ok && cfg.Unmeasured {
-				return EvaluateGate(primaryPool, altPools, nil, opts), nil
-			}
-		}
+	}
+
+	if cfg := opts.Pools[primaryPool]; primaryPool != "" && cfg.Unmeasured && EvaluatePool(primaryPool, nil, opts).Status == PoolUnmeasured {
+		return EvaluateGate(primaryPool, altPools, nil, opts), nil
+	}
+	if AllCandidatesUnmeasured(primaryPool, altPools, opts.Pools) {
+		return EvaluateGate(primaryPool, altPools, nil, opts), nil
 	}
 
 	snap, err := LoadUsageFileWithFormat(usageFile, format)
 	if err != nil {
 		eval := EvaluateGate(primaryPool, altPools, nil, opts)
-		if !eval.Bypassed {
+		if !eval.Bypassed && eval.BlockedBy != "cooldown" {
 			eval.Decision = DecisionUnknown
 			if format == FormatV1 {
 				eval.Reason = ReasonSnapshotError
@@ -779,7 +807,7 @@ func ShouldHoldOnEnforce(eval GateEvaluation) bool {
 		return false
 	}
 	for _, p := range eval.Pools {
-		if p.Status == PoolExhausted {
+		if p.Status == PoolExhausted || p.Status == PoolCooldown {
 			continue
 		}
 		if p.Status == PoolUnknown && (p.Reason == ReasonStale || p.Reason == ReasonShortWindowMissing) {
@@ -816,6 +844,9 @@ func CompareLegacyWithV1(primaryPool string, altPools []string, snap *Snapshot, 
 
 // FormatHoldReason builds a concise machine- and human-readable hold reason from eval.
 func FormatHoldReason(eval GateEvaluation) string {
+	if eval.BlockedBy == "cooldown" {
+		return eval.Reason
+	}
 	if eval.Decision == DecisionWouldHold {
 		if eval.BlockedBy != "" {
 			return "exhausted:" + eval.BlockedBy
@@ -862,6 +893,9 @@ func FormatStaleUnarrivedMessage(age, staleAfter time.Duration) string {
 }
 
 type poolSnapshotSummary struct {
+	CooldownUntil          *time.Time       `json:"cooldown_until,omitempty"`
+	ConsecutiveHits        int              `json:"consecutive_hits,omitempty"`
+	LastJobID              *int64           `json:"last_job_id,omitempty"`
 	Pool                   string           `json:"pool"`
 	Status                 PoolHealthStatus `json:"status"`
 	BlockedBy              string           `json:"blocked_by,omitempty"`
@@ -929,6 +963,12 @@ func SummarizeEvaluation(eval GateEvaluation) string {
 				PoolError:  pPoolErr,
 				AgeSeconds: p.AgeSeconds,
 			}
+			if c := p.Cooldown; c != nil {
+				ps.CooldownUntil = &c.ActiveUntil
+				ps.ConsecutiveHits = c.ConsecutiveHits
+				ps.LastJobID = c.LastJobID
+			}
+
 			if p.Snapshot != nil {
 				if !p.Snapshot.WeeklyAbsent {
 					w := p.Snapshot.WeeklyRemainingPercent

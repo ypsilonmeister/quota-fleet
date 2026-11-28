@@ -25,6 +25,8 @@ func runGate(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "cooldowns", "cooldown":
+		return runGateCooldown(args, stdout, stderr)
 	case "check":
 		return runGateCheck(args[1:], stdout, stderr)
 	case "decisions":
@@ -45,7 +47,9 @@ func runGate(args []string, stdout, stderr io.Writer) int {
 
 func printGateUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  quota-fleet gate check [--pool <name>] [--alt-pools a,b] [--usage-file path] [--format legacy|v1] [--stale-after 45m] [--now RFC3339] [--json] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet gate cooldowns [--json] [--db path] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet gate cooldown clear <pool> [--db path] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet gate check [--pool <name>] [--alt-pools a,b] [--usage-file path] [--format legacy|v1] [--stale-after 45m] [--now RFC3339] [--ignore-cooldown] [--json] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate decisions [--limit N] [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate held [--status held|released|cancelled|all] [--limit N] [--json] [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet gate release <held_id> [--usage-file path] [--format legacy|v1] [--stale-after 45m] [--json] [--db path] [--config fleet.yaml]")
@@ -61,6 +65,8 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("gate check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
+	var loadedConfig *config.Config
+	var ignoreCooldown bool
 	var (
 		cfgPath       string
 		usageFileFlag string
@@ -80,6 +86,7 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&pool, "pool", "", "primary quota pool name (optional if --alt-pools is specified)")
 	fs.StringVar(&altPoolsRaw, "alt-pools", "", "comma-separated alternative pool names")
 	fs.BoolVar(&asJSON, "json", false, "output result as JSON")
+	fs.BoolVar(&ignoreCooldown, "ignore-cooldown", false, "evaluate the usage snapshot alone")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -118,6 +125,7 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 
 	if cfg, err := config.Load(cfgPath); err == nil {
 		cfgLoaded = true
+		loadedConfig = cfg
 		poolsCfg = cfg.Pools
 		staleAfter = cfg.Quota.EffectiveStaleAfter()
 		usageFormat = cfg.Quota.EffectiveUsageFormat()
@@ -163,6 +171,13 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 		Format:          usageFormat,
 		CheckPoolConfig: cfgLoaded && usageFormat == config.UsageFormatV1,
 	}
+	if !ignoreCooldown && loadedConfig != nil && loadedConfig.HasCooldown() {
+		if err := loadGateCheckCooldowns(loadedConfig, &evalOpts); err != nil {
+			fmt.Fprintf(stderr, "gate check failed: %v\n", err)
+			return 1
+		}
+	}
+
 	eval, evalErr := quota.EvaluateFromFile(usageFile, pool, altPools, evalOpts)
 
 	var legacyDiffs []string
@@ -178,6 +193,13 @@ func runGateCheck(args []string, stdout, stderr io.Writer) int {
 		exitCode = 1
 	}
 
+	if !asJSON {
+		for _, p := range eval.Pools {
+			if p.Cooldown != nil {
+				fmt.Fprintf(stdout, "%s: %s\n", p.Pool, p.Cooldown.Reason())
+			}
+		}
+	}
 	if asJSON {
 		out := gateCheckJSONOutput{
 			GateEvaluation: eval,
@@ -608,4 +630,87 @@ func parseCommaList(raw string) []string {
 		}
 	}
 	return out
+}
+
+func loadGateCheckCooldowns(cfg *config.Config, opts *quota.EvalOptions) error {
+	if _, err := os.Stat(cfg.DBPath()); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.DBPath(), store.Options{Config: cfg, InstanceID: cfg.InstanceID})
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	return st.ReadCooldowns(ctx, opts)
+}
+
+func runGateCooldown(args []string, stdout, stderr io.Writer) int {
+	var pool string
+	clear := args[0] == "cooldown"
+	if clear {
+		if len(args) < 3 || args[1] != "clear" || strings.TrimSpace(args[2]) == "" {
+			printGateUsage(stderr)
+			return 1
+		}
+		pool = args[2]
+		args = args[3:]
+	} else {
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("gate cooldowns", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cfgPath := fs.String("config", resolveDefaultConfigPath(), "path to fleet.yaml")
+	dbPath := fs.String("db", "", "path to fleet.db")
+	asJSON := fs.Bool("json", false, "output result as JSON")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return 1
+	}
+	ctx := context.Background()
+	st, _, err := openLocalStore(ctx, *cfgPath, *dbPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer st.Close()
+	if clear {
+		changed, err := st.ClearCooldown(ctx, pool)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if changed {
+			fmt.Fprintf(stdout, "%s: cleared\n", pool)
+		} else {
+			fmt.Fprintf(stdout, "%s: no pending cooldown\n", pool)
+		}
+		return 0
+	}
+	rows, err := st.ListCooldowns(ctx)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if *asJSON {
+		if err := json.NewEncoder(stdout).Encode(rows); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	now := time.Now()
+	for _, c := range rows {
+		state := "half-open"
+		if c.Active(now) {
+			state = "active"
+		}
+		if c.ClearedAt != nil {
+			state = "cleared (" + c.ClearedReason + ")"
+		}
+		fmt.Fprintf(stdout, "%s %s %s\n", c.Pool, state, c.Reason())
+	}
+	return 0
 }

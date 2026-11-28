@@ -54,16 +54,16 @@ func printJobUsage(w io.Writer) {
 
 func openLocalStore(ctx context.Context, cfgPath, dbPath string) (*store.Store, string, error) {
 	var instanceID string
+	cfg, loadErr := config.Load(cfgPath)
 	if dbPath == "" {
-		cfg, err := config.Load(cfgPath)
-		if err != nil {
-			return nil, "", err
+		if loadErr != nil {
+			return nil, "", loadErr
 		}
 		dbPath = cfg.DBPath()
 		instanceID = cfg.InstanceID
 	}
 
-	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: instanceID})
+	st, err := store.Open(ctx, dbPath, store.Options{InstanceID: instanceID, Config: cfg})
 	if err != nil {
 		return nil, "", fmt.Errorf("open store %q: %w", dbPath, err)
 	}

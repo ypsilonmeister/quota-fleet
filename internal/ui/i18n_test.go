@@ -556,3 +556,27 @@ assert.strictEqual(english[7], "pool: claude (auto)");
 `
 	runNode(t, "ALL_UI_I18N_MESSAGE_TESTS_PASSED", script, nil)
 }
+
+func TestCooldownCountdownTextWithNode(t *testing.T) {
+	script := `
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const i18n = require("./assets/i18n.js");
+const source = fs.readFileSync("assets/app.js", "utf8");
+const callback = source.match(/text: (function \(\) \{\s*return [Lt]\("cooldown\.until",[\s\S]*?\n\s*\}) \}\)\);/);
+assert.ok(callback, "cooldown countdown callback");
+const now = Date.parse("2026-01-01T12:00:00Z");
+const render = vm.runInNewContext("(" + callback[1] + ")", {
+  t: i18n.t, L: i18n.lazy,
+  formatTime: () => "12:01",
+  Date: { parse: Date.parse, now: () => now },
+  cd: { until: "2026-01-01T12:01:00Z" }
+});
+const node = { set textContent(value) { this.text = String(value); } };
+i18n.setText(node, render);
+assert.equal(node.text, i18n.t("cooldown.until", { until: "12:01", minutes: 1 }));
+console.log("cooldown countdown ok");
+`
+	runNode(t, "cooldown countdown ok", script, nil)
+}
