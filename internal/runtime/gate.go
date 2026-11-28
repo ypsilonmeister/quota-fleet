@@ -21,6 +21,7 @@ type GateCheckerOptions struct {
 	GateMode       string
 	UsageFile      string
 	UsageFormat    string
+	Pace           config.PaceConfig
 	StaleAfter     time.Duration
 	Pools          map[string]config.PoolConfig
 	Interval       time.Duration
@@ -51,6 +52,7 @@ type GateChecker struct {
 	gateMode       string
 	usageFile      string
 	usageFormat    string
+	pace           config.PaceConfig
 	staleAfter     time.Duration
 	pools          map[string]config.PoolConfig
 	interval       time.Duration
@@ -94,6 +96,7 @@ func NewGateChecker(opts GateCheckerOptions) *GateChecker {
 		gateMode:       mode,
 		usageFile:      strings.TrimSpace(opts.UsageFile),
 		usageFormat:    usageFormat,
+		pace:           opts.Pace,
 		staleAfter:     staleAfter,
 		pools:          opts.Pools,
 		interval:       interval,
@@ -136,11 +139,13 @@ func (g *GateChecker) CheckOnce(ctx context.Context) error {
 		return nil
 	}
 	var (
-		snap     *quota.Snapshot
-		snapErr  error
-		snapRead bool
-		cursor   string
-		seenIDs  = make(map[string]struct{})
+		snap         *quota.Snapshot
+		snapErr      error
+		snapRead     bool
+		cursor       string
+		paceLoad     map[string]int
+		paceLoadRead bool
+		seenIDs      = make(map[string]struct{})
 	)
 	if g.store.CooldownsEnabled() {
 		if g.usageFile != "" || g.snapshotLoader != nil {
@@ -186,7 +191,11 @@ func (g *GateChecker) CheckOnce(ctx context.Context) error {
 				}
 				heldSnap, heldSnapErr = snap, snapErr
 			}
-			res, _ := g.tryReleaseHeld(ctx, held, heldSnap, heldSnapErr, true)
+			if !paceLoadRead && g.pace.ShadowEnabled() && heldSnap != nil && heldSnapErr == nil {
+				paceLoad = g.readPaceLoad(ctx)
+				paceLoadRead = true
+			}
+			res, _ := g.tryReleaseHeld(ctx, held, heldSnap, heldSnapErr, true, paceLoad)
 			if res != nil && res.Released {
 				g.clearWarn(held.ID)
 			}
@@ -221,7 +230,11 @@ func (g *GateChecker) ReleaseByID(ctx context.Context, heldID string) (*ReleaseR
 	if !g.shouldSkipSnapshotForHeld(held) {
 		snap, snapErr = g.loadSnapshot()
 	}
-	res, relErr := g.tryReleaseHeld(ctx, held, snap, snapErr, false)
+	var paceLoad map[string]int
+	if g.pace.ShadowEnabled() && snap != nil && snapErr == nil {
+		paceLoad = g.readPaceLoad(ctx)
+	}
+	res, relErr := g.tryReleaseHeld(ctx, held, snap, snapErr, false, paceLoad)
 	if res != nil && res.Released {
 		g.clearWarn(held.ID)
 	}
@@ -291,12 +304,21 @@ func (g *GateChecker) shouldSkipSnapshotForHeld(held *store.HeldJob) bool {
 	return !anyDefined
 }
 
+func (g *GateChecker) readPaceLoad(ctx context.Context) map[string]int {
+	load, err := g.store.ActivePoolLoads(ctx)
+	if err != nil {
+		g.logger.Printf("gate release pace shadow load: %v", err)
+	}
+	return load
+}
+
 func (g *GateChecker) tryReleaseHeld(
 	ctx context.Context,
 	held *store.HeldJob,
 	snap *quota.Snapshot,
 	snapErr error,
 	periodic bool,
+	paceLoad map[string]int,
 ) (*ReleaseResult, error) {
 	opts := quota.EvalOptions{
 		Now:             g.now(),
@@ -353,6 +375,20 @@ func (g *GateChecker) tryReleaseHeld(
 			held.ID, eval.SelectedPool, eval.UndefinedPools)
 	}
 
+	var shadowPool, comparison string
+	if paceLoad != nil && !eval.Bypassed {
+		ranking := quota.RankHealthy(eval.Pools, opts, g.pace, paceLoad)
+		if ranking.Index >= 0 {
+			shadowPool = eval.Pools[ranking.Index].Pool
+			comparison = ranking.Describe(eval.SelectedPool, shadowPool)
+			if eval.Reason == "" {
+				eval.Reason = comparison
+			} else {
+				eval.Reason = quota.FormatDecisionReason(eval) + "; " + comparison
+				eval.Detail = ""
+			}
+		}
+	}
 	out, err := g.store.ReleaseHeld(ctx, store.ReleaseHeldParams{
 		HeldID:       held.ID,
 		SelectedPool: eval.SelectedPool,
@@ -419,6 +455,12 @@ func (g *GateChecker) tryReleaseHeld(
 			Evaluation:   eval,
 			Reason:       out.PermanentErr.Error(),
 		}, out.PermanentErr
+	}
+	if out.Created && shadowPool != "" {
+		paceLoad[shadowPool]++
+		if shadowPool != eval.SelectedPool {
+			g.logger.Printf("INFO: gate release held=%s pool=%s alt=%v: %s", held.ID, eval.RequestedPool, eval.AltPools, comparison)
+		}
 	}
 	return &ReleaseResult{
 		Held:         out.Held,

@@ -65,6 +65,7 @@ type Options struct {
 	EvaluatorMode    string
 	QuotaUsageFile   string
 	QuotaUsageFormat string
+	Pace             config.PaceConfig
 	QuotaStaleAfter  time.Duration
 	Pools            map[string]config.PoolConfig
 	// Non-sensitive configured names exposed by GET /meta.
@@ -301,6 +302,7 @@ func NewServer(st *store.Store, opts Options) *Server {
 		Store:        s.store,
 		GateMode:     gateMode,
 		SelectorMode: selectorMode,
+		Pace:         opts.Pace,
 		Pools:        opts.Pools,
 		StaleAfter:   staleAfter,
 		UsageFile:    strings.TrimSpace(opts.QuotaUsageFile),

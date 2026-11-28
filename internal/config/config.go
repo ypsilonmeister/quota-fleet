@@ -369,6 +369,7 @@ func (s SelectorConfig) EffectiveMode() string {
 
 // QuotaConfig holds Quota Gate and usage snapshot settings.
 type QuotaConfig struct {
+	Pace              PaceConfig     `yaml:"pace"`
 	Cooldown          CooldownConfig `yaml:"cooldown"`
 	UsageFile         string         `yaml:"usage_file"`
 	UsageFormat       string         `yaml:"usage_format"`
@@ -712,11 +713,13 @@ type AgentConfig struct {
 
 // PoolConfig defines a quota pool.
 type PoolConfig struct {
-	Cooldown    CooldownConfig `yaml:"cooldown"`
-	Provider    string         `yaml:"provider"`
-	Unmeasured  bool           `yaml:"unmeasured"`
-	ShortWindow *bool          `yaml:"short_window"`
-	AppliesTo   []PoolTarget   `yaml:"applies_to"`
+	WeeklyHours    float64        `yaml:"weekly_hours"`
+	ReservePercent float64        `yaml:"reserve_percent"`
+	Cooldown       CooldownConfig `yaml:"cooldown"`
+	Provider       string         `yaml:"provider"`
+	Unmeasured     bool           `yaml:"unmeasured"`
+	ShortWindow    *bool          `yaml:"short_window"`
+	AppliesTo      []PoolTarget   `yaml:"applies_to"`
 }
 
 // EffectiveShortWindow reports whether this pool enforces a short rolling window check (defaults to true).
@@ -908,6 +911,24 @@ func (c *Config) Validate() error {
 		gateMode := c.Quota.EffectiveGateMode()
 		if (gateMode == GateModeDryRun || gateMode == GateModeEnforce) && c.HasMeasuredPools() && strings.TrimSpace(c.Quota.UsageFile) == "" {
 			errs = append(errs, fmt.Errorf("quota.usage_file must not be empty when quota.usage_format is %q and quota.gate_mode is %q with measured pools", UsageFormatV1, gateMode))
+		}
+	}
+
+	if mode := strings.TrimSpace(c.Quota.Pace.Mode); mode != "" && mode != "off" && mode != "shadow" {
+		errs = append(errs, fmt.Errorf("quota.pace.mode %q is not supported (allowed: off, shadow)", mode))
+	}
+	if v := c.Quota.Pace.EffectiveUrgentPace(); math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		errs = append(errs, fmt.Errorf("quota.pace.urgent_pace must be finite and non-negative (got %v)", v))
+	}
+	if v := c.Quota.Pace.EffectiveTie(); math.IsNaN(v) || v < 0 || v > 1 {
+		errs = append(errs, fmt.Errorf("quota.pace.tie must be between 0 and 1 (got %v)", v))
+	}
+	for name, pool := range c.Pools {
+		if v := pool.EffectiveWeeklyHours(); math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+			errs = append(errs, fmt.Errorf("pools.%s.weekly_hours must be finite and positive (got %v)", name, v))
+		}
+		if v := pool.ReservePercent; math.IsNaN(v) || v < 0 || v > 100 {
+			errs = append(errs, fmt.Errorf("pools.%s.reserve_percent must be between 0 and 100 (got %v)", name, v))
 		}
 	}
 

@@ -200,3 +200,46 @@ func TestMetaExposesSelectorMode(t *testing.T) {
 		t.Errorf("default selector_mode = %q, want off", meta.SelectorMode)
 	}
 }
+
+func TestSelectorPaceShadow(t *testing.T) {
+	now := time.Now()
+	snap := healthySnap(now)
+	for pool, ps := range snap.Pools {
+		hours := 120
+		if pool == quota.PoolAgyGemini {
+			hours = 20
+		}
+		reset := now.Add(time.Duration(hours) * time.Hour)
+		ps.WeeklyResetAt = &reset
+		snap.Pools[pool] = ps
+	}
+	for _, tc := range []struct {
+		selectorMode, paceMode, selected, marker string
+	}{
+		{config.SelectorModeApply, "shadow", quota.PoolCodex, "pace_diff"},
+		{config.SelectorModeRecord, "shadow", quota.PoolAgyGemini, "pace_diff"},
+		{config.SelectorModeRecord, "off", quota.PoolCodex, ""},
+	} {
+		t.Run(tc.selectorMode+"/"+tc.paceMode, func(t *testing.T) {
+			_, _, ts := newTestServer(t, Options{
+				InstanceID: "pace", SelectorMode: tc.selectorMode, Pace: config.PaceConfig{Mode: tc.paceMode},
+				QuotaUsageFormat: config.UsageFormatV1, Pools: map[string]config.PoolConfig{
+					quota.PoolCodex: {}, quota.PoolAgyGemini: {}, quota.PoolClaude: {},
+				},
+				Now: func() time.Time { return now }, SnapshotLoader: func() (*quota.Snapshot, error) { return snap, nil },
+			})
+			status, job, body := postJob(t, ts.URL, CreateJobRequest{RequestID: "pace", Title: "t"})
+			if status != http.StatusCreated {
+				t.Fatalf("POST /jobs: %d %s", status, body)
+			}
+			got := getJob(t, ts.URL, job.ID)
+			if got.Pool != quota.PoolCodex || got.Agent != "codex" || got.Model != "gpt-6.2-sol" || got.SelectedPool != tc.selected {
+				t.Fatalf("unexpected execution or recorded choice: %+v", got)
+			}
+			if tc.marker != "" && !strings.Contains(got.SelectionReason, tc.marker) ||
+				tc.marker == "" && strings.Contains(got.SelectionReason, "pace_") {
+				t.Fatalf("unexpected reason: %s", got.SelectionReason)
+			}
+		})
+	}
+}

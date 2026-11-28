@@ -23,6 +23,7 @@ type Options struct {
 	Store        *store.Store
 	GateMode     string
 	SelectorMode string
+	Pace         config.PaceConfig
 	Pools        map[string]config.PoolConfig
 	StaleAfter   time.Duration
 	// UsageFile is read when LoadSnapshot is nil.
@@ -41,6 +42,7 @@ type Admission struct {
 	store        *store.Store
 	gateMode     string
 	selectorMode string
+	pace         config.PaceConfig
 	pools        map[string]config.PoolConfig
 	staleAfter   time.Duration
 	usageFile    string
@@ -57,6 +59,7 @@ func New(opts Options) *Admission {
 		store:        opts.Store,
 		gateMode:     strings.TrimSpace(opts.GateMode),
 		selectorMode: strings.TrimSpace(opts.SelectorMode),
+		pace:         opts.Pace,
 		pools:        opts.Pools,
 		staleAfter:   opts.StaleAfter,
 		usageFile:    strings.TrimSpace(opts.UsageFile),
@@ -254,7 +257,17 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 		}
 	}
 
+	var paceLoad map[string]int
+	if a.pace.ShadowEnabled() && !parentFollowed && req.Params.SessionID == "" && snap != nil && snapErr == nil && a.store != nil {
+		var err error
+		paceLoad, err = a.store.ActivePoolLoads(ctx)
+		if err != nil && a.logger != nil {
+			a.logger.Printf("selector pace shadow load: %v", err)
+		}
+	}
 	res := selector.Select(selector.Input{
+		Pace:        a.pace,
+		PaceLoad:    paceLoad,
 		Role:        strings.TrimSpace(req.Role),
 		Weight:      strings.TrimSpace(req.Weight),
 		Agent:       agent,
@@ -277,6 +290,12 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 	}
 	params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Agent, res.Model, res.Pool
 	params.SelectionReason = parentNote + res.Reason
+	if res.PaceDiff != "" && a.logger != nil {
+		a.logger.Printf("INFO: selector %s", res.PaceDiff)
+	}
+	if a.selectorMode == config.SelectorModeRecord && res.Shadow != nil {
+		params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Shadow.Agent, res.Shadow.Model, res.Shadow.Pool
+	}
 
 	if a.selectorMode == config.SelectorModeApply && !res.Abstain {
 		params.SelectionMode = selector.ModeApplied
