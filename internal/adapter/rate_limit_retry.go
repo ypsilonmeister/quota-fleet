@@ -54,7 +54,10 @@ func linuxRetryPrepCommand(workdir, runDir string, job *store.Job) (string, erro
 }
 
 // windowsRetryPrepStatements is the PowerShell counterpart of linuxRetryPrepCommand
-// (agent.log and agent.err.log are both kept).
+// (agent.log and agent.err.log are both kept). A missing file is skipped, but a file that
+// exists and cannot be moved or removed (locked, access denied) aborts the staging with
+// exit 1 so the agent is never launched: an unarchived log would be overwritten, and a
+// verdict left behind would be accepted for the re-run because the step keeps its nonce.
 func windowsRetryPrepStatements(winWorkdir, winRunDir string, job *store.Job) ([]string, error) {
 	if job.RateLimitRetries <= 0 {
 		return nil, nil
@@ -63,14 +66,26 @@ func windowsRetryPrepStatements(winWorkdir, winRunDir string, job *store.Job) ([
 	for _, name := range []string{logFileName, errLogFileName} {
 		from := joinWindowsPath(winRunDir, name)
 		to := joinWindowsPath(winRunDir, retryLogName(name, job.RateLimitRetries))
-		stmts = append(stmts, fmt.Sprintf("if (Test-Path -LiteralPath %s -PathType Leaf) { Move-Item -Force -LiteralPath %s -Destination %s }", psExpr(from), psExpr(from), psExpr(to)))
+		stmts = append(stmts, fmt.Sprintf(
+			"if (Test-Path -LiteralPath %s -PathType Leaf) { try { Move-Item -Force -ErrorAction Stop -LiteralPath %s -Destination %s } catch { %s } }",
+			psExpr(from), psExpr(from), psExpr(to), psFail("rate-limit retry: keep "+name+" failed: ")))
 	}
 	verdict, err := retryVerdictPath(job)
 	if err != nil {
 		return nil, err
 	}
 	if verdict != "" {
-		stmts = append(stmts, "Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "+psExpr(joinWindowsPath(winWorkdir, verdict)))
+		p := psExpr(joinWindowsPath(winWorkdir, verdict))
+		stmts = append(stmts,
+			fmt.Sprintf("if (Test-Path -LiteralPath %s) { try { Remove-Item -Force -ErrorAction Stop -LiteralPath %s } catch { %s } }",
+				p, p, psFail("rate-limit retry: remove stale verdict failed: ")),
+			// Belt and braces: never stage the re-run while the old verdict is still there.
+			fmt.Sprintf("if (Test-Path -LiteralPath %s) { [Console]::Error.WriteLine('rate-limit retry: stale verdict still present'); exit 1 }", p))
 	}
 	return stmts, nil
+}
+
+// psFail is a catch body that reports the caught error on stderr and exits 1.
+func psFail(prefix string) string {
+	return fmt.Sprintf("[Console]::Error.WriteLine(%s + $_.Exception.Message); exit 1", psExpr(prefix))
 }

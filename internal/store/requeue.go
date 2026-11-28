@@ -249,6 +249,18 @@ type RequeueGateVerdict struct {
 	SelectedPool string
 	// Gate is recorded in gate_decisions (job_id filled in) when the pool switches.
 	Gate *GateDecision
+
+	// The queue state the verdict was evaluated for, filled in by requeueVerdicts. The
+	// claim transaction only honours the verdict while the job is still in that state;
+	// a claim/requeue (or pool change) in between makes it stale (fail-closed).
+	evalRetries   int
+	evalPool      string
+	evalUpdatedAt time.Time
+}
+
+// matches reports whether the verdict was evaluated for the job's current queue state.
+func (v RequeueGateVerdict) matches(retries int, pool string, updatedAt time.Time) bool {
+	return v.evalRetries == retries && v.evalPool == pool && v.evalUpdatedAt.Equal(updatedAt)
 }
 
 // RequeueGateFunc evaluates the Gate for a requeued job on its (resolved) pool and, when
@@ -302,6 +314,7 @@ func (s *Store) requeueVerdicts(ctx context.Context, jobID int64) (map[int64]Req
 		if v.SelectedPool == pool {
 			v.SelectedPool = ""
 		}
+		v.evalRetries, v.evalPool, v.evalUpdatedAt = j.RateLimitRetries, pool, j.UpdatedAt
 		out[j.ID] = v
 	}
 	return out, nil

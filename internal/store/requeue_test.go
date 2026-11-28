@@ -571,3 +571,75 @@ func TestRateLimitColumnsMigration(t *testing.T) {
 		t.Fatalf("migrated defaults %+v", j)
 	}
 }
+
+// TestStaleRequeueVerdictIsNotReused reproduces the review finding on 141a80e: a Gate
+// pass evaluated for one queue generation of a job must not let a claim that started
+// earlier take the job after it was claimed, rate-limited and requeued again in between.
+func TestStaleRequeueVerdictIsNotReused(t *testing.T) {
+	for _, byID := range []bool{false, true} {
+		name := "Claim"
+		if byID {
+			name = "ClaimByID"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newRequeueEnv(t, true, 3)
+			j := e.add(CreateJobParams{RequestID: "a", Pool: "p"})
+			e.hit(e.claim())
+			e.expire()
+
+			var nested, raced bool
+			e.st.SetRequeueGate(func(ctx context.Context, job *Job, pool string, failover bool) RequeueGateVerdict {
+				if nested {
+					// The concurrent claim sees retry=1 and is allowed through.
+					return RequeueGateVerdict{Allow: true}
+				}
+				if raced {
+					// Any evaluation of the newer generation holds the job.
+					return RequeueGateVerdict{}
+				}
+				if job.RateLimitRetries != 1 {
+					t.Errorf("first evaluation saw retry=%d", job.RateLimitRetries)
+				}
+				// Before this retry=1 pass returns, another claim takes the job, it hits
+				// the rate limit again (retry=2) and the cooldown is cleared manually.
+				raced, nested = true, true
+				other := e.claim()
+				nested = false
+				if other == nil || other.ID != j.ID {
+					t.Errorf("concurrent claim = %+v", other)
+					return RequeueGateVerdict{Allow: true}
+				}
+				e.hit(other)
+				if cleared, err := e.st.ClearCooldown(ctx, "p"); err != nil || !cleared {
+					t.Errorf("ClearCooldown cleared=%v err=%v", cleared, err)
+				}
+				return RequeueGateVerdict{Allow: true}
+			})
+
+			var got *Job
+			var ok bool
+			var err error
+			if byID {
+				got, ok, err = e.st.ClaimByID(e.ctx, j.ID, 8)
+			} else {
+				got, ok, err = e.st.Claim(e.ctx, 8)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !raced {
+				t.Fatal("gate was not evaluated")
+			}
+			if ok {
+				t.Fatalf("claimed job %d (retry=%d) with a verdict evaluated for retry=1", got.ID, got.RateLimitRetries)
+			}
+			if cur := e.job(j.ID); cur.Status != StatusQueued || cur.RateLimitRetries != 2 {
+				t.Fatalf("job after stale verdict: status=%s retry=%d", cur.Status, cur.RateLimitRetries)
+			}
+			// A fresh evaluation decides the new generation (here: hold).
+			if again := e.claim(); again != nil {
+				t.Fatalf("claimed %d although a fresh evaluation holds it", again.ID)
+			}
+		})
+	}
+}

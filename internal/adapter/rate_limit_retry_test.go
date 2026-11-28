@@ -107,16 +107,73 @@ func TestLaunchRateLimitRetryWindowsStaging(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`Move-Item -Force -LiteralPath 'C:\w\shared\.fleet\runs\501\agent.log' -Destination 'C:\w\shared\.fleet\runs\501\agent.retry-2.log'`,
-		`Move-Item -Force -LiteralPath 'C:\w\shared\.fleet\runs\501\agent.err.log' -Destination 'C:\w\shared\.fleet\runs\501\agent.err.retry-2.log'`,
-		`Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath 'C:\w\shared\.qf-chain\0f8fad5b-d9cb-469f-a165-70867728950e\2\verdict.json'`,
+		`try { Move-Item -Force -ErrorAction Stop -LiteralPath 'C:\w\shared\.fleet\runs\501\agent.log' -Destination 'C:\w\shared\.fleet\runs\501\agent.retry-2.log' } catch {`,
+		`try { Move-Item -Force -ErrorAction Stop -LiteralPath 'C:\w\shared\.fleet\runs\501\agent.err.log' -Destination 'C:\w\shared\.fleet\runs\501\agent.err.retry-2.log' } catch {`,
+		`if (Test-Path -LiteralPath 'C:\w\shared\.qf-chain\0f8fad5b-d9cb-469f-a165-70867728950e\2\verdict.json') { try { Remove-Item -Force -ErrorAction Stop -LiteralPath 'C:\w\shared\.qf-chain\0f8fad5b-d9cb-469f-a165-70867728950e\2\verdict.json' } catch {`,
+		`exit 1`,
 	} {
 		if !strings.Contains(stage, want) {
 			t.Errorf("staging command lacks %q:\n%s", want, stage)
 		}
 	}
+	// A failed removal of an existing verdict must not be ignored (review of 141a80e).
+	if i := strings.Index(stage, "New-Item"); i < 0 || strings.Contains(stage[:i], "SilentlyContinue") {
+		t.Errorf("retry prep must not ignore errors:\n%s", stage[:i])
+	}
+	if i, j := strings.Index(stage, "verdict.json"), strings.Index(stage, "WriteAllBytes"); i < 0 || i > j {
+		t.Errorf("stale verdict must be removed before the new run is staged:\n%s", stage)
+	}
 	if i, j := strings.Index(stage, "Move-Item"), strings.Index(stage, "WriteAllBytes"); i < 0 || i > j {
 		t.Errorf("logs must be moved before the new run is staged:\n%s", stage)
+	}
+}
+
+// TestLaunchRateLimitRetryWindowsPrepFailureStopsLaunch: when the remote staging exits
+// non-zero because an existing verdict could not be removed (or a log could not be kept),
+// Launch returns an error and never starts the agent.
+func TestLaunchRateLimitRetryWindowsPrepFailureStopsLaunch(t *testing.T) {
+	ctx := context.Background()
+	fake := NewFakeTransport()
+	fake.SetHandler(func(_ context.Context, _ config.HostConfig, cmd string) (CommandResult, error) {
+		if strings.Contains(cmd, "Win32_Process") {
+			return CommandResult{Stdout: "5001\r\n"}, nil
+		}
+		if strings.Contains(cmd, "WriteAllBytes") {
+			return CommandResult{ExitCode: 1, Stderr: "rate-limit retry: remove stale verdict failed: Access to the path is denied."}, nil
+		}
+		return CommandResult{}, nil
+	})
+	a := NewSSHAdapter(testWindowsFleetConfig(), SSHAdapterOptions{Transport: fake})
+	job := &store.Job{ID: 502, Title: "review", Agent: "codex", Host: "home-win", Workdir: `C:\w\shared`,
+		Instructions: "review", ChainRunID: "0f8fad5b-d9cb-469f-a165-70867728950e", ChainSeq: 2, RateLimitRetries: 1}
+	_, err := a.Launch(ctx, job)
+	if err == nil || !strings.Contains(err.Error(), "remove stale verdict failed") {
+		t.Fatalf("Launch err = %v, want the staging failure", err)
+	}
+	for _, c := range fake.Calls() {
+		if strings.Contains(c.Command, "Win32_Process") {
+			t.Fatalf("agent launched after a failed retry prep: %s", c.Command)
+		}
+	}
+}
+
+func TestWindowsRetryPrepSkipsMissingFiles(t *testing.T) {
+	job := &store.Job{ID: 1, ChainRunID: "0f8fad5b-d9cb-469f-a165-70867728950e", ChainSeq: 2, RateLimitRetries: 1}
+	stmts, err := windowsRetryPrepStatements(`C:\w`, `C:\w\.fleet\runs\1`, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stmts) != 4 {
+		t.Fatalf("statements = %d: %q", len(stmts), stmts)
+	}
+	// Every fallible action only runs when its file exists, so a missing file proceeds.
+	for _, st := range stmts {
+		if !strings.HasPrefix(st, "if (Test-Path -LiteralPath ") {
+			t.Errorf("statement is not guarded by Test-Path: %s", st)
+		}
+		if !strings.Contains(st, "exit 1") {
+			t.Errorf("statement does not stop on failure: %s", st)
+		}
 	}
 }
 

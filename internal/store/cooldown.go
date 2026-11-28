@@ -306,7 +306,7 @@ func (s *Store) claimCandidate(ctx context.Context, conn *sql.Conn, now time.Tim
 	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM jobs WHERE status='queued' AND retry_after IS NOT NULL)`).Scan(&waiting); err != nil {
 		return 0, nil, err
 	}
-	q := `SELECT id, pool, agent, model, rate_limit_retries, retry_after FROM jobs WHERE status='queued' AND (?=0 OR id=?) ORDER BY created_at,id`
+	q := `SELECT id, pool, agent, model, rate_limit_retries, retry_after, updated_at FROM jobs WHERE status='queued' AND (?=0 OR id=?) ORDER BY created_at,id`
 	if len(blocked) == 0 && !gated && !ungatedEnforce && waiting == 0 {
 		q += " LIMIT 1"
 	}
@@ -319,7 +319,8 @@ func (s *Store) claimCandidate(ctx context.Context, conn *sql.Conn, now time.Tim
 		var pool, agent, model string
 		var retries int
 		var retryAfter *string
-		if err := rows.Scan(&id, &pool, &agent, &model, &retries, &retryAfter); err != nil {
+		var updatedAt string
+		if err := rows.Scan(&id, &pool, &agent, &model, &retries, &retryAfter, &updatedAt); err != nil {
 			return 0, nil, err
 		}
 		pool = s.cooldownPool(pool, agent, model)
@@ -338,6 +339,16 @@ func (s *Store) claimCandidate(ctx context.Context, conn *sql.Conn, now time.Tim
 			v, ok := verdicts[id]
 			if !ok || !v.Allow {
 				// Fail closed: no verdict means the job was requeued after the evaluation.
+				continue
+			}
+			// The verdict was evaluated before this transaction began. Honour it only
+			// for the queue state it judged; if the job was claimed and requeued again
+			// (or moved pools) since, skip it until a fresh evaluation decides.
+			ut, err := parseTime(updatedAt)
+			if err != nil {
+				return 0, nil, fmt.Errorf("parse updated_at: %w", err)
+			}
+			if !v.matches(retries, pool, ut) {
 				continue
 			}
 			target := pool
