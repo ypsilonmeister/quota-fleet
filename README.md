@@ -25,7 +25,7 @@ synthetic usage snapshot.</sub>
 
 ```mermaid
 flowchart TD
-    COORD["Coordinator / UI / MCP<br/>registers jobs and chains"]
+    COORD["Coordinator / CLI / UI / MCP<br/>jobs (all); chains (API / CLI)"]
     SNAP["Usage snapshot file<br/>(external, optional)"]
     GATE["Quota Gate<br/>optional; off by default"]
     STORE[("SQLite job store<br/>jobs, held jobs, outbox")]
@@ -39,8 +39,7 @@ flowchart TD
     CHAIN["Chain Driver<br/>advances chain runs"]
     REC["Reconciler<br/>recovers or reports stuck work"]
 
-    COORD -->|POST /jobs| GATE
-    COORD -->|POST /chains| STORE
+    COORD -->|POST /jobs, POST /chains| GATE
     SNAP -->|read by| GATE
     GATE -->|queue, or hold when enforced| STORE
     STORE -->|pending outbox| DISP
@@ -59,9 +58,9 @@ flowchart TD
 Shepherd, Chain Driver, and Reconciler in one process. The Quota Gate is off by
 default and holds jobs only with `gate_mode: enforce` (using an external usage
 snapshot and/or [reactive cooldown](docs/03-quota-gate.md#reactive-pool-cooldown));
-the local CLI `quota-fleet job create` writes directly to the SQLite store and
-bypasses the gate. For the conceptual architecture and how the current binary
-differs from it, see
+`quota-fleet job create` calls `POST /jobs` (going through the gate) by default,
+and only bypasses it when `--direct` is passed. For the conceptual architecture
+and how the current binary differs from it, see
 [docs/01](docs/01-architecture.md#differences-in-the-current-implementation)
 (and [docs/06](docs/06-implementation-design.md) for the implementation
 design).
@@ -177,8 +176,19 @@ preceded the Go implementation here ([full case study](docs/05-case-study.md)):
    `http://127.0.0.1:8737/ui/`), enter a named token from `api.tokens` (it needs
    `read` to view and `register` to create jobs), and create a job from the
    new-job form. You can also register jobs with the HTTP API or the CLI
-   (`./quota-fleet job create --title "..."`). The CLI writes to the local store
-   directly, so the Quota Gate and the Selector do not apply to it.
+   (`./quota-fleet job create --title "..."`). The CLI calls `POST /jobs` on
+   the running server, where the configured Quota Gate and Selector apply.
+   If the Gate holds the job, the CLI prints its `held_id` and reason. If the
+   API is unreachable, the command exits with an error.
+
+   The API URL comes from `--url`, `QUOTA_FLEET_API_URL`, or the HTTP address
+   in `api.listen`, in that order (default `http://127.0.0.1:8737`).
+   For named tokens, set `QUOTA_FLEET_TOKEN` to a token with the `register`
+   scope; if it is unset, a legacy `api.token` is used. Use `--config` to
+   select a different `fleet.yaml`. For an intentional local SQLite write,
+   pass `--direct` (optionally with `--db`). The command prints a warning that
+   this bypasses the Gate and Selector.
+
    To generate MCP client config snippets for AI clients, run
    `./quota-fleet mcp config`. The stdio snippets invoke `quota-fleet` by name,
    so to use them as generated, put the binary on the MCP client's `PATH`.
@@ -216,6 +226,10 @@ preceded the Go implementation here ([full case study](docs/05-case-study.md)):
        applies_to:
          - agent: claude
    ```
+
+   When running with cooldown alone (no usage snapshot), configure an
+   `unmeasured: true` pool for every agent you run so jobs for other agents are
+   not held as unknown under `gate_mode: enforce`.
 
    Inspect or clear active cooldowns with:
    ```bash

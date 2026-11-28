@@ -111,7 +111,7 @@ func TestCLIJobCreateListGetCancelRequeue(t *testing.T) {
 
 	// 1. job create
 	code := run([]string{
-		"job", "create",
+		"job", "create", "--direct",
 		"--db", dbPath,
 		"--title", "Phase 1-2 CLI Test",
 		"--agent", "claude",
@@ -128,10 +128,13 @@ func TestCLIJobCreateListGetCancelRequeue(t *testing.T) {
 		t.Fatalf("job create exit=%d stderr=%q", code, errBuf.String())
 	}
 	createOut := out.String()
-	for _, want := range []string{"#1", "queued", "Phase 1-2 CLI Test"} {
+	for _, want := range []string{"#1", "queued", "Phase 1-2 CLI Test", "bypassed Quota Gate and Selector"} {
 		if !strings.Contains(createOut, want) {
 			t.Errorf("job create output missing %q:\n%s", want, createOut)
 		}
+	}
+	if !strings.Contains(errBuf.String(), "WARNING: --direct") {
+		t.Errorf("job create --direct stderr missing warning: %q", errBuf.String())
 	}
 
 	// 2. job list --status queued

@@ -1,17 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/api"
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
@@ -45,7 +51,7 @@ func runJob(args []string, stdout, stderr io.Writer) int {
 
 func printJobUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  quota-fleet job create --title <title> [--agent ...] [--host ...] [--workdir ...] [--instructions ...] [--acceptance ...] [--request-id ...] [--parent <id>] [--target-ref ...] [--model ...] [--pool ...] [--db path] [--config fleet.yaml]")
+	fmt.Fprintln(w, "  quota-fleet job create --title <title> [--agent ...] [--host ...] [--workdir ...] [--instructions ...] [--acceptance ...] [--request-id ...] [--parent <id>] [--target-ref ...] [--model ...] [--pool ...] [--draft] [--url URL] [--config fleet.yaml] [--direct [--db path]]")
 	fmt.Fprintln(w, "  quota-fleet job list --status <status> [--limit N] [--cursor ID] [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet job get <id> [--db path] [--config fleet.yaml]")
 	fmt.Fprintln(w, "  quota-fleet job cancel <id> [--reason ...] [--db path] [--config fleet.yaml]")
@@ -96,11 +102,15 @@ func runJobCreate(args []string, stdout, stderr io.Writer) int {
 		model        string
 		pool         string
 		draft        bool
+		direct       bool
+		apiURL       string
 	)
 
 	fs.StringVar(&cfgPath, "config", resolveDefaultConfigPath(), "path to fleet.yaml")
 	fs.StringVar(&cfgPath, "c", resolveDefaultConfigPath(), "path to fleet.yaml (shorthand)")
-	fs.StringVar(&dbPath, "db", "", "override SQLite database path")
+	fs.StringVar(&dbPath, "db", "", "override SQLite database path (requires --direct)")
+	fs.BoolVar(&direct, "direct", false, "write to SQLite, bypassing Quota Gate and Selector")
+	fs.StringVar(&apiURL, "url", "", "quota-fleet HTTP API URL (overrides QUOTA_FLEET_API_URL; not allowed with --direct)")
 	fs.StringVar(&title, "title", "", "job title (required)")
 	fs.StringVar(&agent, "agent", "", "agent name")
 	fs.StringVar(&host, "host", "", "target worker host")
@@ -136,13 +146,6 @@ func runJobCreate(args []string, stdout, stderr io.Writer) int {
 	}
 
 	ctx := context.Background()
-	st, _, err := openLocalStore(ctx, cfgPath, dbPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "job create failed: %v\n", err)
-		return 1
-	}
-	defer st.Close()
-
 	params := store.CreateJobParams{
 		RequestID:          requestID,
 		Title:              title,
@@ -161,19 +164,160 @@ func runJobCreate(args []string, stdout, stderr io.Writer) int {
 		params.ParentID = &p
 	}
 
+	if !direct {
+		if dbPath != "" {
+			fmt.Fprintln(stderr, "job create failed: --db requires --direct")
+			return 1
+		}
+		explicitConfig := os.Getenv("QUOTA_FLEET_CONFIG") != ""
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "config" || f.Name == "c" {
+				explicitConfig = true
+			}
+		})
+		if err := createJobViaAPI(ctx, cfgPath, explicitConfig, apiURL, params, stdout); err != nil {
+			fmt.Fprintf(stderr, "job create failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	if strings.TrimSpace(apiURL) != "" {
+		fmt.Fprintln(stderr, "job create failed: --url cannot be combined with --direct")
+		return 1
+	}
+
+	st, _, err := openLocalStore(ctx, cfgPath, dbPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "job create failed: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+
+	fmt.Fprintln(stderr, "WARNING: --direct writes to the local SQLite store and bypasses the Quota Gate and Selector")
 	job, created, err := st.CreateJob(ctx, params)
 	if err != nil {
 		fmt.Fprintf(stderr, "job create failed: %v\n", err)
 		return 1
 	}
 
+	printCreatedJob(stdout, job.ID, string(job.Status), job.Title, job.RequestID, created)
+	fmt.Fprintln(stdout, "  --direct: bypassed Quota Gate and Selector")
+	return 0
+}
+
+// createJobViaAPI registers the job through POST /jobs so the server applies the same
+// Quota Gate and Selector as API/UI registration. It never falls back to the local store.
+// URL: --url > $QUOTA_FLEET_API_URL > api.listen in fleet.yaml > default.
+// Token: $QUOTA_FLEET_TOKEN > legacy api.token in fleet.yaml (no flag, to keep it out of argv).
+func createJobViaAPI(ctx context.Context, cfgPath string, explicitConfig bool, apiURL string, params store.CreateJobParams, stdout io.Writer) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil && (explicitConfig || !errors.Is(err, os.ErrNotExist)) {
+		return err
+	}
+	apiURL = strings.TrimSpace(apiURL)
+	if apiURL == "" {
+		apiURL = strings.TrimSpace(os.Getenv("QUOTA_FLEET_API_URL"))
+	}
+	token := strings.TrimSpace(os.Getenv("QUOTA_FLEET_TOKEN"))
+	if cfg != nil {
+		if apiURL == "" {
+			addr := cfg.API.ListenAddr()
+			if host, port, err := net.SplitHostPort(addr); err == nil && (host == "" || net.ParseIP(host).IsUnspecified()) {
+				addr = net.JoinHostPort("localhost", port)
+			}
+			apiURL = "http://" + addr
+		}
+		if token == "" {
+			token = strings.TrimSpace(cfg.API.Token)
+		}
+	}
+	if apiURL == "" {
+		apiURL = "http://" + config.DefaultAPIListen
+	}
+
+	body, err := json.Marshal(api.CreateJobRequest{
+		RequestID: params.RequestID, Title: params.Title, Draft: params.Draft,
+		Agent: params.Agent, Host: params.Host, Workdir: params.Workdir,
+		TargetRef: params.TargetRef, Instructions: params.Instructions,
+		AcceptanceCriteria: params.AcceptanceCriteria, ParentID: params.ParentID,
+		Model: params.Model, Pool: params.Pool,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(apiURL, "/")+"/jobs", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("could not reach API (POST /jobs): %w", err)
+	}
+	defer resp.Body.Close()
+
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		var result api.CreateJobResponse
+		if err := dec.Decode(&result); err != nil {
+			return fmt.Errorf("decode POST /jobs response: %w", err)
+		}
+		if result.Job == nil || result.Job.ID <= 0 {
+			return errors.New("POST /jobs response is missing a valid job ID")
+		}
+		job := result.Job
+		printCreatedJob(stdout, job.ID, job.Status, job.Title, job.RequestID, result.Created)
+	case http.StatusAccepted:
+		var result api.HoldJobResponse
+		if err := dec.Decode(&result); err != nil {
+			return fmt.Errorf("decode POST /jobs hold response: %w", err)
+		}
+		if result.HeldID == "" {
+			return errors.New("POST /jobs hold response is missing held_id")
+		}
+		verb := "job held by Quota Gate"
+		if !result.Created {
+			verb = "job already held by Quota Gate"
+		}
+		requestID := strings.TrimSpace(params.RequestID)
+		fmt.Fprintf(stdout, "%s\n  held_id: %s\n", verb, result.HeldID)
+		if result.Held != nil {
+			if result.Held.Reason != "" {
+				fmt.Fprintf(stdout, "  reason: %s\n", result.Held.Reason)
+			}
+			if result.Held.RequestID != "" {
+				requestID = result.Held.RequestID
+			}
+		}
+		fmt.Fprintf(stdout, "  request_id: %s\n", requestID)
+	default:
+		var result api.ErrorResponse
+		if err := dec.Decode(&result); err == nil && result.Error != "" {
+			return fmt.Errorf("POST /jobs returned HTTP %d: %s", resp.StatusCode, result.Error)
+		}
+		return fmt.Errorf("POST /jobs returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func printCreatedJob(w io.Writer, id int64, status, title, requestID string, created bool) {
 	verb := "created"
 	if !created {
 		verb = "existing"
 	}
-	fmt.Fprintf(stdout, "%s job #%d [%s] %s\n", verb, job.ID, job.Status, job.Title)
-	fmt.Fprintf(stdout, "  request_id: %s\n", job.RequestID)
-	return 0
+	fmt.Fprintf(w, "%s job #%d [%s] %s\n", verb, id, status, title)
+	fmt.Fprintf(w, "  request_id: %s\n", requestID)
 }
 
 func runJobList(args []string, stdout, stderr io.Writer) int {
