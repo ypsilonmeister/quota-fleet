@@ -58,3 +58,27 @@ Quota gate ──in front of create──▶ hold or release by measured pool he
 - The signal route requires that the component creating jobs can append to
   a file the dispatcher can read. Verify this one capability before
   building anything else; the whole signal design depends on it.
+
+## Differences in the current implementation
+
+The conceptual architecture above predates the Go binary (`quota-fleet serve`).
+The current implementation differs in four places:
+
+- **Quota collector → Quota gate:** No collector is bundled in `quota-fleet`.
+  Operators supply an external usage snapshot file
+  ([23-usage-snapshot.md](23-usage-snapshot.md)) or use
+  [reactive pool cooldown](03-quota-gate.md#reactive-pool-cooldown).
+- **Job store → Signal file → Dispatcher:** The Dispatcher polls pending rows
+  from a `signal_outbox` table in the SQLite store, appends audit entries to
+  the signal file (`signal.jsonl`), and wakes the Launcher in-process.
+- **Agent CLI → Job store:** Agent CLIs do not write results to the store. The
+  Shepherd inspects worker hosts, collects each finished run's artifacts and
+  exit status, evaluates acceptance criteria, and records `done` or `failed` in
+  the store.
+- **Shepherd → Pull request / follow-up job:** In the current binary, the
+  Shepherd evaluates, records `done` or `failed` (and any declared review
+  verdict), and delivers results; it does not open pull requests or register
+  follow-up jobs. Pull requests come from a chain's publish step (an agent job)
+  or the Coordinator, and follow-up jobs come from the
+  [Chain Driver](22-chain-runs.md) or the Coordinator
+  ([06-implementation-design.md](06-implementation-design.md) §7-4).
