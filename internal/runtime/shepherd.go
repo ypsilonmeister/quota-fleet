@@ -189,7 +189,8 @@ func appendRecoveryNote(resultText, source string) string {
 // finishExitedJobFrom collects evidence, runs acceptance evaluation (for exit 0 or unknown exit),
 // commits done/failed, wakes Launcher, and delivers the terminal job. It returns the committed
 // terminal job or nil if another worker is already finishing it, evaluation is pending retry,
-// or ownership was lost.
+// or ownership was lost. A job requeued after a rate limit (Issue #56) is returned with
+// status queued and is not delivered.
 func (s *Shepherd) finishExitedJobFrom(ctx context.Context, job *store.Job, state adapter.RunState, source string) *store.Job {
 	if source == "" {
 		source = "shepherd"
@@ -236,6 +237,9 @@ func (s *Shepherd) finishExitedJobFrom(ctx context.Context, job *store.Job, stat
 			}
 			s.logger.Printf("%s fail job #%d (exit_code=%d) error: %v", source, job.ID, state.ExitCode, err)
 			return nil
+		}
+		if res.Requeued {
+			return s.requeued(source, res.Job)
 		}
 		terminalJob = res.Job
 		s.logger.Printf("%s failed job #%d (exit_code=%d, cancelled_children=%v)", source, job.ID, state.ExitCode, res.CancelledChildIDs)
@@ -307,6 +311,9 @@ func (s *Shepherd) finishExitedJobFrom(ctx context.Context, job *store.Job, stat
 					s.logger.Printf("%s fail job #%d error: %v", source, job.ID, err)
 					return nil
 				}
+				if res.Requeued {
+					return s.requeued(source, res.Job)
+				}
 				terminalJob = res.Job
 				s.logger.Printf("%s failed job #%d (cancelled_children=%v)", source, job.ID, res.CancelledChildIDs)
 			}
@@ -321,6 +328,15 @@ func (s *Shepherd) finishExitedJobFrom(ctx context.Context, job *store.Job, stat
 		s.logger.Printf("%s delivery error for job #%d: %v", source, terminalJob.ID, err)
 	}
 	return terminalJob
+}
+
+// requeued finishes a job that RequeueOnRateLimit moved back to queued: the claimed slot
+// is free, so wake Launcher, but skip delivery (the job is not terminal).
+func (s *Shepherd) requeued(source string, job *store.Job) *store.Job {
+	s.logger.Printf("%s requeued job #%d after rate limit (rate_limit_retries=%d, retry_after=%v, attempts=%d)",
+		source, job.ID, job.RateLimitRetries, job.RetryAfter, job.Attempts)
+	s.notifyLauncher()
+	return job
 }
 
 func (s *Shepherd) evaluateJob(ctx context.Context, job *store.Job, ev adapter.Evidence) (evaluator.Result, error) {

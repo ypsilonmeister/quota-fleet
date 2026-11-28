@@ -663,3 +663,20 @@ func TestPerJobRunArtifactsAndStatusIsolationWindows(t *testing.T) {
 		t.Errorf("DiffSummary should filter .fleet/: %q", ev1.DiffSummary)
 	}
 }
+
+// Issue #56: a run after a rate-limit requeue tells the agent the workdir was kept.
+func TestBuildPromptTextRateLimitRetryNote(t *testing.T) {
+	job := &store.Job{Title: "t", Instructions: "do it\n", AcceptanceCriteria: "file_nonempty: summary.md"}
+	plain := BuildPromptText(job)
+	if strings.Contains(plain, "[quota-fleet]") {
+		t.Fatalf("first run got a retry note: %q", plain)
+	}
+	job.RateLimitRetries = 2
+	got := BuildPromptText(job)
+	if !strings.HasPrefix(got, "[quota-fleet] This is automatic re-run 2 ") || !strings.HasSuffix(got, plain) {
+		t.Fatalf("retry prompt = %q", got)
+	}
+	if !strings.Contains(got, "git status") || !strings.Contains(got, "429") {
+		t.Fatalf("retry note lacks guidance: %q", got)
+	}
+}

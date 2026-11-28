@@ -90,7 +90,8 @@ unknown code plus an evaluator FAIL. It checks the last 30 lines and up to
 4 KiB of stderr and the final report for agent-specific quota errors. For a
 wrapper, set `agents.<agent>.rate_limit_patterns` to replace the built-in
 regular expressions and `rate_limit_exit_codes` for dedicated positive exit
-codes. The triggering job remains failed.
+codes. The triggering job remains failed unless rate-limit requeue (below) is
+enabled.
 
 In `off` mode detection only logs a message. In `dry-run` it also persists
 cooldown state and a `would_hold` decision. In `enforce` it holds new work or
@@ -115,6 +116,58 @@ MCP `fleet_status` show active cooldowns. To inspect or clear local state, use
 `DELETE /gate/cooldowns/{pool}` with the `operate` scope. Clearing cooldown
 still leaves the measured Gate rules in effect. Use `gate check --ignore-cooldown`
 to inspect snapshot-only decisions.
+
+## Rate-limit requeue
+
+With `quota.requeue.enabled: true` (default `false`), a job whose run hit a
+provider rate limit — the same detection as the cooldown above — goes back to
+`queued` instead of `failed` (Issue #56). It requires `gate_mode: enforce` and
+the pool's cooldown; otherwise the job fails as before (a warning is logged at
+startup when requeue is enabled outside `enforce`).
+
+```yaml
+quota:
+  requeue:
+    enabled: true
+    max_retries: 3            # automatic requeues per job; 0 disables
+    stall_after: 6h           # report a requeued job still queued this long
+    failover_alt_pools: true  # allow a healthy declared alt pool
+pools:
+  agy:
+    requeue:
+      max_retries: 6
+```
+
+All keys can be overridden under `pools.<pool>.requeue`. A pool that sets
+`requeue.enabled: true` while its cooldown is disabled is a configuration error.
+
+- The move `claimed → queued` is one transaction with the cooldown record.
+  Waiting child jobs stay `waiting`; a chain run stays `running`. `attempts`
+  is given back and the requeue is counted in `rate_limit_retries`.
+- The wait is the pool cooldown: `retry_after` mirrors the cooldown deadline
+  and is cleared when the cooldown is cleared (manually or by snapshot
+  recovery). There is no separate per-job backoff.
+- Before a requeued job is claimed again, the Gate is evaluated on the current
+  usage snapshot and cooldowns, exactly as at admission. Exhausted, cooling,
+  stale or unreadable (v1) pools keep it queued without spending a retry.
+  When a declared `alt_pools` entry is healthy, the job moves to it (same agent
+  and model; the previous pool becomes an alternative) and the decision is
+  recorded in `gate_decisions`. The agent is never switched.
+- After `max_retries` requeues the next rate limit fails the job with
+  `rate limit retries exhausted (N/N)` and cancels its waiting descendants.
+  A step of a chain run that is no longer running is cancelled instead.
+- The workdir is kept. The prompt of a re-run starts with a short note that
+  the previous run stopped on a rate limit and partial work may be present.
+- A requeue is not terminal: no delivery and no failure push. It sends the
+  `pool_cooldown` report and a `job_rate_limit_requeued` report. The
+  Reconciler reports `stale_claimed_requeued` and, after `stall_after`,
+  `job_rate_limit_requeue_stalled` (report only).
+- Per job, `on_rate_limit: fail` opts out and `on_rate_limit: requeue` opts
+  in. The chain `publish` step is not requeued unless its job says `requeue`,
+  because a re-run could repeat pushes or PR creation.
+- `GET /jobs` returns `rate_limit_retries`, `retry_after` and
+  `on_rate_limit` when set; `GET /status` returns `rate_limit_requeued_count`.
+  `POST /jobs/{id}/requeue` resets `rate_limit_retries`.
 
 ## Burn-down research jobs
 

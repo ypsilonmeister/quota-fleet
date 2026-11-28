@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
@@ -107,6 +108,31 @@ type Job struct {
 	// Empty / 0 for jobs outside a chain run.
 	ChainRunID string
 	ChainSeq   int
+
+	// RateLimitRetries counts automatic requeues after a provider rate limit (Issue #56).
+	// It is separate from Attempts, which a rate-limit requeue does not consume.
+	RateLimitRetries int
+	// RetryAfter mirrors the pool cooldown's active_until set at the last rate-limit
+	// requeue; nil when the job is not waiting on a cooldown.
+	RetryAfter *time.Time
+	// OnRateLimit is the per-job rate-limit policy: "" (config default), "requeue" or "fail".
+	OnRateLimit string
+}
+
+// Per-job rate-limit policies (jobs.on_rate_limit, Issue #56).
+const (
+	OnRateLimitDefault = ""
+	OnRateLimitRequeue = "requeue"
+	OnRateLimitFail    = "fail"
+)
+
+// ValidateOnRateLimit checks a per-job on_rate_limit value.
+func ValidateOnRateLimit(v string) error {
+	switch v {
+	case OnRateLimitDefault, OnRateLimitRequeue, OnRateLimitFail:
+		return nil
+	}
+	return fmt.Errorf("%w: on_rate_limit must be \"requeue\" or \"fail\" (got %q)", ErrInvalidInput, v)
 }
 
 // CreateJobParams holds input fields for CreateJob.
@@ -136,6 +162,9 @@ type CreateJobParams struct {
 
 	// Effort is the per-job reasoning effort (docs/21): low|medium|high|xhigh, empty = agent default.
 	Effort string `json:"effort,omitempty"`
+
+	// OnRateLimit is the per-job rate-limit policy (Issue #56): "" | "requeue" | "fail".
+	OnRateLimit string `json:"on_rate_limit,omitempty"`
 }
 
 // CompleteResult holds the outcome of Complete.
@@ -146,6 +175,9 @@ type CompleteResult struct {
 
 // FailResult holds the outcome of Fail or RejectInvalid.
 type FailResult struct {
+	// Requeued is true when RequeueOnRateLimit moved the job back to queued instead of a
+	// terminal state; Job is then the queued job and must not be delivered.
+	Requeued          bool
 	Cooldown          *quota.CooldownState
 	Job               *Job
 	CancelledChildIDs []int64

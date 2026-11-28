@@ -448,7 +448,18 @@ func BuildPromptText(job *store.Job) string {
 	if body != "" && !strings.HasSuffix(body, "\n") {
 		body += "\n"
 	}
+	if job.RateLimitRetries > 0 {
+		body = rateLimitRetryNote(job.RateLimitRetries) + body
+	}
 	return body
+}
+
+// rateLimitRetryNote is prepended to the prompt of a run that follows a rate-limit requeue
+// (Issue #56 §5). The workdir is kept as is, so the agent is told to check it first.
+func rateLimitRetryNote(retry int) string {
+	return fmt.Sprintf("[quota-fleet] This is automatic re-run %d of this job: the previous run stopped on a provider usage/rate limit (429). "+
+		"The working directory was kept, so it may contain partial changes or half-written output files (for example summary.md) from the previous run. "+
+		"Before starting, check `git status` and the existing files, keep valid partial work, overwrite incomplete outputs, and make sure every acceptance criterion is met.\n\n", retry)
 }
 
 // BuildRunScript generates the POSIX shell wrapper script (run.sh) that sets per-host env vars,

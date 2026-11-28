@@ -498,11 +498,16 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 			SessionID:          req.SessionID,
 			CreatedBy:          createdBy,
 			Effort:             strings.TrimSpace(req.Effort),
+			OnRateLimit:        strings.TrimSpace(req.OnRateLimit),
 		},
 		Role:   req.Role,
 		Weight: req.Weight,
 	}
 	if err := s.adm.ValidateRequest(admReq); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := store.ValidateOnRateLimit(admReq.Params.OnRateLimit); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1258,12 +1263,18 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Slice(cooldowns, func(i, j int) bool { return cooldowns[i].Pool < cooldowns[j].Pool })
 	}
+	requeued, err := s.store.CountRateLimitRequeued(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, StatusResponse{
-		Cooldowns:  cooldowns,
-		InstanceID: instanceID,
-		Counts:     out,
-		Total:      total,
-		Chains:     s.chainStatus(r.Context()),
+		Cooldowns:         cooldowns,
+		InstanceID:        instanceID,
+		Counts:            out,
+		Total:             total,
+		Chains:            s.chainStatus(r.Context()),
+		RateLimitRequeued: requeued,
 	})
 }
 
