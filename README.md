@@ -71,7 +71,7 @@ arrows** mark the steps that the `quota-fleet` binary does not do as drawn:
 
 One solid path is conditional: **Coordinator → Quota Gate → Job store**. The
 gate is off by default and holds jobs only with `gate_mode: enforce`, and
-`quota-fleet job create` does not go through it.
+`quota-fleet job create` goes through it by default (`--direct` bypasses it).
 
 ## Case study
 
@@ -194,8 +194,19 @@ preceded the Go implementation here ([full case study](docs/05-case-study.md)):
    `http://127.0.0.1:8737/ui/`), enter a named token from `api.tokens` (it needs
    `read` to view and `register` to create jobs), and create a job from the
    new-job form. You can also register jobs with the HTTP API or the CLI
-   (`./quota-fleet job create --title "..."`). The CLI writes to the local store
-   directly, so the Quota Gate and the Selector do not apply to it.
+   (`./quota-fleet job create --title "..."`). The CLI calls `POST /jobs` on
+   the running server, where the configured Quota Gate and Selector apply.
+   If the Gate holds the job, the CLI prints its `held_id` and reason. If the
+   API is unreachable, the command exits with an error.
+
+   The API URL comes from `--url`, `QUOTA_FLEET_API_URL`, or the HTTP address
+   in `api.listen`, in that order (default `http://127.0.0.1:8737`).
+   For named tokens, set `QUOTA_FLEET_TOKEN` to a token with the `register`
+   scope; if it is unset, a legacy `api.token` is used. Use `--config` to
+   select a different `fleet.yaml`. For an intentional local SQLite write,
+   pass `--direct` (optionally with `--db`). The command prints a warning that
+   this bypasses the Gate and Selector.
+
    To generate MCP client config snippets for AI clients, run
    `./quota-fleet mcp config`. The stdio snippets invoke `quota-fleet` by name,
    so to use them as generated, put the binary on the MCP client's `PATH`.
