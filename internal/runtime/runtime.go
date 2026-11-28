@@ -38,6 +38,7 @@ type Options struct {
 	GateMode            string
 	QuotaUsageFile      string
 	QuotaUsageFormat    string
+	Pace                config.PaceConfig
 	QuotaStaleAfter     time.Duration
 	GateCheckInterval   time.Duration
 	AgentsCheckInterval time.Duration
@@ -178,6 +179,7 @@ func New(opts Options) (*Runtime, error) {
 			Store:        opts.Store,
 			GateMode:     opts.GateMode,
 			SelectorMode: opts.SelectorMode,
+			Pace:         opts.Pace,
 			Pools:        opts.Pools,
 			StaleAfter:   opts.QuotaStaleAfter,
 			UsageFile:    opts.QuotaUsageFile,
@@ -215,6 +217,7 @@ func New(opts Options) (*Runtime, error) {
 		GateMode:       opts.GateMode,
 		UsageFile:      opts.QuotaUsageFile,
 		UsageFormat:    opts.QuotaUsageFormat,
+		Pace:           opts.Pace,
 		StaleAfter:     opts.QuotaStaleAfter,
 		Pools:          opts.Pools,
 		Interval:       opts.GateCheckInterval,

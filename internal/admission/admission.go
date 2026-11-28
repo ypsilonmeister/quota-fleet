@@ -5,6 +5,7 @@
 package admission
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ type Options struct {
 	Store        *store.Store
 	GateMode     string
 	SelectorMode string
+	Pace         config.PaceConfig
 	Pools        map[string]config.PoolConfig
 	StaleAfter   time.Duration
 	// UsageFile is read when LoadSnapshot is nil.
@@ -41,6 +43,7 @@ type Admission struct {
 	store        *store.Store
 	gateMode     string
 	selectorMode string
+	pace         config.PaceConfig
 	pools        map[string]config.PoolConfig
 	staleAfter   time.Duration
 	usageFile    string
@@ -57,6 +60,7 @@ func New(opts Options) *Admission {
 		store:        opts.Store,
 		gateMode:     strings.TrimSpace(opts.GateMode),
 		selectorMode: strings.TrimSpace(opts.SelectorMode),
+		pace:         opts.Pace,
 		pools:        opts.Pools,
 		staleAfter:   opts.StaleAfter,
 		usageFile:    strings.TrimSpace(opts.UsageFile),
@@ -104,15 +108,21 @@ type Request struct {
 // Usage loads the usage snapshot at most once per request so the Selector and the Gate
 // judge the same data.
 type Usage struct {
-	ctx  context.Context
-	load func() (*quota.Snapshot, error)
-	done bool
-	snap *quota.Snapshot
-	err  error
+	paceExcludedJobID int64
+	ctx               context.Context
+	load              func() (*quota.Snapshot, error)
+	done              bool
+	snap              *quota.Snapshot
+	err               error
 }
 
 // NewUsage returns a lazily loaded snapshot holder for one request.
 func (a *Admission) NewUsage() *Usage { return &Usage{load: a.LoadSnapshot, ctx: context.Background()} }
+
+// ExcludeJobFromGatePaceLoad omits a job already inserted before its dry-run Gate evaluation.
+func (u *Usage) ExcludeJobFromGatePaceLoad(jobID int64) {
+	u.paceExcludedJobID = jobID
+}
 
 // Get returns the snapshot, loading it on the first call.
 func (u *Usage) Get() (*quota.Snapshot, error) {
@@ -254,9 +264,20 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 		}
 	}
 
+	var paceLoad map[string]int
+	if a.pace.ShadowEnabled() && !parentFollowed && req.Params.SessionID == "" && snap != nil && snapErr == nil && a.store != nil {
+		var err error
+		paceLoad, err = a.store.ActivePoolLoads(ctx)
+		if err != nil && a.logger != nil {
+			a.logger.Printf("selector pace shadow load: %v", err)
+		}
+	}
+	role, weight := strings.TrimSpace(req.Role), strings.TrimSpace(req.Weight)
 	res := selector.Select(selector.Input{
-		Role:        strings.TrimSpace(req.Role),
-		Weight:      strings.TrimSpace(req.Weight),
+		Pace:        a.pace,
+		PaceLoad:    paceLoad,
+		Role:        role,
+		Weight:      weight,
 		Agent:       agent,
 		Model:       model,
 		Pool:        explicitPool,
@@ -277,6 +298,13 @@ func (a *Admission) Select(ctx context.Context, params *store.CreateJobParams, r
 	}
 	params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Agent, res.Model, res.Pool
 	params.SelectionReason = parentNote + res.Reason
+	if res.PaceDiff != "" && a.logger != nil {
+		a.logger.Printf("INFO: selector request_id=%s role=%s weight=%s selector_mode=%s %s",
+			params.RequestID, cmp.Or(role, selector.RoleImplement), cmp.Or(weight, selector.WeightStandard), a.selectorMode, res.PaceDiff)
+	}
+	if a.selectorMode == config.SelectorModeRecord && res.Shadow != nil {
+		params.SelectedAgent, params.SelectedModel, params.SelectedPool = res.Shadow.Agent, res.Shadow.Model, res.Shadow.Pool
+	}
 
 	if a.selectorMode == config.SelectorModeApply && !res.Abstain {
 		params.SelectionMode = selector.ModeApplied
@@ -359,28 +387,15 @@ func (a *Admission) EvaluateGate(primaryPool string, altPools []string, usage *U
 		return quota.EvaluateGate(primaryPool, altPools, nil, opts), nil
 	}
 
-	if a.usageFormat == config.UsageFormatV1 {
-		snap, err := usage.Get()
-		if err != nil {
-			eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
-			if eval.Decision != quota.DecisionUnknown {
-				return eval, err
-			}
-			eval.Reason = quota.ReasonSnapshotError
-			eval.Detail = err.Error()
-			return eval, err
-		}
-		if err := recoverCooldowns(snap); err != nil {
-			return stateUnavailable, err
-		}
-		return quota.EvaluateGate(primaryPool, altPools, snap, opts), nil
-	}
-
-	// Legacy mode (Decision 2 & Item A): preserve exact existing behavior.
 	snap, err := usage.Get()
 	if err != nil {
 		eval := quota.EvaluateGate(primaryPool, altPools, nil, opts)
-		if !eval.Bypassed && eval.BlockedBy != "cooldown" {
+		if a.usageFormat == config.UsageFormatV1 {
+			if eval.Decision == quota.DecisionUnknown {
+				eval.Reason = quota.ReasonSnapshotError
+				eval.Detail = err.Error()
+			}
+		} else if !eval.Bypassed && eval.BlockedBy != "cooldown" {
 			eval.Decision = quota.DecisionUnknown
 			eval.Reason = fmt.Sprintf("%s: %v", quota.ReasonSnapshotError, err)
 		}
@@ -390,9 +405,32 @@ func (a *Admission) EvaluateGate(primaryPool string, altPools []string, usage *U
 		return stateUnavailable, err
 	}
 	eval := quota.EvaluateGate(primaryPool, altPools, snap, opts)
-	if a.logger != nil {
+	if a.usageFormat != config.UsageFormatV1 && a.logger != nil {
 		if diffs := quota.CompareLegacyWithV1(primaryPool, altPools, snap, opts, eval); len(diffs) > 0 {
 			a.logger.Printf("INFO: legacy_compat_diff pool=%s alt=%v: %s", primaryPool, altPools, strings.Join(diffs, "; "))
+		}
+	}
+	if eval.Decision == quota.DecisionWouldPass && !eval.Bypassed && a.pace.ShadowEnabled() && snap != nil && a.store != nil {
+		load, err := a.store.ActivePoolLoadsExcluding(usage.ctx, usage.paceExcludedJobID)
+		if err != nil {
+			if a.logger != nil {
+				a.logger.Printf("gate admission pace shadow load: %v", err)
+			}
+			return eval, nil
+		}
+		ranking := quota.RankHealthy(eval.Pools, opts, a.pace, load)
+		if ranking.Index >= 0 {
+			shadowPool := eval.Pools[ranking.Index].Pool
+			comparison := ranking.Describe(eval.SelectedPool, shadowPool)
+			if eval.Reason == "" {
+				eval.Reason = comparison
+			} else {
+				eval.Reason = quota.FormatDecisionReason(eval) + "; " + comparison
+				eval.Detail = ""
+			}
+			if shadowPool != eval.SelectedPool && a.logger != nil {
+				a.logger.Printf("INFO: gate admission pool=%s alt=%v: %s", eval.RequestedPool, eval.AltPools, comparison)
+			}
 		}
 	}
 	return eval, nil

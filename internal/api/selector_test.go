@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -198,5 +201,128 @@ func TestMetaExposesSelectorMode(t *testing.T) {
 	meta = decodeResp[MetaResponse](t, doJSON(t, http.MethodGet, url+"/meta", "", nil))
 	if meta.SelectorMode != "off" {
 		t.Errorf("default selector_mode = %q, want off", meta.SelectorMode)
+	}
+}
+
+func TestSelectorPaceShadow(t *testing.T) {
+	now := time.Now()
+	snap := healthySnap(now)
+	for pool, ps := range snap.Pools {
+		hours := 120
+		if pool == quota.PoolAgyGemini {
+			hours = 20
+		}
+		reset := now.Add(time.Duration(hours) * time.Hour)
+		ps.WeeklyResetAt = &reset
+		snap.Pools[pool] = ps
+	}
+	for _, tc := range []struct {
+		selectorMode, paceMode, selected, marker string
+	}{
+		{config.SelectorModeApply, "shadow", quota.PoolCodex, "pace_diff"},
+		{config.SelectorModeRecord, "shadow", quota.PoolAgyGemini, "pace_diff"},
+		{config.SelectorModeRecord, "off", quota.PoolCodex, ""},
+	} {
+		t.Run(tc.selectorMode+"/"+tc.paceMode, func(t *testing.T) {
+			var logs bytes.Buffer
+			_, _, ts := newTestServer(t, Options{
+				Logger:     log.New(&logs, "", 0),
+				InstanceID: "pace", SelectorMode: tc.selectorMode, Pace: config.PaceConfig{Mode: tc.paceMode},
+				QuotaUsageFormat: config.UsageFormatV1, Pools: map[string]config.PoolConfig{
+					quota.PoolCodex: {}, quota.PoolAgyGemini: {}, quota.PoolClaude: {},
+				},
+				Now: func() time.Time { return now }, SnapshotLoader: func() (*quota.Snapshot, error) { return snap, nil },
+			})
+			status, job, body := postJob(t, ts.URL, CreateJobRequest{RequestID: "pace", Title: "t", Role: "implement", Weight: "standard"})
+			if status != http.StatusCreated {
+				t.Fatalf("POST /jobs: %d %s", status, body)
+			}
+			wantLog := "selector request_id=pace role=implement weight=standard selector_mode=" + tc.selectorMode + " pace_diff"
+			if tc.marker != "" && !strings.Contains(logs.String(), wantLog) || tc.marker == "" && strings.Contains(logs.String(), "pace_diff") {
+				t.Errorf("unexpected Selector log: %s", logs.String())
+			}
+			got := getJob(t, ts.URL, job.ID)
+			if got.Pool != quota.PoolCodex || got.Agent != "codex" || got.Model != "gpt-6.2-sol" || got.SelectedPool != tc.selected {
+				t.Fatalf("unexpected execution or recorded choice: %+v", got)
+			}
+			if tc.marker != "" && !strings.Contains(got.SelectionReason, tc.marker) ||
+				tc.marker == "" && strings.Contains(got.SelectionReason, "pace_") {
+				t.Fatalf("unexpected reason: %s", got.SelectionReason)
+			}
+		})
+	}
+}
+
+func TestGateAdmissionPaceShadow(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		gate, pace string
+		equal      bool
+	}{
+		{config.GateModeEnforce, "shadow", false},
+		{config.GateModeDryRun, "shadow", false},
+		{config.GateModeDryRun, "shadow", true},
+		{config.GateModeEnforce, "off", false},
+	} {
+		name := tc.gate + "/" + tc.pace
+		if tc.equal {
+			name += "/equal"
+		}
+		t.Run(name, func(t *testing.T) {
+			snap := healthySnap(now)
+			if !tc.equal {
+				for pool, hours := range map[string]int{quota.PoolCodex: 20, quota.PoolAgyGemini: 60} {
+					ps := snap.Pools[pool]
+					reset := now.Add(time.Duration(hours) * time.Hour)
+					ps.WeeklyResetAt = &reset
+					if pool == quota.PoolCodex {
+						short := 3
+						ps.ShortRemainingPercent = &short
+					}
+					snap.Pools[pool] = ps
+				}
+			}
+			var logs bytes.Buffer
+			_, st, ts := newTestServer(t, Options{
+				InstanceID: "pace-gate", Logger: log.New(&logs, "", 0),
+				GateMode: tc.gate, Pace: config.PaceConfig{Mode: tc.pace},
+				QuotaUsageFormat: config.UsageFormatV1,
+				Pools:            map[string]config.PoolConfig{quota.PoolCodex: {}, quota.PoolAgyGemini: {}},
+				Now:              func() time.Time { return now }, SnapshotLoader: func() (*quota.Snapshot, error) { return snap, nil },
+			})
+			status, job, body := postJob(t, ts.URL, CreateJobRequest{
+				RequestID: "pace-gate", Title: "t", Pool: quota.PoolCodex, AltPools: []string{quota.PoolAgyGemini},
+			})
+			if status != http.StatusCreated || job.Pool != quota.PoolCodex {
+				t.Fatalf("POST /jobs: %d %s", status, body)
+			}
+			decisions, err := st.ListGateDecisions(context.Background(), 1)
+			if err != nil || len(decisions) != 1 {
+				t.Fatalf("gate decisions: %+v, err=%v", decisions, err)
+			}
+			if decisions[0].SelectedPool != quota.PoolCodex {
+				t.Errorf("Gate selected %q, want codex", decisions[0].SelectedPool)
+			}
+			reason := decisions[0].Reason
+			diff := "pace_diff current=codex shadow=agy-gemini"
+			if tc.equal {
+				if !strings.Contains(reason, "pace_shadow current=codex shadow=codex mode=equal") ||
+					strings.Count(reason, "in_band=true load=0)") != 2 ||
+					strings.Contains(reason, "pace_diff") || strings.Contains(logs.String(), "pace_diff") {
+					t.Errorf("expected equal-mode comparison with two idle candidates and no diff: reason=%q, logs=%s", reason, logs.String())
+				}
+			} else if tc.pace == "shadow" {
+				for _, want := range []string{diff, "floored=true weekly_floored=false short_floored=true in_band=false load=0)"} {
+					if !strings.Contains(reason, want) {
+						t.Errorf("Gate reason %q missing %q", reason, want)
+					}
+				}
+				if !strings.Contains(logs.String(), "gate admission pool=codex alt=[agy-gemini]: "+diff) {
+					t.Errorf("missing Gate admission log: %s", logs.String())
+				}
+			} else if strings.Contains(reason, "pace_") || strings.Contains(logs.String(), "pace_diff") {
+				t.Errorf("unexpected pace comparison with pace off: reason=%q, logs=%s", reason, logs.String())
+			}
+		})
 	}
 }

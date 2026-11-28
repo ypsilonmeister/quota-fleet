@@ -1,13 +1,17 @@
 package runtime
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
+	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 	"github.com/ypsilonmeister/quota-fleet/internal/store"
 )
 
@@ -217,5 +221,77 @@ func TestGateCheckerCheckOnceWalksAllPages(t *testing.T) {
 	released := e.countRows(`SELECT COUNT(*) FROM held_jobs WHERE status = 'released'`)
 	if released != n-store.MaxListLimit {
 		t.Fatalf("released %d holds, want %d (holds after the first page)", released, n-store.MaxListLimit)
+	}
+}
+
+func TestGateReleasePaceShadowRound(t *testing.T) {
+	e := newChainEnv(t, config.GateModeEnforce)
+	now := e.nowFn()
+	snap := &quota.Snapshot{GeneratedAt: now, Pools: make(map[string]quota.PoolSnapshot)}
+	short := 50
+	for _, p := range []struct {
+		pool  string
+		left  int
+		hours time.Duration
+	}{{"codex", 60, 34}, {"agy-gemini", 70, 42}, {"claude", 80, 140}} {
+		reset := now.Add(p.hours * time.Hour)
+		snap.Pools[p.pool] = quota.PoolSnapshot{
+			MeasuredAt: now, WeeklyRemainingPercent: p.left, WeeklyResetAt: &reset, ShortRemainingPercent: &short,
+		}
+		e.pools[p.pool] = config.PoolConfig{}
+	}
+	for i := 0; i < 4; i++ {
+		_, _, err := e.st.HoldJob(e.ctx, store.HoldJobParams{
+			RequestID: fmt.Sprintf("pace-%d", i), Pool: "codex", AltPools: []string{"agy-gemini", "claude"},
+			Payload: store.CreateJobParams{Title: "pace", Pool: "codex"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	holds, err := e.st.ListHeldJobs(e.ctx, store.HeldStatusHeld, 4)
+	if err != nil || len(holds) != 4 {
+		t.Fatalf("holds = %+v, err = %v", holds, err)
+	}
+	var logs bytes.Buffer
+	checker := NewGateChecker(GateCheckerOptions{
+		Store: e.st, GateMode: config.GateModeEnforce, UsageFormat: config.UsageFormatV1,
+		Pace: config.PaceConfig{Mode: "shadow"}, Pools: e.pools, Now: e.nowFn,
+		Logger: log.New(&logs, "", 0), SnapshotLoader: func() (*quota.Snapshot, error) { return snap, nil },
+	})
+	if err := checker.CheckOnce(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := e.st.ListGateDecisions(e.ctx, 10)
+	if err != nil || len(rows) != len(holds) {
+		t.Fatalf("decisions = %+v, err = %v", rows, err)
+	}
+	for i, shadow := range []string{"codex", "agy-gemini", "codex", "agy-gemini"} {
+		row := rows[len(holds)-1-i]
+		if row.HeldID != holds[i].ID || row.SelectedPool != "codex" || !strings.Contains(row.Reason, "shadow="+shadow+" ") {
+			t.Fatalf("release %d = %+v, want held %s / codex / shadow %s", i, row, holds[i].ID, shadow)
+		}
+		job, err := e.st.GetJobByRequestID(e.ctx, holds[i].RequestID)
+		if err != nil || job.Pool != "codex" {
+			t.Fatalf("job %d = %+v, err = %v", i, job, err)
+		}
+	}
+	if count := strings.Count(logs.String(), "pace_diff"); count != 2 {
+		t.Fatalf("got %d diffs, logs: %s", count, logs.String())
+	}
+
+	// A manual release starts a new comparison using the actual queued jobs.
+	held, _, err := e.st.HoldJob(e.ctx, store.HoldJobParams{
+		RequestID: "pace-manual", Pool: "codex", AltPools: []string{"agy-gemini"},
+		Payload: store.CreateJobParams{Title: "pace", Pool: "codex"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := checker.ReleaseByID(e.ctx, held.ID)
+	if err != nil || !res.Released || res.Job.Pool != "codex" ||
+		!strings.Contains(res.Evaluation.Reason, "shadow=agy-gemini") ||
+		!strings.Contains(res.Evaluation.Reason, "load=4") {
+		t.Fatalf("manual release = %+v, err = %v", res, err)
 	}
 }

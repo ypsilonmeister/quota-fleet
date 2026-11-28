@@ -141,3 +141,22 @@ watching dashboards and re-queueing jobs by hand at odd hours. With it,
 "the pool resets Tuesday 09:00 with 48% left" stops being an anecdote and
 becomes a scheduling input — and a job registered Friday night simply
 starts when capacity returns, instead of dying at 01:30.
+
+## Pace shadow (Issue #57)
+
+Set `quota.pace.mode: shadow` to compare pool choices for Selector, Gate admission,
+and held-job release. The default mode is `off`. Shadow preserves the actual job
+assignment, Gate release order, and health decisions. The Selector selection
+reason and Gate decision reason record candidate pace, weekly and 5-hour floor
+status, tie-band membership, and active job count. Differences are marked
+`pace_diff` in those reasons and logged by the server. In Selector record mode,
+the `selected_*` fields show the shadow choice and the job executes with the
+usual defaults.
+
+Pace uses the weekly window (`pools.<name>.weekly_hours`, default 168). The
+weekly soft floor is 2% and the 5-hour window contributes a 5% soft floor.
+`pools.<name>.reserve_percent` defaults to 0. A reserve can raise the weekly
+floor when more than two hours remain. `quota.pace.urgent_pace` defaults to
+1.0 and `quota.pace.tie` to 0.20. During a held-job sweep the shadow load
+starts from current waiting, queued, and claimed jobs. Each successful release
+adds to the shadow pool's load for the following holds.

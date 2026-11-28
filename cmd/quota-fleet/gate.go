@@ -519,10 +519,12 @@ func runGateRelease(args []string, stdout, stderr io.Writer) int {
 		usageFormat = config.UsageFormatLegacy
 		staleAfter  = config.DefaultQuotaStaleAfter
 		poolsCfg    map[string]config.PoolConfig
+		pace        config.PaceConfig
 	)
 
 	if cfg, err := config.Load(cfgPath); err == nil {
 		poolsCfg = cfg.Pools
+		pace = cfg.Quota.Pace
 		staleAfter = cfg.Quota.EffectiveStaleAfter()
 		usageFormat = cfg.Quota.EffectiveUsageFormat()
 		if usageFile == "" {
@@ -562,6 +564,7 @@ func runGateRelease(args []string, stdout, stderr io.Writer) int {
 		UsageFormat: usageFormat,
 		StaleAfter:  staleAfter,
 		Pools:       poolsCfg,
+		Pace:        pace,
 		Logger:      log.New(io.Discard, "", 0),
 	})
 

@@ -1559,3 +1559,39 @@ func TestChainsConfigDefaultsAndValidation(t *testing.T) {
 		t.Fatalf("invalid chains config accepted: %v", err)
 	}
 }
+
+func TestPaceConfig(t *testing.T) {
+	cfg, err := Parse([]byte(`instance_id: x
+state_dir: /tmp/x
+quota:
+  pace:
+    mode: shadow
+    urgent_pace: 1.2
+    tie: 0
+pools:
+  codex:
+    weekly_hours: 120
+    reserve_percent: 6
+  claude: {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pace := cfg.Quota.Pace
+	if !pace.ShadowEnabled() || pace.EffectiveUrgentPace() != 1.2 || pace.EffectiveTie() != 0 {
+		t.Fatalf("pace = %+v", pace)
+	}
+	if p := cfg.Pools["codex"]; p.EffectiveWeeklyHours() != 120 || p.ReservePercent != 6 {
+		t.Fatalf("codex = %+v", p)
+	}
+	if p := cfg.Pools["claude"]; p.EffectiveWeeklyHours() != 168 || p.ReservePercent != 0 {
+		t.Fatalf("claude = %+v", p)
+	}
+	cfg.Quota.Pace.Mode = "on"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "quota.pace.mode") {
+		t.Fatalf("on mode validation = %v", err)
+	}
+}

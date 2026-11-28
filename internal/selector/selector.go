@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ypsilonmeister/quota-fleet/internal/config"
 	"github.com/ypsilonmeister/quota-fleet/internal/quota"
 )
 
@@ -132,6 +133,8 @@ type Input struct {
 	Usage    *quota.Snapshot
 	UsageErr error
 	Eval     quota.EvalOptions
+	Pace     config.PaceConfig
+	PaceLoad map[string]int
 	// ResolvePool maps agent+model to a pool via pools.applies_to. May be nil.
 	ResolvePool func(agent, model string) string
 }
@@ -139,6 +142,8 @@ type Input struct {
 // Result is the Selector's choice. Fields always honour explicit input.
 type Result struct {
 	Candidate
+	Shadow   *Candidate
+	PaceDiff string
 	Reason   string
 	Fallback bool // true when usage was unreliable and the deterministic default order was used
 	// Abstain is true when every candidate pool is unmeasured: the Selector selects nothing
@@ -188,6 +193,8 @@ func Select(in Input) Result {
 		head += "; role/weight row has no candidate compatible with the explicit fields, widened to all known candidates"
 	}
 
+	var paceEvals []quota.PoolEvaluation
+	var paceCandidates []Candidate
 	var (
 		notes     []string
 		excluded  = map[int]string{} // index in notes -> note without the exclusion suffix
@@ -210,6 +217,10 @@ func Select(in Input) Result {
 		}
 		switch ev.Status {
 		case quota.PoolHealthy:
+			if in.PaceLoad != nil {
+				paceEvals = append(paceEvals, ev)
+				paceCandidates = append(paceCandidates, c)
+			}
 			notes = append(notes, fmt.Sprintf("%s: healthy", c.Pool))
 			if healthy == nil {
 				healthy = &cands[i]
@@ -253,7 +264,18 @@ func Select(in Input) Result {
 	}
 
 	if healthy != nil {
-		return Result{Candidate: in.complete(*healthy), Reason: fmt.Sprintf("%s; chose %s/%s on pool %s; %s", head, healthy.Agent, healthy.Model, healthy.Pool, strings.Join(notes, ", "))}
+		res := Result{Candidate: in.complete(*healthy), Reason: fmt.Sprintf("%s; chose %s/%s on pool %s; %s", head, healthy.Agent, healthy.Model, healthy.Pool, strings.Join(notes, ", "))}
+		if ranking := quota.RankHealthy(paceEvals, in.Eval, in.Pace, in.PaceLoad); ranking.Index >= 0 {
+			shadow := in.complete(paceCandidates[ranking.Index])
+			target := func(c Candidate) string { return fmt.Sprintf("%s/%s@%s", c.Agent, c.Model, c.Pool) }
+			comparison := ranking.Describe(target(res.Candidate), target(shadow))
+			res.Shadow = &shadow
+			res.Reason += "; " + comparison
+			if shadow != res.Candidate {
+				res.PaceDiff = comparison
+			}
+		}
+		return res
 	}
 	if firstLive != nil {
 		kind := "usage missing"
