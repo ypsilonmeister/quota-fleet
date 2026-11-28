@@ -25,53 +25,45 @@ synthetic usage snapshot.</sub>
 
 ```mermaid
 flowchart TD
-    COORD["Coordinator<br/>registers work, prepares merge decisions"]
-    COLL["Quota collector<br/>measures each pool"]
-    GATE["Quota Gate<br/>in front of job creation"]
-    STORE[("Job store<br/>single source of truth")]
-    SIG["Signal file<br/>append-only hints"]
-    DISP["Dispatcher"]
-    LAUNCH["Worker (launcher)<br/>claims queued jobs"]
-    subgraph HOSTS["Worker hosts"]
+    COORD["Coordinator / CLI / UI / MCP<br/>jobs (all); chains (API / CLI)"]
+    SNAP["Usage snapshot file<br/>(external, optional)"]
+    GATE["Quota Gate<br/>optional; off by default"]
+    STORE[("SQLite job store<br/>jobs, held jobs, outbox")]
+    DISP["Dispatcher<br/>polls outbox"]
+    SIG["Signal file<br/>append-only audit log"]
+    LAUNCH["Launcher<br/>claims queued jobs"]
+    subgraph HOSTS["Worker hosts (SSH / local)"]
         AGENT["Agent CLI"]
     end
-    SHEP["Shepherd<br/>evaluates and delivers"]
-    NEXT["Pull request,<br/>follow-up job"]
+    SHEP["Shepherd<br/>collects, evaluates, delivers"]
+    CHAIN["Chain Driver<br/>advances chain runs"]
     REC["Reconciler<br/>recovers or reports stuck work"]
 
-    COORD -->|create| GATE
-    COLL -.->|usage snapshot| GATE
-    GATE -->|queue, or hold until quota recovers| STORE
-    STORE -.->|job entered queued| SIG
-    SIG -.-> DISP
-    DISP -->|wake| LAUNCH
-    LAUNCH -->|claim by compare-and-swap| STORE
+    COORD -->|POST /jobs, POST /chains| GATE
+    SNAP -->|read by| GATE
+    GATE -->|queue, or hold when enforced| STORE
+    STORE -->|pending outbox| DISP
+    DISP -->|append| SIG
+    DISP -->|wake in-process| LAUNCH
+    LAUNCH -->|claim by CAS| STORE
     LAUNCH -->|launch| AGENT
-    AGENT -.->|result| STORE
-    SHEP -->|evaluate finished jobs| STORE
-    SHEP -.-> NEXT
-    REC -->|patrol| STORE
+    SHEP -->|inspect & collect results| AGENT
+    SHEP -->|record done / failed| STORE
+    CHAIN -->|read finished steps| STORE
+    CHAIN -->|register next step| GATE
+    REC -->|patrol & recover| STORE
 ```
 
-The diagram follows the design in [docs/01](docs/01-architecture.md). **Dashed
-arrows** mark the steps that the `quota-fleet` binary does not do as drawn:
-
-- **Quota collector → Quota Gate:** no collector is included. You supply the
-  snapshot file.
-- **Job store → Signal file → Dispatcher:** the Dispatcher reads pending signals
-  from a table in the SQLite store, appends them to the signal file, and wakes
-  the launcher inside the same process.
-- **Agent CLI → Job store:** the Shepherd collects each finished run's result
-  from the worker host, evaluates it, and records `done` or `failed` in the
-  store.
-- **Shepherd → Pull request, follow-up job:** the Shepherd does neither. A pull
-  request comes from a chain's publish step (an agent job) or the Coordinator,
-  and a follow-up job from the [Chain Driver](docs/22-chain-runs.md) or the
-  Coordinator ([docs/06](docs/06-implementation-design.md) §7-4).
-
-One solid path is conditional: **Coordinator → Quota Gate → Job store**. The
-gate is off by default and holds jobs only with `gate_mode: enforce`, and
-`quota-fleet job create` goes through it by default (`--direct` bypasses it).
+`quota-fleet serve` runs the HTTP API, Quota Gate, Dispatcher, Launcher,
+Shepherd, Chain Driver, and Reconciler in one process. The Quota Gate is off by
+default and holds jobs only with `gate_mode: enforce` (using an external usage
+snapshot and/or [reactive cooldown](docs/03-quota-gate.md#reactive-pool-cooldown));
+`quota-fleet job create` calls `POST /jobs` (going through the gate) by default,
+and only bypasses it when `--direct` is passed. For the conceptual architecture
+and how the current binary differs from it, see
+[docs/01](docs/01-architecture.md#differences-in-the-current-implementation)
+(and [docs/06](docs/06-implementation-design.md) for the implementation
+design).
 
 ## Case study
 
@@ -97,68 +89,58 @@ preceded the Go implementation here ([full case study](docs/05-case-study.md)):
 >
 > Implemented:
 >
-> - **Core features** ([design: docs/06](docs/06-implementation-design.md)):
->   SQLite job store, HTTP API, Dispatcher/Launcher/Shepherd/Reconciler
->   runtime, SSH/local host adapter, Quota Gate (hold/release),
->   typed+decision Evaluator, and file/webhook Notifier. This is a list of
->   implemented code, not a claim that the migration exit criteria in docs/06
->   (such as the Phase 4 production cut-over and quality comparison) are met.
-> - Embedded **web UI** at `/ui/` ([docs/07](docs/07-ui-and-mcp.md)), including
->   the model pick list and automatic pool derivation
->   ([docs/11](docs/11-ui-models.md)).
-> - **MCP server** over stdio (`quota-fleet mcp`, docs/07) and Streamable HTTP
->   (`/mcp`, [docs/13](docs/13-mcp-http.md); enable with `api.mcp_http: true`).
+> - **Core runtime** ([docs/06](docs/06-implementation-design.md)): SQLite job
+>   store, HTTP API, Dispatcher/Launcher/Shepherd/Reconciler, SSH/local
+>   adapter, Quota Gate (hold/release and
+>   [reactive cooldown](docs/03-quota-gate.md#reactive-pool-cooldown)),
+>   acceptance Evaluator, and file/webhook Notifier (code implemented;
+>   production cut-over criteria in docs/06 are tracked separately).
+> - **Embedded web UI** at `/ui/` ([docs/07](docs/07-ui-and-mcp.md)): model
+>   pick list and automatic pool derivation ([docs/11](docs/11-ui-models.md)).
+> - **MCP server**: stdio (`quota-fleet mcp`, [docs/07](docs/07-ui-and-mcp.md))
+>   and Streamable HTTP (`/mcp`, [docs/13](docs/13-mcp-http.md); enable with
+>   `api.mcp_http: true`).
 > - **Scoped API tokens** (`api.tokens`, [docs/12](docs/12-api-tokens.md)).
-> - **Usage snapshot Schema v1** with `quota-fleet usage validate`
->   ([docs/23](docs/23-usage-snapshot.md); the gate reads it with
->   `quota.usage_format: v1`, default `legacy`).
-> - **Selector** for agent / model / pool
->   ([docs/19](docs/19-selector.md); `selector.mode: off | record | apply`,
->   default `off`). For jobs registered through `POST /jobs` or as chain steps,
->   it picks values for fields left empty, using the role / weight and the usage
->   snapshot; a chain step must name its `agent`, so only its `model` and `pool`
->   can be filled. `record` stores the pick but fills the empty fields from fixed
->   defaults (`codex` / `gpt-6.2-sol`; the model default is for `codex` only);
->   `apply` fills them from the pick, and falls back to the defaults when every
->   candidate pool is unmeasured. Explicit values are never overridden, and an
->   empty field is not always filled, for example when no candidate is
->   compatible with those values.
+> - **Usage snapshot Schema v1** and `quota-fleet usage validate`
+>   ([docs/23](docs/23-usage-snapshot.md); enabled with `quota.usage_format: v1`,
+>   default `legacy`).
+> - **Selector** ([docs/19](docs/19-selector.md);
+>   `selector.mode: off | record | apply`, default `off`): fills unspecified
+>   agent, model, and pool fields from role, weight, and quota health without
+>   overriding explicit values.
 > - **Self-driving chain runs** (Chain Driver, [docs/22](docs/22-chain-runs.md)):
->   register a chain once (`POST /chains` or `quota-fleet chain create`) and
->   `serve` advances it through implement, review and any fix rounds, up to a
->   round limit. It publishes only on a valid `ok_to_merge` verdict.
-> - **Review gate** ([docs/18](docs/18-review-gate.md); off by default, enable
->   with `review_gate.enabled: true`, needs a Decision API key and an API token
->   with the `operate` scope): `POST /decision/review-verdict` has Decision 1
->   judge a review report as `ok_to_merge` or `changes_needed`. The report text
->   is sent to Google's API.
+>   `POST /chains` or `quota-fleet chain create` advances implement → review →
+>   fix rounds automatically and publishes only on a valid `ok_to_merge`
+>   verdict.
+> - **Review gate** ([docs/18](docs/18-review-gate.md); opt-in via
+>   `review_gate.enabled: true`): `POST /decision/review-verdict` calls Google's
+>   Gemini Decision API (`gemini-decision-1`) to judge a review report as
+>   `ok_to_merge` or `changes_needed` (requires an API key and an
+>   `operate`-scoped token).
 > - **Per-job reasoning effort** ([docs/21](docs/21-job-effort.md)): optional
->   `effort` (`low`, `medium`, `high`, `xhigh`) on `POST /jobs` and the MCP
->   `create_job` tool, for `codex` and `claude` jobs only.
-> - **Agent version inventory** across hosts with drift detection
->   ([docs/08](docs/08-agent-versions.md); `quota-fleet agents`, no automatic
->   updates).
-> - **Browser notifications** on job completion while the UI is open
->   ([docs/14](docs/14-job-notifications.md); enable with
->   `api.job_events: true`, then turn them on in the UI).
-> - **Installable web UI** (PWA) with an offline copy of the app shell
->   ([docs/15](docs/15-pwa.md); needs HTTPS or localhost).
-> - **Japanese and English** web UI, following the browser language until you
->   choose one ([docs/17](docs/17-i18n.md)). CLI output, API errors and the docs
->   are not translated.
-> - **Web Push** when a job is done or failed, also with no UI tab open
->   ([docs/16](docs/16-web-push.md); needs HTTPS or localhost, enable with
->   `api.web_push: true`, then turn notifications on in the UI). On iOS and
->   iPadOS it only works in the web app added to the Home Screen (16.4+).
+>   `effort` (`low` | `medium` | `high` | `xhigh`) on `POST /jobs` and MCP
+>   `create_job` for `codex` and `claude` jobs.
+> - **Agent version inventory** (`quota-fleet agents`,
+>   [docs/08](docs/08-agent-versions.md)): probes versions across hosts with
+>   drift detection (no automatic updates).
+> - **Browser notifications** ([docs/14](docs/14-job-notifications.md)): live
+>   job-completion alerts while the UI is open (`api.job_events: true`).
+> - **Installable web UI (PWA)** ([docs/15](docs/15-pwa.md)): offline app shell
+>   (requires HTTPS or localhost).
+> - **Japanese and English web UI** ([docs/17](docs/17-i18n.md)): follows
+>   browser language or user choice (CLI, API errors, and docs stay
+>   untranslated).
+> - **Web Push** ([docs/16](docs/16-web-push.md)): job-completion push alerts
+>   with no UI tab open (`api.web_push: true`; HTTPS or localhost; iOS/iPadOS
+>   16.4+ requires Home Screen installation).
 >
 > Not yet implemented:
 >
 > - Selector stage S3, assigning agents across a whole chain
 >   ([docs/10](docs/10-selector.md), [docs/19](docs/19-selector.md)).
-> - Beyond the first stage of the Chain Driver: session resume, MCP tools and a
->   UI view for chain runs, and Web Push for chain notifications
->   ([docs/22](docs/22-chain-runs.md)).
-> - Superseding held jobs (docs/20): not implemented on `main`; it is in the
+> - Chain Driver follow-ups: session resume, MCP tools, UI view for chain runs,
+>   and Web Push for chain notifications ([docs/22](docs/22-chain-runs.md)).
+> - Superseding held jobs (docs/20): not implemented on `main`; tracked in the
 >   unmerged [PR #24](https://github.com/ypsilonmeister/quota-fleet/pull/24).
 > - Burn-down research jobs ([docs/03](docs/03-quota-gate.md)): design only.
 
@@ -218,12 +200,55 @@ preceded the Go implementation here ([full case study](docs/05-case-study.md)):
    inspects and registers jobs, set it to a named token with the `read` and
    `register` scopes.
 4. **Enable the Quota Gate (Optional)**:
-   The Quota Gate reads a normalized JSON snapshot file (**Schema v1**,
-   `schema_version: 1`) defined in [docs/23-usage-snapshot.md](docs/23-usage-snapshot.md).
-   `quota-fleet` itself only reads and validates this file contract — it never
-   stores or handles subscription credentials.
+   Choose between two paths — or combine them:
 
-   Opt in to [reactive pool cooldown](docs/03-quota-gate.md#reactive-pool-cooldown) to pause a pool after detected agent quota errors.
+   ### Path A — Minimal setup: Reactive Cooldown (no external collector)
+
+   If you do not want to run a quota collector, enable
+   [reactive pool cooldown](docs/03-quota-gate.md#reactive-pool-cooldown) and
+   mark the pool `unmeasured: true`. When a failed agent run matches a quota or
+   rate-limit error, `quota-fleet` pauses that pool with exponential backoff
+   (holding new jobs or routing to an alternative pool, skipping queued jobs in
+   the cooling pool, and running a single trial after expiry):
+
+   ```yaml
+   quota:
+     gate_mode: enforce
+     cooldown:
+       enabled: true
+       initial: 5m
+       multiplier: 2.0
+       max: 60m
+       streak_reset_after: 2h
+   pools:
+     claude:
+       unmeasured: true
+       applies_to:
+         - agent: claude
+   ```
+
+   When running with cooldown alone (no usage snapshot), configure an
+   `unmeasured: true` pool for every agent you run so jobs for other agents are
+   not held as unknown under `gate_mode: enforce`.
+
+   Inspect or clear active cooldowns with:
+   ```bash
+   ./quota-fleet gate cooldowns
+   ./quota-fleet gate cooldown clear claude
+   ```
+   See [docs/03-quota-gate.md#reactive-pool-cooldown](docs/03-quota-gate.md#reactive-pool-cooldown)
+   for custom `rate_limit_patterns`, `rate_limit_exit_codes`, and per-pool
+   overrides.
+
+   ### Path B — Strict control: Schema v1 Snapshot (external collector)
+
+   To hold jobs *before* a pool runs empty and release them automatically on
+   measured recovery, supply a normalized JSON snapshot file (**Schema v1**,
+   `schema_version: 1`) defined in
+   [docs/23-usage-snapshot.md](docs/23-usage-snapshot.md). `quota-fleet` itself
+   only reads and validates this file contract — it never stores or handles
+   subscription credentials. (You can also enable reactive cooldown on measured
+   pools; a newer healthy snapshot clears the cooldown immediately.)
 
    Minimal Schema v1 snapshot example:
    ```json
@@ -362,7 +387,7 @@ the missing control plane around them.
 - `docs/15-pwa.md` — installable web UI (manifest, icons, app shell cache)
 - `docs/16-web-push.md` — Web Push on job completion (VAPID keys, setup, iOS limits)
 - `docs/17-i18n.md` — web UI internationalization (dictionary, how to add strings)
-- `docs/18-review-gate.md` — review gate (Decision 1 verdict endpoint) and how to roll it out
+- `docs/18-review-gate.md` — review gate (Gemini Decision API verdict endpoint) and how to roll it out
 - `docs/19-selector.md` — Selector implementation (modes, selection table, records)
 - `docs/20-held-supersede.md` — held-job supersede design, **not implemented** on `main` (the file arrives with the unmerged [PR #24](https://github.com/ypsilonmeister/quota-fleet/pull/24))
 - `docs/21-job-effort.md` — per-job reasoning effort (`effort`: codex / claude)
