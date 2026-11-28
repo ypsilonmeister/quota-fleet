@@ -151,3 +151,82 @@ func TestExpiredShortWindowPassesGateReleasesHeldAndMetaHealthy(t *testing.T) {
 		})
 	}
 }
+
+// A weekly 0% past its reset with no short value must still be held at registration, and
+// released once the short window is measured.
+func TestExpiredWeeklyWithMissingShortHoldsUntilShortMeasured(t *testing.T) {
+	now := time.Date(2026, 11, 28, 6, 6, 0, 0, time.UTC)
+	dir := t.TempDir()
+	usagePath := filepath.Join(dir, "usage.json")
+	writeUsage := func(subText string) {
+		t.Helper()
+		raw := fmt.Sprintf(`{"updatedAt":"2026-11-28T06:05:00Z","services":{"claude":{"remainingPercent":0,"resetAt":"2026-11-28T04:49:59Z","subText":%q}}}`, subText)
+		if err := os.WriteFile(usagePath, []byte(raw), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	writeUsage("")
+
+	st, err := store.Open(context.Background(), filepath.Join(dir, "fleet.db"), store.Options{InstanceID: "expwin"})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	pools := map[string]config.PoolConfig{"claude": {}}
+	clock := func() time.Time { return now }
+	checker := runtime.NewGateChecker(runtime.GateCheckerOptions{
+		Store:       st,
+		GateMode:    config.GateModeEnforce,
+		UsageFile:   usagePath,
+		UsageFormat: config.UsageFormatLegacy,
+		StaleAfter:  45 * time.Minute,
+		Pools:       pools,
+		Now:         clock,
+	})
+	srv := api.NewServer(st, api.Options{
+		InstanceID:       "expwin",
+		GateMode:         config.GateModeEnforce,
+		QuotaUsageFile:   usagePath,
+		QuotaUsageFormat: config.UsageFormatLegacy,
+		QuotaStaleAfter:  45 * time.Minute,
+		Pools:            pools,
+		Now:              clock,
+		GateReleaser:     testGateReleaser{checker: checker},
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/jobs", "application/json",
+		strings.NewReader(`{"request_id":"missing-short","title":"t","pool":"claude"}`))
+	if err != nil {
+		t.Fatalf("POST /jobs: %v", err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		HeldID string `json:"held_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode POST /jobs: %v", err)
+	}
+	if resp.StatusCode != http.StatusAccepted || body.HeldID == "" {
+		t.Fatalf("POST status = %d held_id=%q, want 202 held", resp.StatusCode, body.HeldID)
+	}
+
+	checkHeld := func(want store.HeldStatus) {
+		t.Helper()
+		if err := checker.CheckOnce(context.Background()); err != nil {
+			t.Fatalf("CheckOnce: %v", err)
+		}
+		held, err := st.GetHeldJob(context.Background(), body.HeldID)
+		if err != nil {
+			t.Fatalf("GetHeldJob: %v", err)
+		}
+		if held.Status != want {
+			t.Errorf("held job status = %q (reason=%q), want %q", held.Status, held.Reason, want)
+		}
+	}
+	checkHeld(store.HeldStatusHeld)
+	writeUsage("5h 80%")
+	checkHeld(store.HeldStatusReleased)
+}

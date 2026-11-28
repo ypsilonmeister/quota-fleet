@@ -127,16 +127,26 @@ func windowExpired(resetAt *time.Time, now time.Time) bool {
 	return resetAt != nil && !resetAt.IsZero() && resetAt.Before(now)
 }
 
+// windowExhausted reports whether a window with pct remaining exhausts the pool at now.
+// Expiry clears only an observed 0%: a negative value (the Legacy parser passes it
+// through) is not a valid observation and stays exhausted.
+func windowExhausted(pct int, resetAt *time.Time, now time.Time) bool {
+	if pct == 0 {
+		return !windowExpired(resetAt, now)
+	}
+	return pct < 0
+}
+
 // weeklyExhaustedAt reports whether the weekly window exhausts the pool at now.
 // Callers handle WeeklyAbsent.
 func (p PoolSnapshot) weeklyExhaustedAt(now time.Time) bool {
-	return p.WeeklyRemainingPercent <= 0 && !windowExpired(p.WeeklyResetAt, now)
+	return windowExhausted(p.WeeklyRemainingPercent, p.WeeklyResetAt, now)
 }
 
 // shortExhaustedAt reports whether the short window exhausts the pool at now.
 // A missing short value is not "exhausted"; callers handle it separately.
 func (p PoolSnapshot) shortExhaustedAt(now time.Time) bool {
-	return p.ShortRemainingPercent != nil && *p.ShortRemainingPercent <= 0 && !windowExpired(p.ShortResetAt, now)
+	return p.ShortRemainingPercent != nil && windowExhausted(*p.ShortRemainingPercent, p.ShortResetAt, now)
 }
 
 // Snapshot is a normalized collection of pool measurements taken at MeasuredAt.

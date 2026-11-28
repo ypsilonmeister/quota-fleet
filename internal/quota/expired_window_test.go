@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,23 +142,80 @@ func TestGateExpiredWindowApproxReset(t *testing.T) {
 	}
 }
 
-// An expired weekly window only stops being an exhaustion reason: a missing short value
-// is still handled as before (fail-closed hold in v1, provisional pass in legacy).
-func TestGateExpiredWeeklyKeepsMissingShortHandling(t *testing.T) {
-	for _, tc := range []struct {
-		format     string
-		wantReason string
-		wantHold   bool
-	}{
-		{FormatV1, ReasonShortWindowMissing, true},
-		{FormatLegacy, ReasonShortWindowNull, false},
-	} {
-		snap := expiredWindowSnapshot(t, tc.format, testWindow{pct: 0, reset: pastReset}, nil)
-		eval := EvaluateGate("claude", nil, snap, EvalOptions{Now: expiredWindowNow, Format: tc.format})
-		if eval.Decision != DecisionUnknown || eval.Reason != tc.wantReason || ShouldHoldOnEnforce(eval) != tc.wantHold {
-			t.Errorf("%s: gate = %s reason=%q hold=%t, want unknown %q hold=%t",
-				tc.format, eval.Decision, eval.Reason, ShouldHoldOnEnforce(eval), tc.wantReason, tc.wantHold)
+// An expired weekly window only stops being an exhaustion reason: without a short value
+// the pool is still held, now because the short window is missing.
+func TestGateExpiredWeeklyWithMissingShortHolds(t *testing.T) {
+	for _, format := range []string{FormatLegacy, FormatV1} {
+		snap := expiredWindowSnapshot(t, format, testWindow{pct: 0, reset: pastReset}, nil)
+		eval := EvaluateGate("claude", nil, snap, EvalOptions{Now: expiredWindowNow, Format: format})
+		if eval.Decision != DecisionUnknown || eval.Reason != ReasonShortWindowMissing || eval.BlockedBy != "" || !ShouldHoldOnEnforce(eval) {
+			t.Errorf("%s: gate = %s reason=%q blocked_by=%q hold=%t, want unknown %q hold",
+				format, eval.Decision, eval.Reason, eval.BlockedBy, ShouldHoldOnEnforce(eval), ReasonShortWindowMissing)
 		}
+	}
+}
+
+// Legacy keeps passing a missing short value (short_window_null) when the weekly window
+// has quota left, and the new hold combines with other candidates like any held pool.
+func TestGateLegacyMissingShortCandidates(t *testing.T) {
+	const (
+		expired   = `{"remainingPercent":0,"resetAt":"` + pastReset + `"}`
+		remaining = `{"remainingPercent":80,"resetAt":"` + pastReset + `"}`
+		exhausted = `{"remainingPercent":0,"resetAt":"` + futureReset + `","subText":"5h 80%"}`
+		healthy   = `{"remainingPercent":80,"resetAt":"` + futureReset + `","subText":"5h 80%"}`
+	)
+	for _, tc := range []struct {
+		name         string
+		claude       string
+		codex        string // empty means claude is the only candidate
+		wantHold     bool
+		wantSelected string
+	}{
+		{"weekly remaining, short missing", remaining, "", false, ""},
+		{"expired, short missing", expired, "", true, ""},
+		{"expired, alt exhausted", expired, exhausted, true, ""},
+		{"exhausted, alt expired", exhausted, expired, true, ""},
+		{"expired, alt healthy", expired, healthy, false, "codex"},
+		{"expired, alt short_window_null", expired, remaining, false, ""},
+		{"short_window_null, alt expired", remaining, expired, false, ""},
+	} {
+		services := `"claude":` + tc.claude
+		var alts []string
+		if tc.codex != "" {
+			services += `,"codex":` + tc.codex
+			alts = []string{"codex"}
+		}
+		snap, err := ParseUsageJSON([]byte(`{"updatedAt":"2026-11-28T06:05:00Z","services":{` + services + `}}`))
+		if err != nil {
+			t.Fatalf("%s: parse: %v", tc.name, err)
+		}
+		eval := EvaluateGate("claude", alts, snap, EvalOptions{Now: expiredWindowNow, Format: FormatLegacy})
+		if ShouldHoldOnEnforce(eval) != tc.wantHold || eval.SelectedPool != tc.wantSelected {
+			t.Errorf("%s: gate = %s reason=%q selected=%q hold=%t, want selected=%q hold=%t",
+				tc.name, eval.Decision, eval.Reason, eval.SelectedPool, ShouldHoldOnEnforce(eval), tc.wantSelected, tc.wantHold)
+		}
+	}
+}
+
+// The Legacy parser passes negative percentages through. They are not valid observations,
+// so a passed reset time does not clear them.
+func TestGateExpiredWindowKeepsNegativeRemainingExhausted(t *testing.T) {
+	ok := testWindow{pct: 80, reset: futureReset}
+	negative := testWindow{pct: -1, reset: pastReset}
+	for _, short := range []*testWindow{&ok, nil} {
+		snap := expiredWindowSnapshot(t, FormatLegacy, negative, short)
+		eval := EvaluateGate("claude", nil, snap, EvalOptions{Now: expiredWindowNow, Format: FormatLegacy})
+		if eval.Decision != DecisionWouldHold || eval.BlockedBy != BlockedByWeekly || !ShouldHoldOnEnforce(eval) {
+			t.Errorf("short=%v: gate = %s blocked_by=%q, want would_hold weekly", short, eval.Decision, eval.BlockedBy)
+		}
+	}
+
+	// The text parser cannot produce a negative short value; the predicate treats it alike.
+	snap := expiredWindowSnapshot(t, FormatLegacy, ok, &testWindow{pct: 0, reset: pastReset})
+	*snap.Pools["claude"].ShortRemainingPercent = -1
+	ev := EvaluatePool("claude", snap, EvalOptions{Now: expiredWindowNow, Format: FormatLegacy})
+	if ev.Status != PoolExhausted || ev.BlockedBy != BlockedByShort {
+		t.Errorf("negative short = %s blocked_by=%q, want exhausted 5h", ev.Status, ev.BlockedBy)
 	}
 }
 
@@ -221,6 +279,17 @@ func TestValidateExpiredWeeklyWithMissingShort(t *testing.T) {
 				hasCode := false
 				for _, d := range res.Diagnostics {
 					hasCode = hasCode || d.Code == tc.wantCode
+				}
+				// Both formats hold either way, so there is no enforce difference to report.
+				for _, diff := range res.LegacyDiffs {
+					if strings.Contains(diff, "passes in legacy enforce") {
+						t.Errorf("%s reset=%s: wrong legacy diff %q", format, tc.reset, diff)
+					}
+				}
+				for _, d := range res.Diagnostics {
+					if strings.Contains(d.Message, "legacy enforce passes") {
+						t.Errorf("%s reset=%s: wrong diagnostic %q", format, tc.reset, d.Message)
+					}
 				}
 				if res.ExitCode != tc.wantExit || len(res.Pools) != 1 || res.Pools[0].Health != string(tc.wantHealth) || !hasCode {
 					t.Errorf("%s config=%t reset=%s: exit=%d pools=%+v diagnostics=%+v, want exit %d health %s code %s",

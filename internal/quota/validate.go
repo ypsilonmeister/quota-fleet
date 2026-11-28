@@ -459,6 +459,9 @@ func validateLegacySnapshot(
 			if ps.WeeklyRemainingPercent == 0 && !windowExpired(ps.WeeklyResetAt, now) {
 				addDiag(SeverityInfo, "short_window_missing_while_weekly_exhausted", name,
 					fmt.Sprintf("pool %q has missing short window while weekly=0%%", name))
+			} else if ps.WeeklyRemainingPercent == 0 {
+				addDiag(SeverityDegraded, ReasonShortWindowMissing, name,
+					fmt.Sprintf("pool %q has missing short window and an expired weekly 0%% (legacy and v1 enforce hold)", name))
 			} else {
 				addDiag(SeverityDegraded, ReasonShortWindowMissing, name,
 					fmt.Sprintf("pool %q has missing short window (legacy enforce passes; v1 enforce holds)", name))

@@ -147,6 +147,8 @@ A quota window may not roll over until it is next used (for example, Claude's 5-
 - It applies to the weekly and the short window **independently**: a pool with an expired weekly `0%` and a running short `0%` is still `exhausted` by the short window.
 - It applies to both `usage_format: legacy` and `v1`, and identically to registration, held-job release, the Selector, `GET /meta` `pool_summaries`, and the health shown by `usage validate` and `gate check`.
 - `reset_at_approx` does not change the rule.
+- Only an observed `0%` expires. A negative remaining value (Schema v1 rejects it; the Legacy parser passes it through) stays exhausted whatever its `reset_at`.
+- A missing short value is not covered by an expired weekly window. A pool with an expired weekly `0%` and no short value is `unknown` / `short_window_missing` and is held in `enforce` in both formats (`v1` with `short_window: false` judges the weekly window only, so it is `healthy`; `legacy` does not read `short_window`). In `legacy`, a missing short value with weekly quota above `0%` remains `short_window_null` and is not held.
 - Values are not rewritten: `/meta`, summaries, and CLI output still report the measured `remaining_percent` and `reset_at`, so a pool can show `0%` and `healthy` together.
 - It does **not** relax fail-closed handling. A missing (`null` / omitted; in Legacy also empty) or zero-time `reset_at` leaves a `0%` window exhausted; an unparseable `reset_at` is still a parse error (`snapshot_error`); a missing remaining value stays missing; and stale, collector-error, and timestamp checks are unchanged.
 

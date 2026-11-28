@@ -133,6 +133,11 @@ func evaluatePoolLegacy(pool string, snap *Snapshot, opts EvalOptions) PoolEvalu
 		}
 		eval.Status = PoolUnknown
 		eval.Reason = ReasonShortWindowNull
+		if ps.WeeklyRemainingPercent == 0 {
+			// The weekly 0% has expired (otherwise it exhausted the pool above). With no
+			// short value to show quota, keep holding, now for the missing short window.
+			eval.Reason = ReasonShortWindowMissing
+		}
 		return eval
 	}
 
@@ -754,7 +759,8 @@ func EvaluateFromFile(usageFile, primaryPool string, altPools []string, opts Eva
 // unknown reason, except no_candidate_pools) holds the job.
 //
 // In Legacy mode (eval.Format == "" or "legacy"): preserves legacy compatibility — holds
-// only when all candidate pools are exhausted or stale; provisional unknown (short_window_null),
+// only when all candidate pools are exhausted, stale, or short_window_missing (an expired
+// weekly 0% without a short value); provisional unknown (short_window_null),
 // pool_not_found, and snapshot_error proceed without holding.
 func ShouldHoldOnEnforce(eval GateEvaluation) bool {
 	if eval.Bypassed || eval.Decision == DecisionWouldPass {
@@ -776,7 +782,7 @@ func ShouldHoldOnEnforce(eval GateEvaluation) bool {
 		if p.Status == PoolExhausted {
 			continue
 		}
-		if p.Status == PoolUnknown && p.Reason == ReasonStale {
+		if p.Status == PoolUnknown && (p.Reason == ReasonStale || p.Reason == ReasonShortWindowMissing) {
 			continue
 		}
 		return false
