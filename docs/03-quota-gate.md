@@ -144,11 +144,11 @@ starts when capacity returns, instead of dying at 01:30.
 
 ## Pace shadow (Issue #57)
 
-Set `quota.pace.mode: shadow` to compare pool choices for Selector and held-job
-release. The default mode is `off`. Shadow preserves the actual job assignment,
-Gate release order, and health decisions. Each comparison records candidate
-pace, floor status, tie-band membership, and active job count in the Selector
-selection reason or Gate release decision reason. Differences are marked
+Set `quota.pace.mode: shadow` to compare pool choices for Selector, Gate admission,
+and held-job release. The default mode is `off`. Shadow preserves the actual job
+assignment, Gate release order, and health decisions. The Selector selection
+reason and Gate decision reason record candidate pace, weekly and 5-hour floor
+status, tie-band membership, and active job count. Differences are marked
 `pace_diff` in those reasons and logged by the server. In Selector record mode,
 the `selected_*` fields show the shadow choice and the job executes with the
 usual defaults.

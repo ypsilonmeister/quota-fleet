@@ -86,30 +86,32 @@ func TestPoolPaceWindowRules(t *testing.T) {
 	short := 5
 	noShort := false
 	tests := []struct {
-		name    string
-		ps      PoolSnapshot
-		cfg     config.PoolConfig
-		pool    string
-		want    float64
-		floored bool
+		name                        string
+		ps                          PoolSnapshot
+		cfg                         config.PoolConfig
+		pool                        string
+		want                        float64
+		weeklyFloored, shortFloored bool
 	}{
-		{"default week and null reset", PoolSnapshot{WeeklyRemainingPercent: 50}, config.PoolConfig{}, PoolCodex, .48, false},
-		{"custom week and reserve", PoolSnapshot{WeeklyRemainingPercent: 10, WeeklyResetAt: &fourHours}, config.PoolConfig{WeeklyHours: 100, ReservePercent: 10}, PoolCodex, 0, true},
-		{"reserve waived at two hours", PoolSnapshot{WeeklyRemainingPercent: 10, WeeklyResetAt: &twoHours}, config.PoolConfig{WeeklyHours: 100, ReservePercent: 10}, PoolCodex, 4, false},
-		{"approx reset uses full week", PoolSnapshot{WeeklyRemainingPercent: 50, WeeklyResetAt: &twoHours, WeeklyResetAtApprox: true}, config.PoolConfig{ReservePercent: 10}, PoolCodex, .40, false},
-		{"expired resets refill both windows", PoolSnapshot{WeeklyResetAt: &past, ShortRemainingPercent: &short, ShortResetAt: &past}, config.PoolConfig{}, PoolCodex, .98, false},
-		{"exact reset clamps denominator", PoolSnapshot{WeeklyRemainingPercent: 3, WeeklyResetAt: &now}, config.PoolConfig{}, PoolCodex, 16.8, false},
-		{"weekly floor inclusive", PoolSnapshot{WeeklyRemainingPercent: 2}, config.PoolConfig{}, PoolCodex, 0, true},
-		{"five hour floor inclusive", PoolSnapshot{WeeklyRemainingPercent: 50, ShortRemainingPercent: &short, ShortResetAt: &twoHours}, config.PoolConfig{}, PoolCodex, .48, true},
-		{"one hour excluded", PoolSnapshot{WeeklyRemainingPercent: 50, ShortRemainingPercent: &short, ShortResetAt: &twoHours, ShortWindow: "1h"}, config.PoolConfig{}, PoolAgyGemini, .48, false},
-		{"disabled five hour window", PoolSnapshot{WeeklyRemainingPercent: 50, ShortRemainingPercent: &short, ShortResetAt: &twoHours}, config.PoolConfig{ShortWindow: &noShort}, PoolCodex, .48, false},
-		{"unstarted Claude window", PoolSnapshot{WeeklyRemainingPercent: 50, ShortRemainingPercent: &short}, config.PoolConfig{}, PoolClaude, .48, false},
+		{"default week and null reset", PoolSnapshot{WeeklyRemainingPercent: 50}, config.PoolConfig{}, PoolCodex, .48, false, false},
+		{"custom week and reserve", PoolSnapshot{WeeklyRemainingPercent: 10, WeeklyResetAt: &fourHours}, config.PoolConfig{WeeklyHours: 100, ReservePercent: 10}, PoolCodex, 0, true, false},
+		{"reserve waived at two hours", PoolSnapshot{WeeklyRemainingPercent: 10, WeeklyResetAt: &twoHours}, config.PoolConfig{WeeklyHours: 100, ReservePercent: 10}, PoolCodex, 4, false, false},
+		{"approx reset uses full week", PoolSnapshot{WeeklyRemainingPercent: 50, WeeklyResetAt: &twoHours, WeeklyResetAtApprox: true}, config.PoolConfig{ReservePercent: 10}, PoolCodex, .40, false, false},
+		{"expired resets refill both windows", PoolSnapshot{WeeklyResetAt: &past, ShortRemainingPercent: &short, ShortResetAt: &past}, config.PoolConfig{}, PoolCodex, .98, false, false},
+		{"exact reset clamps denominator", PoolSnapshot{WeeklyRemainingPercent: 3, WeeklyResetAt: &now}, config.PoolConfig{}, PoolCodex, 16.8, false, false},
+		{"weekly floor inclusive", PoolSnapshot{WeeklyRemainingPercent: 2}, config.PoolConfig{}, PoolCodex, 0, true, false},
+		{"five hour floor inclusive", PoolSnapshot{WeeklyRemainingPercent: 50, ShortRemainingPercent: &short, ShortResetAt: &twoHours}, config.PoolConfig{}, PoolCodex, .48, false, true},
+		{"both floors", PoolSnapshot{WeeklyRemainingPercent: 2, ShortRemainingPercent: &short, ShortResetAt: &twoHours}, config.PoolConfig{}, PoolCodex, 0, true, true},
+		{"one hour excluded", PoolSnapshot{WeeklyRemainingPercent: 50, ShortRemainingPercent: &short, ShortResetAt: &twoHours, ShortWindow: "1h"}, config.PoolConfig{}, PoolAgyGemini, .48, false, false},
+		{"disabled five hour window", PoolSnapshot{WeeklyRemainingPercent: 50, ShortRemainingPercent: &short, ShortResetAt: &twoHours}, config.PoolConfig{ShortWindow: &noShort}, PoolCodex, .48, false, false},
+		{"unstarted Claude window", PoolSnapshot{WeeklyRemainingPercent: 50, ShortRemainingPercent: &short}, config.PoolConfig{}, PoolClaude, .48, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pace, floored := poolPace(tt.pool, tt.ps, tt.cfg, now)
-			if math.Abs(pace-tt.want) > 1e-9 || floored != tt.floored {
-				t.Errorf("got pace=%v floored=%v, want pace=%v floored=%v", pace, floored, tt.want, tt.floored)
+			pace, weeklyFloored, shortFloored := poolPace(tt.pool, tt.ps, tt.cfg, now)
+			if math.Abs(pace-tt.want) > 1e-9 || weeklyFloored != tt.weeklyFloored || shortFloored != tt.shortFloored {
+				t.Errorf("got pace=%v weekly floor=%v short floor=%v, want pace=%v weekly floor=%v short floor=%v",
+					pace, weeklyFloored, shortFloored, tt.want, tt.weeklyFloored, tt.shortFloored)
 			}
 		})
 	}

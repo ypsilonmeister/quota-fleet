@@ -15,11 +15,13 @@ const (
 )
 
 type PaceCandidate struct {
-	Pool    string
-	Pace    float64
-	Floored bool
-	InBand  bool
-	Load    int
+	Pool          string
+	Pace          float64
+	Floored       bool
+	WeeklyFloored bool
+	ShortFloored  bool
+	InBand        bool
+	Load          int
 }
 
 type PaceRanking struct {
@@ -41,8 +43,12 @@ func RankHealthy(evals []PoolEvaluation, opts EvalOptions, cfg config.PaceConfig
 			continue
 		}
 		pool := opts.Pools[ev.Pool]
-		pace, floored := poolPace(ev.Pool, *ev.Snapshot, pool, now)
-		result.Candidates = append(result.Candidates, PaceCandidate{Pool: ev.Pool, Pace: pace, Floored: floored, Load: load[ev.Pool]})
+		pace, weeklyFloored, shortFloored := poolPace(ev.Pool, *ev.Snapshot, pool, now)
+		floored := weeklyFloored || shortFloored
+		result.Candidates = append(result.Candidates, PaceCandidate{
+			Pool: ev.Pool, Pace: pace, Floored: floored,
+			WeeklyFloored: weeklyFloored, ShortFloored: shortFloored, Load: load[ev.Pool],
+		})
 		indices = append(indices, i)
 		bestAny = max(bestAny, pace)
 		if !floored {
@@ -70,7 +76,7 @@ func RankHealthy(evals []PoolEvaluation, opts EvalOptions, cfg config.PaceConfig
 	return result
 }
 
-func poolPace(name string, ps PoolSnapshot, p config.PoolConfig, now time.Time) (float64, bool) {
+func poolPace(name string, ps PoolSnapshot, p config.PoolConfig, now time.Time) (pace float64, weeklyFloored, shortFloored bool) {
 	period := p.EffectiveWeeklyHours()
 	remaining, hoursLeft := ps.WeeklyRemainingPercent, period
 	if reset := ps.WeeklyResetAt; reset != nil {
@@ -85,14 +91,13 @@ func poolPace(name string, ps PoolSnapshot, p config.PoolConfig, now time.Time) 
 		threshold = max(threshold, p.ReservePercent)
 	}
 	headroom := float64(remaining) - threshold
-	shortFloored := false
 	if p.EffectiveShortWindow() && ps.EffectiveShortWindow() == DefaultShortWindowLabel &&
 		(ps.ShortApplicable == nil || *ps.ShortApplicable) && ps.ShortRemainingPercent != nil {
 		reset := ps.ShortResetAt
 		active := reset != nil && !reset.Before(now) || reset == nil && name != PoolClaude
 		shortFloored = active && *ps.ShortRemainingPercent <= shortPaceFloor
 	}
-	return (headroom / 100) * (period / max(hoursLeft, .1)), headroom <= 0 || shortFloored
+	return (headroom / 100) * (period / max(hoursLeft, .1)), headroom <= 0, shortFloored
 }
 
 // Describe records the selection comparison and the inputs that determined it.
@@ -103,7 +108,8 @@ func (r PaceRanking) Describe(current, shadow string) string {
 	}
 	candidates := make([]string, 0, len(r.Candidates))
 	for _, c := range r.Candidates {
-		candidates = append(candidates, fmt.Sprintf("%s(pace=%.4f floored=%t in_band=%t load=%d)", c.Pool, c.Pace, c.Floored, c.InBand, c.Load))
+		candidates = append(candidates, fmt.Sprintf("%s(pace=%.4f floored=%t weekly_floored=%t short_floored=%t in_band=%t load=%d)",
+			c.Pool, c.Pace, c.Floored, c.WeeklyFloored, c.ShortFloored, c.InBand, c.Load))
 	}
 	return fmt.Sprintf("%s current=%s shadow=%s mode=%s candidates=[%s]", label, current, shadow, r.Mode, strings.Join(candidates, ", "))
 }
