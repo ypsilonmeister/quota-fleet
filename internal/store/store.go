@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ypsilonmeister/quota-fleet/internal/config"
@@ -50,6 +51,9 @@ type Store struct {
 	// chainFault, set only by tests (SetChainFaultHookForTest), runs at named points inside
 	// chain transactions after rows were written; a non-nil error aborts the transaction.
 	chainFault func(stage string) error
+	// requeueGate evaluates the Quota Gate for rate-limit requeued jobs before Claim
+	// (Issue #56 §3.2). Set by the runtime with SetRequeueGate.
+	requeueGate atomic.Pointer[RequeueGateFunc]
 }
 
 // Open opens (or creates) the SQLite database at dbPath, enables WAL mode and
@@ -119,6 +123,10 @@ func Open(ctx context.Context, dbPath string, opts Options) (*Store, error) {
 	if err := ensureJobsColumn(ctx, writeDB, "effort", `ALTER TABLE jobs ADD COLUMN effort TEXT NOT NULL DEFAULT ''`); err != nil {
 		_ = writeDB.Close()
 		return nil, fmt.Errorf("migrate jobs.effort: %w", err)
+	}
+	if err := ensureRateLimitColumns(ctx, writeDB); err != nil {
+		_ = writeDB.Close()
+		return nil, fmt.Errorf("migrate jobs rate-limit columns: %w", err)
 	}
 	if err := ensureChainColumns(ctx, writeDB); err != nil {
 		_ = writeDB.Close()
@@ -330,6 +338,10 @@ func (s *Store) CreateJob(ctx context.Context, p CreateJobParams) (*Job, bool, e
 	if err := ValidateEffort(p.Agent, effort); err != nil {
 		return nil, false, err
 	}
+	p.OnRateLimit = strings.TrimSpace(p.OnRateLimit)
+	if err := ValidateOnRateLimit(p.OnRateLimit); err != nil {
+		return nil, false, err
+	}
 
 	var (
 		result  *Job
@@ -430,21 +442,21 @@ func (s *Store) insertJobTx(
 			claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
 			created_at, updated_at, model, pool, alt_pools, session_id, created_by,
 			selected_agent, selected_model, selected_pool, selection_reason, selection_mode,
-			effort, chain_run_id, chain_seq
+			effort, chain_run_id, chain_seq, on_rate_limit
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?,
 			'', NULL, 0, '', '', NULL,
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
-			?, ?, ?
+			?, ?, ?, ?
 		)
 	`,
 		p.RequestID, p.Title, string(status), p.Agent, p.Host, p.Workdir, worktreeSpecJSON, p.TargetRef,
 		p.Instructions, p.AcceptanceCriteria, parentArg,
 		nowStr, nowStr, p.Model, p.Pool, altPoolsJSON, p.SessionID, strings.TrimSpace(p.CreatedBy),
 		p.SelectedAgent, p.SelectedModel, p.SelectedPool, p.SelectionReason, p.SelectionMode,
-		effort, chainRunArg, chainSeqArg,
+		effort, chainRunArg, chainSeqArg, p.OnRateLimit,
 	)
 	if err != nil {
 		return nil, err
@@ -477,8 +489,12 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 	}
 
 	var claimed *Job
+	verdicts, err := s.requeueVerdicts(ctx, 0)
+	if err != nil {
+		return nil, false, err
+	}
 
-	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
+	err = s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		var currentClaimed int
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE status = 'claimed'`).Scan(&currentClaimed); err != nil {
 			return err
@@ -489,7 +505,7 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 		}
 
 		now := time.Now().UTC()
-		candidateID, err := s.claimCandidate(ctx, conn, now, 0)
+		candidateID, verdict, err := s.claimCandidate(ctx, conn, now, 0, verdicts)
 		if errors.Is(err, sql.ErrNoRows) {
 			claimed = nil
 			return nil
@@ -524,6 +540,9 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 			claimed = nil
 			return nil
 		}
+		if err := s.applyRequeueFailover(ctx, conn, candidateID, verdict); err != nil {
+			return err
+		}
 
 		job, err := queryJobByID(ctx, conn, candidateID)
 		if err != nil {
@@ -548,8 +567,12 @@ func (s *Store) Claim(ctx context.Context, maxClaimed int) (*Job, bool, error) {
 // or the job is no longer queued.
 func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Job, bool, error) {
 	var claimed *Job
+	verdicts, err := s.requeueVerdicts(ctx, jobID)
+	if err != nil {
+		return nil, false, err
+	}
 
-	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
+	err = s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
 		var statusStr string
 		err := conn.QueryRowContext(ctx, `SELECT status FROM jobs WHERE id = ?`, jobID).Scan(&statusStr)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -577,7 +600,8 @@ func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Jo
 		}
 
 		now := time.Now().UTC()
-		if _, err := s.claimCandidate(ctx, conn, now, jobID); err != nil {
+		_, verdict, err := s.claimCandidate(ctx, conn, now, jobID, verdicts)
+		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil
 			}
@@ -609,6 +633,9 @@ func (s *Store) ClaimByID(ctx context.Context, jobID int64, maxClaimed int) (*Jo
 		if affected == 0 {
 			claimed = nil
 			return nil
+		}
+		if err := s.applyRequeueFailover(ctx, conn, jobID, verdict); err != nil {
+			return err
 		}
 
 		job, err := queryJobByID(ctx, conn, jobID)
@@ -742,74 +769,81 @@ func (s *Store) FailWithResult(ctx context.Context, jobID int64, claimToken, rea
 }
 
 func (s *Store) FailWithCooldown(ctx context.Context, jobID int64, claimToken, reason, resultText, pattern string) (*FailResult, error) {
-	var out FailResult
+	var out *FailResult
 
 	err := s.withJobTx(ctx, func(conn *sql.Conn, changes *[]statusChange) error {
-		out = FailResult{}
-		now := time.Now().UTC()
-		nowStr := formatTime(now)
-
-		res, err := conn.ExecContext(ctx, `
-			UPDATE jobs
-			SET status = 'failed',
-				last_error = ?,
-				result_text = ?,
-				updated_at = ?
-			WHERE id = ? AND status = 'claimed' AND claimed_by = ?
-		`, reason, resultText, nowStr, jobID, claimToken)
-		if err != nil {
-			return err
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if affected == 0 {
-			return classifyClaimedConflict(ctx, conn, jobID, claimToken)
-		}
-
-		if _, err := conn.ExecContext(ctx, `DELETE FROM leases WHERE job_id = ?`, jobID); err != nil {
-			return err
-		}
-
-		childErr := formatCascadeReason(jobID, "failed", reason)
-		cancelledIDs, err := cascadeCancelWaitingDescendants(ctx, conn, jobID, childErr, nowStr)
-		if err != nil {
-			return err
-		}
-		out.CancelledChildIDs = cancelledIDs
-		*changes = append(*changes, statusChange{jobID: jobID, prev: StatusClaimed, next: StatusFailed})
-		*changes = appendCascadeChanges(*changes, cancelledIDs)
-
-		job, err := queryJobByID(ctx, conn, jobID)
-		if err != nil {
-			return err
-		}
-		if pattern != "" && s.CooldownsEnabled() {
-			c, started, err := s.recordCooldown(ctx, conn, job, pattern, now)
-			if err != nil {
-				return err
-			}
-			if c != nil {
-				note := " [" + c.Reason() + "]"
-				job.LastError += note
-				job.ResultText += note
-				if _, err := conn.ExecContext(ctx, `UPDATE jobs SET last_error=?, result_text=? WHERE id=?`, job.LastError, job.ResultText, jobID); err != nil {
-					return err
-				}
-			}
-			if started {
-				out.Cooldown = c
-			}
-		}
-
-		out.Job = job
-		return nil
+		var err error
+		out, err = s.failClaimedTx(ctx, conn, changes, jobID, claimToken, reason, resultText, pattern, time.Now().UTC())
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	return out, nil
+}
+
+// failClaimedTx moves a claimed job to failed inside an open write transaction, cascades
+// the cancellation to waiting descendants, and records a pool cooldown when pattern is set.
+func (s *Store) failClaimedTx(ctx context.Context, conn *sql.Conn, changes *[]statusChange, jobID int64, claimToken, reason, resultText, pattern string, now time.Time) (*FailResult, error) {
+	out := &FailResult{}
+	nowStr := formatTime(now)
+
+	res, err := conn.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = 'failed',
+			last_error = ?,
+			result_text = ?,
+			updated_at = ?
+		WHERE id = ? AND status = 'claimed' AND claimed_by = ?
+	`, reason, resultText, nowStr, jobID, claimToken)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, classifyClaimedConflict(ctx, conn, jobID, claimToken)
+	}
+
+	if _, err := conn.ExecContext(ctx, `DELETE FROM leases WHERE job_id = ?`, jobID); err != nil {
+		return nil, err
+	}
+
+	childErr := formatCascadeReason(jobID, "failed", reason)
+	cancelledIDs, err := cascadeCancelWaitingDescendants(ctx, conn, jobID, childErr, nowStr)
+	if err != nil {
+		return nil, err
+	}
+	out.CancelledChildIDs = cancelledIDs
+	*changes = append(*changes, statusChange{jobID: jobID, prev: StatusClaimed, next: StatusFailed})
+	*changes = appendCascadeChanges(*changes, cancelledIDs)
+
+	job, err := queryJobByID(ctx, conn, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if pattern != "" && s.CooldownsEnabled() {
+		c, started, err := s.recordCooldown(ctx, conn, job, pattern, now)
+		if err != nil {
+			return nil, err
+		}
+		if c != nil {
+			note := " [" + c.Reason() + "]"
+			job.LastError += note
+			job.ResultText += note
+			if _, err := conn.ExecContext(ctx, `UPDATE jobs SET last_error=?, result_text=? WHERE id=?`, job.LastError, job.ResultText, jobID); err != nil {
+				return nil, err
+			}
+		}
+		if started {
+			out.Cooldown = c
+		}
+	}
+
+	out.Job = job
+	return out, nil
 }
 
 // Cancel transitions a draft, queued, or waiting job to cancelled and recursively cancels
@@ -939,6 +973,8 @@ func (s *Store) Requeue(ctx context.Context, jobID int64) (*Job, error) {
 			UPDATE jobs
 			SET status = 'queued',
 				attempts = 0,
+				rate_limit_retries = 0,
+				retry_after = NULL,
 				claimed_by = '',
 				claimed_at = NULL,
 				last_error = '',
@@ -1686,7 +1722,8 @@ const jobColumns = `
 	claimed_by, claimed_at, attempts, result_text, last_error, delivered_at,
 	created_at, updated_at, model, pool, alt_pools, session_id, created_by,
 	selected_agent, selected_model, selected_pool, selection_reason, selection_mode,
-	effort, chain_run_id, chain_seq
+	effort, chain_run_id, chain_seq,
+	rate_limit_retries, retry_after, on_rate_limit
 `
 
 func queryJobByID(ctx context.Context, q queryRower, jobID int64) (*Job, error) {
@@ -1720,6 +1757,7 @@ func scanJob(s rowScanner) (*Job, error) {
 		altPoolsStr     string
 		chainRunID      sql.NullString
 		chainSeq        sql.NullInt64
+		retryAfter      sql.NullString
 	)
 	err := s.Scan(
 		&j.ID, &j.RequestID, &j.Title, &statusStr,
@@ -1729,6 +1767,7 @@ func scanJob(s rowScanner) (*Job, error) {
 		&createdAt, &updatedAt, &j.Model, &j.Pool, &altPoolsStr, &j.SessionID, &j.CreatedBy,
 		&j.SelectedAgent, &j.SelectedModel, &j.SelectedPool, &j.SelectionReason, &j.SelectionMode,
 		&j.Effort, &chainRunID, &chainSeq,
+		&j.RateLimitRetries, &retryAfter, &j.OnRateLimit,
 	)
 	if err != nil {
 		return nil, err
@@ -1746,6 +1785,13 @@ func scanJob(s rowScanner) (*Job, error) {
 			return nil, fmt.Errorf("parse claimed_at: %w", err)
 		}
 		j.ClaimedAt = &t
+	}
+	if retryAfter.Valid {
+		t, err := parseTime(retryAfter.String)
+		if err != nil {
+			return nil, fmt.Errorf("parse retry_after: %w", err)
+		}
+		j.RetryAfter = &t
 	}
 	if deliveredAt.Valid {
 		t, err := parseTime(deliveredAt.String)
@@ -2046,6 +2092,20 @@ func ensureCreatedByColumn(ctx context.Context, db *sql.DB) error {
 func ensureSelectionColumns(ctx context.Context, db *sql.DB) error {
 	for _, col := range []string{"selected_agent", "selected_model", "selected_pool", "selection_reason", "selection_mode"} {
 		if err := ensureJobsColumn(ctx, db, col, `ALTER TABLE jobs ADD COLUMN `+col+` TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureRateLimitColumns adds the rate-limit requeue columns (Issue #56) non-destructively.
+func ensureRateLimitColumns(ctx context.Context, db *sql.DB) error {
+	for _, c := range []struct{ name, ddl string }{
+		{"rate_limit_retries", `ALTER TABLE jobs ADD COLUMN rate_limit_retries INTEGER NOT NULL DEFAULT 0`},
+		{"retry_after", `ALTER TABLE jobs ADD COLUMN retry_after TEXT NULL`},
+		{"on_rate_limit", `ALTER TABLE jobs ADD COLUMN on_rate_limit TEXT NOT NULL DEFAULT ''`},
+	} {
+		if err := ensureJobsColumn(ctx, db, c.name, c.ddl); err != nil {
 			return err
 		}
 	}

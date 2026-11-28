@@ -120,7 +120,17 @@ func (s *Shepherd) failExited(ctx context.Context, job *store.Job, state adapter
 			pattern = detectRateLimit(job.Agent, cfg.Agents[job.Agent], state, ev, evaluatorFailed)
 		}
 	}
-	out, err := s.store.FailWithCooldown(ctx, job.ID, job.ClaimedBy, reason, result, pattern)
+	var (
+		out *store.FailResult
+		err error
+	)
+	if pattern != "" {
+		// Issue #56: the Store decides in one transaction whether the job goes back to
+		// queued (policy, retry budget, chain run state) or fails as before.
+		out, err = s.store.RequeueOnRateLimit(ctx, job.ID, job.ClaimedBy, reason, result, pattern)
+	} else {
+		out, err = s.store.FailWithCooldown(ctx, job.ID, job.ClaimedBy, reason, result, pattern)
+	}
 	if err != nil || pattern == "" {
 		return out, err
 	}
@@ -134,6 +144,25 @@ func (s *Shepherd) failExited(ctx context.Context, job *store.Job, state adapter
 		})
 		if err != nil {
 			s.logger.Printf("pool cooldown notification error: %v", err)
+		}
+	}
+	if out.Requeued && s.notifier != nil {
+		// Informational only: a requeue is not terminal, so no delivery or failure push.
+		j := out.Job
+		retryAfter := "-"
+		if j.RetryAfter != nil {
+			retryAfter = j.RetryAfter.UTC().Format(time.RFC3339)
+		}
+		err := s.notifier.Report(ctx, Report{
+			DedupKey:  fmt.Sprintf("job-rate-limit-requeued:%d:%d", j.ID, j.RateLimitRetries),
+			Kind:      "job_rate_limit_requeued",
+			JobID:     j.ID,
+			ParentID:  j.ParentID,
+			Message:   fmt.Sprintf("job #%d (%q) hit a rate limit (%s); requeued (retry %d), retry_after %s", j.ID, j.Title, pattern, j.RateLimitRetries, retryAfter),
+			Timestamp: j.UpdatedAt,
+		})
+		if err != nil {
+			s.logger.Printf("rate limit requeue notification error: %v", err)
 		}
 	}
 	return out, nil

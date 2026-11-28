@@ -47,6 +47,11 @@ type JobDTO struct {
 	// ChainRunID / ChainSeq identify the chain run step this job belongs to (docs/22).
 	ChainRunID string `json:"chain_run_id,omitempty"`
 	ChainSeq   int    `json:"chain_seq,omitempty"`
+
+	// Rate-limit requeue state (Issue #56); omitted when unused.
+	RateLimitRetries int        `json:"rate_limit_retries,omitempty"`
+	RetryAfter       *time.Time `json:"retry_after,omitempty"`
+	OnRateLimit      string     `json:"on_rate_limit,omitempty"`
 }
 
 func toJobDTO(j *store.Job) *JobDTO {
@@ -90,6 +95,9 @@ func toJobDTO(j *store.Job) *JobDTO {
 	dto.Effort = j.Effort
 	dto.ChainRunID = j.ChainRunID
 	dto.ChainSeq = j.ChainSeq
+	dto.RateLimitRetries = j.RateLimitRetries
+	dto.RetryAfter = j.RetryAfter
+	dto.OnRateLimit = j.OnRateLimit
 	return dto
 }
 
@@ -131,6 +139,8 @@ type CreateJobRequest struct {
 	Weight string `json:"weight"`
 	// Effort is the optional per-job reasoning effort (docs/21): low|medium|high|xhigh.
 	Effort string `json:"effort"`
+	// OnRateLimit is the optional per-job rate-limit policy (Issue #56): requeue | fail.
+	OnRateLimit string `json:"on_rate_limit"`
 }
 
 // CreateJobResponse is returned by POST /jobs.
@@ -245,6 +255,8 @@ type StatusResponse struct {
 	Total      int64                `json:"total"`
 	// Chains summarizes chain runs and the Chain Driver (docs/22 §6, §8).
 	Chains *ChainStatusDTO `json:"chains,omitempty"`
+	// RateLimitRequeued counts queued jobs waiting after a rate-limit requeue (Issue #56).
+	RateLimitRequeued int64 `json:"rate_limit_requeued_count,omitempty"`
 }
 
 // DeliveriesResponse is returned by GET /deliveries.

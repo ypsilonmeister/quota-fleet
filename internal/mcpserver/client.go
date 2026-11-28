@@ -1032,6 +1032,7 @@ type CreateJobInput struct {
 	AltPools           []string      `json:"alt_pools,omitempty" jsonschema:"Alternative quota pool names"`
 	SessionID          string        `json:"session_id,omitempty" jsonschema:"Session identifier"`
 	Effort             string        `json:"effort,omitempty" jsonschema:"Optional reasoning effort: low, medium, high or xhigh. Supported for agents codex and claude only; rejected for agy (effort is part of its model ID) and for other agents. Omit for the agent default."`
+	OnRateLimit        string        `json:"on_rate_limit,omitempty" jsonschema:"Optional rate-limit policy: requeue or fail. fail never requeues this job after a 429/usage limit; requeue opts it in (also for a chain publish step). Omit for the fleet.yaml default (quota.requeue)."`
 }
 
 // CreateJobOutput is the structured result returned by create_job.

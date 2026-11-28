@@ -142,6 +142,32 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 			return err
 		}
 	}
+	if counts[store.StatusQueued] > 0 {
+		if err := r.reconcileStalledRequeue(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reconcileStalledRequeue reports (once per requeue) a rate-limit requeued job that is still
+// queued stall_after after its last requeue (Issue #56 decision 2: report only, no failure).
+func (r *Reconciler) reconcileStalledRequeue(ctx context.Context) error {
+	now := r.now().UTC()
+	jobs, err := r.store.ListStalledRateLimitRequeued(ctx, now)
+	if err != nil {
+		return fmt.Errorf("list stalled rate-limit requeues: %w", err)
+	}
+	for _, job := range jobs {
+		r.reportOnce(ctx, Report{
+			DedupKey:  fmt.Sprintf("job-rate-limit-requeue-stalled:%d:%d", job.ID, job.RateLimitRetries),
+			Kind:      "job_rate_limit_requeue_stalled",
+			JobID:     job.ID,
+			ParentID:  job.ParentID,
+			Message:   fmt.Sprintf("job #%d (%q) has been waiting since %s after rate-limit requeue %d: %s", job.ID, job.Title, job.UpdatedAt.Format(time.RFC3339), job.RateLimitRetries, job.LastError),
+			Timestamp: now,
+		})
+	}
 	return nil
 }
 
@@ -193,6 +219,18 @@ func (r *Reconciler) reconcileStaleClaimed(ctx context.Context) error {
 			}
 			terminalJob := r.shepherd.finishExitedJobFrom(ctx, job, state, "reconciler")
 			if terminalJob == nil {
+				continue
+			}
+			if terminalJob.Status == store.StatusQueued {
+				// Rate-limit requeue (Issue #56): not a terminal recovery.
+				r.logger.Printf("reconciler requeued exited claimed job #%d after rate limit (%s)", job.ID, state.Detail)
+				r.reportOnce(ctx, Report{
+					DedupKey:  fmt.Sprintf("stale-claimed-requeued:%d:%s", job.ID, job.ClaimedBy),
+					Kind:      "stale_claimed_requeued",
+					JobID:     job.ID,
+					Message:   fmt.Sprintf("job #%d (%q) remained claimed after exit (%s); requeued after rate limit (retry %d)", job.ID, job.Title, state.Detail, terminalJob.RateLimitRetries),
+					Timestamp: now,
+				})
 				continue
 			}
 			r.logger.Printf("reconciler recovered exited claimed job #%d -> %s (exit_code=%d, exit_code_unknown=%v, detail=%s)",

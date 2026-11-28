@@ -227,6 +227,14 @@ func (l *linuxLauncher) Launch(ctx context.Context, host config.HostConfig, job 
 		shellPath(runShPath),
 		shellPath(runShPath),
 	)
+	// A rate-limit re-run keeps the previous log and drops this step's stale verdict first.
+	prep, err := linuxRetryPrepCommand(workdir, runDir, job)
+	if err != nil {
+		return LaunchInfo{}, err
+	}
+	if prep != "" {
+		stageCmd = prep + " && " + stageCmd
+	}
 	stageRes, err := l.transport.Run(ctx, host, stageCmd)
 	if err != nil {
 		return LaunchInfo{}, fmt.Errorf("stage prompt.txt and run.sh: %w", err)
@@ -448,7 +456,18 @@ func BuildPromptText(job *store.Job) string {
 	if body != "" && !strings.HasSuffix(body, "\n") {
 		body += "\n"
 	}
+	if job.RateLimitRetries > 0 {
+		body = rateLimitRetryNote(job.RateLimitRetries) + body
+	}
 	return body
+}
+
+// rateLimitRetryNote is prepended to the prompt of a run that follows a rate-limit requeue
+// (Issue #56 §5). The workdir is kept as is, so the agent is told to check it first.
+func rateLimitRetryNote(retry int) string {
+	return fmt.Sprintf("[quota-fleet] This is automatic re-run %d of this job: the previous run stopped on a provider usage/rate limit (429). "+
+		"The working directory was kept, so it may contain partial changes or half-written output files (for example summary.md) from the previous run. "+
+		"Before starting, check `git status` and the existing files, keep valid partial work, overwrite incomplete outputs, and make sure every acceptance criterion is met.\n\n", retry)
 }
 
 // BuildRunScript generates the POSIX shell wrapper script (run.sh) that sets per-host env vars,

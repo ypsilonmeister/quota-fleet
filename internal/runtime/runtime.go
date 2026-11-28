@@ -172,21 +172,29 @@ func New(opts Options) (*Runtime, error) {
 	if chainInterval <= 0 {
 		chainInterval = shepherdInterval
 	}
+	adm := admission.New(admission.Options{
+		Store:        opts.Store,
+		GateMode:     opts.GateMode,
+		SelectorMode: opts.SelectorMode,
+		Pools:        opts.Pools,
+		StaleAfter:   opts.QuotaStaleAfter,
+		UsageFile:    opts.QuotaUsageFile,
+		UsageFormat:  opts.QuotaUsageFormat,
+		Now:          opts.Now,
+		LoadSnapshot: opts.SnapshotLoader,
+		GetJob:       opts.Store.GetJob,
+		Logger:       logger,
+	})
+	// Issue #56: requeued jobs pass the Gate again before they are claimed. The Gate is
+	// installed unconditionally: jobs requeued earlier stay in the queue even after requeue
+	// is switched off, and they must not bypass the snapshot check (fail-closed in enforce).
+	opts.Store.SetRequeueGate(NewRequeueGate(adm, logger))
+	for _, w := range opts.Config.RequeueWarnings() {
+		logger.Printf("WARNING: %s", w)
+	}
 	chainDriver := NewChainDriver(ChainDriverOptions{
-		Store: opts.Store,
-		Admission: admission.New(admission.Options{
-			Store:        opts.Store,
-			GateMode:     opts.GateMode,
-			SelectorMode: opts.SelectorMode,
-			Pools:        opts.Pools,
-			StaleAfter:   opts.QuotaStaleAfter,
-			UsageFile:    opts.QuotaUsageFile,
-			UsageFormat:  opts.QuotaUsageFormat,
-			Now:          opts.Now,
-			LoadSnapshot: opts.SnapshotLoader,
-			GetJob:       opts.Store.GetJob,
-			Logger:       logger,
-		}),
+		Store:          opts.Store,
+		Admission:      adm,
 		Notifier:       notifier,
 		LauncherNotify: notifyCh,
 		Interval:       chainInterval,

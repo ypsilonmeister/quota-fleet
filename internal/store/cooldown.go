@@ -66,7 +66,10 @@ func (s *Store) ClearCooldown(ctx context.Context, pool string) (bool, error) {
 	err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
 		var err error
 		cleared, err = clearCooldown(ctx, conn, pool, "manual", time.Now(), "")
-		return err
+		if err != nil || !cleared {
+			return err
+		}
+		return s.clearRetryAfterForPool(ctx, conn, pool)
 	})
 	return cleared, err
 }
@@ -149,8 +152,11 @@ func (s *Store) RecoverCooldowns(ctx context.Context, snap *quota.Snapshot, opts
 			err := s.withImmediateTx(ctx, func(conn *sql.Conn) error {
 				var err error
 				cleared, err = clearCooldown(ctx, conn, c.Pool, "snapshot_recovered", time.Now(), expected)
-				if err != nil || cleared {
+				if err != nil {
 					return err
+				}
+				if cleared {
+					return s.clearRetryAfterForPool(ctx, conn, c.Pool)
 				}
 				c, err = scanCooldown(conn.QueryRowContext(ctx, "SELECT "+cooldownColumns+" FROM pool_cooldowns WHERE pool=?", c.Pool))
 				return err
@@ -281,31 +287,91 @@ func (s *Store) blockedCooldownPools(ctx context.Context, conn *sql.Conn, now ti
 	return blocked, rows.Err()
 }
 
-func (s *Store) claimCandidate(ctx context.Context, conn *sql.Conn, now time.Time, id int64) (int64, error) {
+// claimCandidate picks the oldest claimable queued job (or checks jobID when non-zero).
+// A rate-limit requeued job is claimable only when its pre-computed Gate verdict allows
+// it; otherwise it waits for retry_after and the cooldown of its pool.
+func (s *Store) claimCandidate(ctx context.Context, conn *sql.Conn, now time.Time, id int64, verdicts map[int64]RequeueGateVerdict) (int64, *RequeueGateVerdict, error) {
 	blocked, err := s.blockedCooldownPools(ctx, conn, now, false)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	q := `SELECT id, pool, agent, model FROM jobs WHERE status='queued' AND (?=0 OR id=?) ORDER BY created_at,id`
-	if len(blocked) == 0 {
+	gated := s.requeueGate.Load() != nil
+	// Under enforce a requeued job must pass the Gate (snapshot + cooldowns) before it is
+	// claimed again; without an installed Gate it stays queued (fail-closed, Issue #56 §3.2).
+	ungatedEnforce := !gated && s.config != nil && s.config.Quota.EffectiveGateMode() == config.GateModeEnforce
+	// retry_after is compared in Go (RFC3339Nano text does not sort reliably), so LIMIT 1
+	// is only safe when no queued job carries one; otherwise a waiting job at the head
+	// would shadow a claimable one.
+	var waiting int
+	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM jobs WHERE status='queued' AND retry_after IS NOT NULL)`).Scan(&waiting); err != nil {
+		return 0, nil, err
+	}
+	q := `SELECT id, pool, agent, model, rate_limit_retries, retry_after, updated_at FROM jobs WHERE status='queued' AND (?=0 OR id=?) ORDER BY created_at,id`
+	if len(blocked) == 0 && !gated && !ungatedEnforce && waiting == 0 {
 		q += " LIMIT 1"
 	}
 	rows, err := conn.QueryContext(ctx, q, id, id)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var pool, agent, model string
-		if err := rows.Scan(&id, &pool, &agent, &model); err != nil {
-			return 0, err
+		var retries int
+		var retryAfter *string
+		var updatedAt string
+		if err := rows.Scan(&id, &pool, &agent, &model, &retries, &retryAfter, &updatedAt); err != nil {
+			return 0, nil, err
 		}
-		if blocked[s.cooldownPool(pool, agent, model)] == "" {
-			return id, nil
+		pool = s.cooldownPool(pool, agent, model)
+		waitingRetry := false
+		if retryAfter != nil {
+			t, err := parseTime(*retryAfter)
+			if err != nil {
+				return 0, nil, fmt.Errorf("parse retry_after: %w", err)
+			}
+			waitingRetry = t.After(now)
+		}
+		if ungatedEnforce && retries > 0 {
+			continue
+		}
+		if gated && retries > 0 {
+			v, ok := verdicts[id]
+			if !ok || !v.Allow {
+				// Fail closed: no verdict means the job was requeued after the evaluation.
+				continue
+			}
+			// The verdict was evaluated before this transaction began. Honour it only
+			// for the queue state it judged; if the job was claimed and requeued again
+			// (or moved pools) since, skip it until a fresh evaluation decides.
+			ut, err := parseTime(updatedAt)
+			if err != nil {
+				return 0, nil, fmt.Errorf("parse updated_at: %w", err)
+			}
+			if !v.matches(retries, pool, ut) {
+				continue
+			}
+			target := pool
+			if v.SelectedPool != "" {
+				target = v.SelectedPool
+			}
+			if target == pool && waitingRetry {
+				continue
+			}
+			if blocked[target] != "" {
+				continue
+			}
+			if target == pool {
+				return id, nil, nil
+			}
+			return id, &v, nil
+		}
+		if !waitingRetry && blocked[pool] == "" {
+			return id, nil, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return 0, sql.ErrNoRows
+	return 0, nil, sql.ErrNoRows
 }

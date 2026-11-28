@@ -370,6 +370,7 @@ func (s SelectorConfig) EffectiveMode() string {
 // QuotaConfig holds Quota Gate and usage snapshot settings.
 type QuotaConfig struct {
 	Cooldown          CooldownConfig `yaml:"cooldown"`
+	Requeue           RequeueConfig  `yaml:"requeue"`
 	UsageFile         string         `yaml:"usage_file"`
 	UsageFormat       string         `yaml:"usage_format"`
 	StaleAfter        string         `yaml:"stale_after"`
@@ -713,6 +714,7 @@ type AgentConfig struct {
 // PoolConfig defines a quota pool.
 type PoolConfig struct {
 	Cooldown    CooldownConfig `yaml:"cooldown"`
+	Requeue     RequeueConfig  `yaml:"requeue"`
 	Provider    string         `yaml:"provider"`
 	Unmeasured  bool           `yaml:"unmeasured"`
 	ShortWindow *bool          `yaml:"short_window"`
@@ -812,6 +814,9 @@ func (c *Config) Validate() error {
 
 	var errs []error
 	if err := c.validateCooldown(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := c.validateRequeue(); err != nil {
 		errs = append(errs, err)
 	}
 

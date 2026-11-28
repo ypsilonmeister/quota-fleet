@@ -232,6 +232,14 @@ func (w *windowsLauncher) Launch(ctx context.Context, host config.HostConfig, jo
 		psExpr(promptPath), psExpr(promptB64),
 		psExpr(runCmdPath), psExpr(scriptB64),
 	)
+	// A rate-limit re-run keeps the previous logs and drops this step's stale verdict first.
+	prep, err := windowsRetryPrepStatements(winWorkdir, winRunDir, job)
+	if err != nil {
+		return LaunchInfo{}, err
+	}
+	if len(prep) > 0 {
+		stagePS = strings.Join(prep, "; ") + "; " + stagePS
+	}
 	stageRes, err := w.transport.Run(ctx, host, wrapPowerShellCommand(stagePS))
 	if err != nil {
 		return LaunchInfo{}, fmt.Errorf("stage windows prompt.txt and agent-run.cmd: %w", err)
