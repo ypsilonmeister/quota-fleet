@@ -25,6 +25,8 @@ api:
       scopes: [read, register]
 ```
 
+新規の `quota-fleet init` は `coordinator`（全スコープ）と `watch`（read のみ）を生成する。トークン値は設定ファイルにのみ書き込む。
+
 - `api.tokens` が空なら従来どおり `api.token` のみで動く（既存の本番・自動化は無変更で継続）。
 - トークン値の比較は従来どおり constant-time で行う。値そのものはログ・応答に出さない。
 - 名前の重複、スコープ名の typo は起動時にエラーにする（黙って読み飛ばさない）。

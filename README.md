@@ -173,20 +173,16 @@ preceded the Go implementation here ([full case study](docs/05-case-study.md)):
    ./quota-fleet init
    ```
    `quota-fleet init` writes a minimal `fleet.yaml` (mode `0600`) with a
-   generated `instance_id` and a single Bearer token in `api.token`. That older
-   form is still accepted and has every scope. Use named tokens
-   (`api.tokens`, [docs/12](docs/12-api-tokens.md)) instead: replace the
-   `token:` line under `api:` with a list like this, giving each client only the
-   scopes it needs.
-   ```yaml
-   api:
-     listen: "127.0.0.1:8737"
-     tokens:
-       - name: coordinator
-         token: "<random value>"   # e.g. from: openssl rand -hex 32
-         scopes: [read, register, operate]
-     require_auth: true
-   ```
+   generated `instance_id`, API authentication enabled, and two named bearer
+   tokens in `api.tokens` ([docs/12](docs/12-api-tokens.md)). Each token value
+   is generated independently and written only to the config file.
+
+   - `coordinator` has every scope (`read`, `register`, `operate`, `worker`,
+     and `agents`).
+   - `watch` has only the `read` scope.
+
+   Existing configurations with a single `api.token` are still accepted.
+
    Then start the server:
    ```bash
    ./quota-fleet serve
