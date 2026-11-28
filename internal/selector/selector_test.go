@@ -117,6 +117,23 @@ func TestSelectAllExhaustedKeepsFirstCandidateForGate(t *testing.T) {
 	}
 }
 
+// Issue #42: the Selector shares the Gate's reading of a window whose reset has passed.
+func TestSelectTreatsExpiredWindowAsHealthyLikeGate(t *testing.T) {
+	past, future := now.Add(-time.Hour), now.Add(time.Hour)
+	expired := pool(50, 0)
+	expired.ShortResetAt = &past
+	s := snap(map[string]quota.PoolSnapshot{"codex": expired, "claude": pool(50, 50), "agy-gemini": pool(50, 50)})
+	if got := Select(input(RoleImplement, WeightStandard, s)); got.Pool != quota.PoolCodex || got.Fallback {
+		t.Errorf("expired window: got %+v, want codex chosen as healthy", got)
+	}
+
+	expired.ShortResetAt = &future
+	s.Pools["codex"] = expired
+	if got := Select(input(RoleImplement, WeightStandard, s)); got.Pool != quota.PoolAgyGemini {
+		t.Errorf("running window: got %+v, want codex excluded", got)
+	}
+}
+
 func TestDefaults(t *testing.T) {
 	d := Defaults("", "", "", nil)
 	if d != DefaultCandidate {
